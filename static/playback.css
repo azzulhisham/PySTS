@@ -1,0 +1,475 @@
+body { 
+    margin: 0; 
+    padding: 0; 
+}
+
+#map { 
+    position: absolute; 
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    top: 0; 
+    bottom: 0; 
+    width: 100%; 
+    z-index: -1;
+}
+
+navbar {
+    position: absolute;
+    display: flex;
+    flex-direction: column;
+    width: 40px;
+    height: 40px;
+    background-color: #343533;
+    margin: 10px;
+    border-radius: 5px;
+    box-shadow: 5px 5px 8px rgba(255,255,255,0.3);
+    overflow: hidden;
+    opacity: 0.8;
+    transition: width 0.5s , height 0.5s;
+    z-index: 99999;
+}
+
+#menubtn {
+    background-image: url("/static/arrow-turn-down-solid.svg");
+    height: 30px;
+    width: 30px;
+    background-position: center center;
+    margin-top: 5px;
+    margin-left: 5px;
+    background-color: blueviolet;
+    color: white;
+    outline: none;
+    border: none;
+    border-radius: 5px;
+    box-shadow: 0px 0px 8px rgba(255,255,255,0.5);
+    cursor: pointer;
+    padding: 6px;
+    transition: transform 1s; 
+}
+
+.menuActive {
+    height: 95vh;
+    width: 100px;
+}
+
+.menuRotate {
+    transform: rotate(-180deg);
+}
+
+#nav--bth {
+    display: flex;
+    flex-direction: column;
+    margin: 10px;
+    margin-top: 30px;
+    opacity: 1;
+}
+
+#nav--bth > button, #logoutbtn {
+    background-color: black;
+    color: rgb(198, 172, 254);
+    outline: none;
+    border: none;
+    box-shadow: 0px 0px 3px rgba(255,255,255,0.5);
+    margin: 3px;
+    min-height: 40px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+#nav--bth > button:hover, #logoutbtn:hover, .popup-btn:hover {
+    box-shadow: 0px 0px 8px rgba(225, 165, 0, 1.0);
+}
+
+navbar #logout--bth {
+    height: 70vh;
+    display: flex;
+    align-items: flex-end;
+}
+
+#logoutbtn {
+    margin-left: 13px;
+    width: 75px;
+    margin-bottom: 10px;
+}
+
+.playback-popup {
+    height: 200px;
+    width: 400px;
+    position: fixed;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    position: relative;
+    background-color: #343533;
+    color: white;
+    border-radius: 10px;
+    box-shadow: 5px 5px 8px rgba(255,255,255,0.3);
+    overflow: hidden; 
+    padding: 20px;
+    top: 30%;
+    display: flex;
+    flex-direction: column;
+    opacity: 1;
+    transition: all 0.7s;
+}
+
+h2 {
+    font-size: 30px;
+    margin: 10px 0;
+    font-family: sans-serif;
+    color: rgb(198, 172, 254);
+}
+
+label {
+    color: rgb(198, 172, 254);
+    font-family: sans-serif;
+    margin-top: 10px;
+    font-size: 18px;
+}
+
+.popup-btn {
+    background-color: black;
+    color:rgb(198, 172, 254);
+    padding: 10px;
+    font-size: 20px;
+    cursor: pointer;
+    border: none;
+    outline: none;
+    border-radius: 5px;
+}
+
+.input {
+    border: 2px solid;
+    padding: 10px;
+    margin: 10px 0;
+    font-size: 20px;
+    text-align: center;
+    border-radius: 5px;
+}
+
+.input::placeholder {
+    color: rgb(246, 207, 125);
+}
+
+.close-icon {
+    position: absolute;
+    right: 20px;
+    cursor: pointer;
+}
+
+.close-icon:hover {
+    color: rgb(109, 42, 255);;
+}
+
+.playback-popup-active {
+    visibility: hidden;
+    opacity: 0;
+    top: 10%;
+}
+
+.playback-slider {
+    height: 80px;
+    width: 70%;
+    left: 50%;
+    margin-left: 60px;
+    transform: translateX(-50%);
+    z-index: 100;
+    position: absolute;
+    background-color: #343533;
+    color: white;
+    border-radius: 10px;
+    box-shadow: 5px 5px 8px rgba(255,255,255,0.3);
+    overflow: hidden; 
+    padding: 20px;
+    bottom: 25px;
+    display: flex;
+    flex-direction: column;
+    opacity: 0.8;
+    transition: all 0.7s;
+}
+
+.playback-slider input {
+    position: relative;
+    top: -20px;
+    margin: 0%;
+}
+
+#slider-title {
+    position: relative;
+    top: -15px;
+}
+
+#time-label {
+    box-sizing: border-box;
+    position: relative;
+    top: -10px;
+    margin: 0%;
+    padding: 10px;
+    width: 100%;
+    background-color: rgb(187, 187, 187);
+    color: rgb(61, 61, 61);
+    display: flex;
+    justify-content: space-between;
+}
+
+#time-label span {
+    position: relative;
+    top: -8px
+}
+
+.playback-slider-active {
+    visibility: hidden;
+    opacity: 0;
+    left: 300%;
+}
+
+#slider-title {
+    color: rgb(198, 172, 254);
+}
+
+
+#marker-blue {
+    background-image: url('/static/image-blue.svg');
+    background-size: cover;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+  }  
+
+  #marker-green {
+    background-image: url('/static/image-green.svg');
+    background-size: cover;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+  } 
+
+  #marker-red {
+    background-image: url('/static/image-red.svg');
+    background-size: cover;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+  } 
+
+  #marker-round {
+    background-image: url('/static/image-round.svg');
+    background-size: cover;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    cursor: pointer;
+  } 
+
+
+/*
+  Radical popup menu
+*/
+/* nav {
+    position: absolute;
+    top: 280px;
+    right: 300px;
+} */
+
+nav .nav-content {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-content .toggle-btn,
+.nav-content span {
+    height: 30px;
+    width: 30px;
+    background-color: #343533;
+    color: rgb(198, 172, 254);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    box-shadow: 0px 0px 20px rgba(0, 0, 0, 0.3);
+}
+
+.nav-content .toggle-btn {
+    z-index: 1000;
+    cursor: pointer;
+    transform: rotate(225deg);
+    transition: all 0.5s;
+    opacity: 0;
+}
+
+.nav-content .toggle-btn.open {
+    transform: rotate(0deg);
+}
+
+.nav-content span {
+    position: absolute;
+    transition: all 0.5s ease-in;
+    opacity: 0;
+    z-index: 999;
+}
+
+nav.open .nav-content span {
+    transform: rotate(calc(var(--i) * (360deg/12))) translateY(80px);
+    opacity: 1;
+}
+
+.nav-content span i {
+    transform: rotate(calc(var(--i) * (360deg/ -12)));
+    opacity: 1;
+    transition: 0.3s;
+}
+
+.nav-content span:hover i {
+    opacity: 1;
+}
+
+.nav-content span:hover {
+    box-shadow: 0px 0px 30px rgba(255,255,255,1.0);
+}
+
+.vessel-info {
+    position: absolute;
+    left: -300px;
+    top: 20px;
+    color: rgb(198, 172, 254);
+    width: 300px;
+    height: 500px;
+    background-color: #343533;
+    border-radius: 10px;
+    padding: 20px;
+    opacity: 0;
+    transition: 0.6s all;
+
+}
+
+.vessel-info img {
+    position: relative;
+    width: 300px;
+    image-rendering: auto;
+
+}
+
+.detail-info {
+    margin-top: 30px;
+    background-color: #404140;
+    border-radius: 10px;
+    padding-top: 10px;
+    padding-bottom: 10px;
+}
+
+.detail-info div {
+    margin: 8px;
+}
+
+.detail-info span {
+    font-size: medium
+}
+
+.detail-info label {
+    font-size: small;
+    display: inline-block;
+    width: 100px;
+}
+
+.vessel-info.open {
+    opacity: 1;
+    transform: translateX(420px);
+}
+
+
+/* .vessels-on-sea {
+    position: relative;
+    top: 5px;
+    height: 20px;
+    width: 10px;
+    margin: auto auto;
+} */
+
+/* @media (max-height: 1368px){
+    navbar #logout--bth {
+        height: 78vh;
+    }
+}
+
+@media (max-height: 1368px){
+    navbar #logout--bth {
+        height: 76vh;
+    }
+}
+
+@media (max-height: 1024px){
+    navbar #logout--bth {
+        height: 73vh;
+    }
+}
+
+@media (max-height: 915px){
+    navbar #logout--bth {
+        height: 70vh;
+    }
+}
+
+@media (max-height: 914px){
+    navbar #logout--bth {
+        height: 70vh;
+    }
+}
+
+@media (max-height: 914px){
+    navbar #logout--bth {
+        height: 69vh;
+    }
+}
+
+@media (max-height: 800px){
+    navbar #logout--bth {
+        height: 67vh;
+    }
+}
+
+@media (max-height: 740px){
+    navbar #logout--bth {
+        height: 65vh;
+    }
+}
+
+@media (max-height: 720px){
+    navbar #logout--bth {
+        height: 64vh;
+    }
+}
+
+@media (max-height: 667px){
+    navbar #logout--bth {
+        height: 62vh;
+    }
+}
+
+@media (max-height: 653px){
+    navbar #logout--bth {
+        height: 60vh;
+    }
+}
+
+@media (max-height: 600px){
+    navbar #logout--bth {
+        height: 56vh;
+    }
+}
+
+@media (max-height: 500px){
+    navbar #logout--bth {
+        height: 40vh;
+    }
+}
+
+@media (max-height: 400px){
+    navbar #logout--bth {
+        height: 30vh;
+    }
+} */

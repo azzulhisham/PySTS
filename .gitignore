@@ -1,0 +1,9 @@
+.ipynb_checkpoints/
+venv/
+
+backend/__pycache__/
+st_app/__pycache__/
+
+
+data/
+

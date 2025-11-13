@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PiNC NAVIGATION</title>
+    <link rel="stylesheet" href="{{url_for('static', filename='playback.css')}}">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css" integrity="sha512-z3gLpd7yknf1YoNbCzqRKc4qyor8gaKU1qmn+CShxbuBusANI9QpRohGBreCFkKxLhei6S9CQXFEbbKuqLg0DA==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.14.1/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.14.1/mapbox-gl.js"></script>
+</head>
+<body>
+    <div id="map">
+        <div class="playback-popup playback-popup-active" id="playback-popup">
+            <h2>Playback</h2>
+            <label for="mmsi">MMSI</label>
+            <input id="mmsi"
+              type="text"
+              name="mmsi"
+              class="input"
+              placeholder="Enter MMSI No."
+            />
+            <button class="popup-btn" id="seek">Go...</button>
+            <div class="close-icon" id="closePlaybackPopup">
+              <i class="fas fa-times fa-2x"></i>
+            </div>
+        </div>
+
+        <div class="playback-slider playback-slider-active" id="playback-slider">
+            <h3 id="slider-title"><span id="slider-mmsi">Time Slider</span> : <span id="slider-value">0</span></h3>
+            <div id="time-label">
+                <span id="slider-time1">00:00:00</span>
+                <span id="slider-time2">00:00:00</span>
+                <span id="slider-time3">00:00:00</span>
+            </div>
+            <input type="range" id="slider-input" min="0" max="10000" steps="1" />
+
+            <div class="close-icon" id="closePlaybackSlider">
+                <i class="fas fa-times fa-2x"></i>
+            </div>
+        </div>
+
+        <!-- <nav>
+            <div class="nav-content">
+                <div class="toggle-btn">
+                    <i class="fa-solid fa-plus"></i>
+                </div>    
+                
+                <span style="--i:1;"><i class="fa-solid fa-earth-americas"></i></span>
+                <span style="--i:2;"><i class="fa-solid fa-database"></i></i></span>
+                <span style="--i:3;"><i class="fa-solid fa-calendar-day"></i></span>
+                <span style="--i:4;"><i class="fa-solid fa-magnifying-glass"></i></span>
+                <span style="--i:5;"><i class="fa-regular fa-images"></i></span>
+                <span style="--i:6;"><i class="fa-solid fa-timeline"></i></span>
+                <span style="--i:7;"><i class="fa-solid fa-expand"></i></span>
+                <span style="--i:8;"><i class="fa-solid fa-play"></i></span>
+                <span style="--i:9;"><i class="fa-solid fa-clock-rotate-left"></i></span>
+                <span style="--i:10;"><i class="fa-solid fa-gears"></i></span>
+                <span style="--i:11;"><i class="fa-solid fa-map-location-dot"></i></span>
+                <span style="--i:12;"><i class="fa-regular fa-floppy-disk"></i></span>
+            </div>
+        </nav>         -->
+    </div>
+
+    <navbar class="">
+        <button id="menubtn"><span class="fa-solid fa-arrow-turn-down"></span></button>
+    
+        <div id="nav--bth">
+            <button id="dashboard-btn">Dashboard</button>
+            <button id="ves-mon-btn">Vessel Monitor</button>
+            <button id="weather-btn">Weather</button>  
+            <button id="playbackGps-btn">GPS</button>         
+        </div>
+
+        <div id="logout--bth">
+            <button id="logoutbtn">Logout</button> 
+        </div>
+    </navbar>
+
+    <div class="vessel-info">
+        <div class="close-icon" id="closeVesselInfo">
+            <i class="fas fa-times fa-2x"></i>
+        </div>
+
+        <h4>MMSI<span id="det-mmsi-title"></span></h4>
+        <img src="{{url_for('static', filename='LANGKAWI_EKSPRES_I.jpeg')}}" />
+        <hr>
+        <div class="detail-info">
+            <div>
+                <label for="shiptype">Ship Type</label>
+                <span name="shiptype" id="det-shiptype">: 1</span>
+            </div>
+
+            <div>
+                <label for="shipname">Ship Name</label>
+                <span name="shipname" id="det-shipname">: Langkawi</span>
+            </div>
+
+            <div>
+                <label for="mmsi">MMSI</label>
+                <span name="mmsi" id="det-mmsi">: 533003500</span>
+            </div>
+
+            <div>
+                <label for="imo">IMO</label>
+                <span name="imo" id="det-imo">: 533003500</span>
+            </div>
+
+            <div>
+                <label for="callsign">Call Sign</label>
+                <span name="callsign" id="det-callsign">: 533003500</span>
+            </div>            
+        </div>
+    </div>
+    
+    <script src="{{url_for('static', filename='playback.js')}}"></script>
+</body>
+</html>

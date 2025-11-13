@@ -1,0 +1,3 @@
+# -----  Streamlit Application  -----
+# run the streamlit application using the following command
+streamlit run ./st_app/app.py --server.port 8080

@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PiNC NAVIGATION</title>
+
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Roboto:wght@100;300&display=swap" rel="stylesheet">  
+    <link rel="stylesheet" href="{{url_for('static', filename='login.css')}}">
+</head>
+<body>
+    <div class="wrapper">
+        <nav>
+            <div class="container">
+                <!-- <img src="{{url_for('static', filename='foundry360.jpg')}}" class="logo" > -->
+                <h3>FOUNDRY360</h3>
+            </div>
+        </nav> 
+    </div>
+
+    <div class="form-container-wrapper">
+        <div class="form-container">
+            <div class="registration-container" id="register">
+                <div class="top">
+                    <span>Have an account? <a href="#" onclick="displogin()">Login</a></span>
+                    <header>Sign Up</header>
+                </div>
+                <div class="two-forms">
+                    <div class="input-box">
+                        <input type="text" class="input-field" placeholder="Firstname">
+                    </div>
+                    <div class="input-box">
+                        <input type="text" class="input-field" placeholder="Lastname">
+                    </div>
+                </div>
+                <div class="input-box">
+                    <input type="email" class="input-field" placeholder="Email">
+                </div>
+                <div class="input-box">
+                    <input type="password" class="input-field" placeholder="Password">
+                </div>
+                <div class="input-box">
+                    <input type="submit" class="submit" value="Register">
+                </div>
+                <div class="two-col">
+                    <div class="one">
+                        <input type="checkbox" id="register-check">
+                        <label for="register-check"> Remember Me</label>
+                    </div>
+                    <div class="two">
+                        <label><a href="#">Terms & conditions</a></label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="login-container" id="login">
+                <div class="top">
+                    <span>Don't have an account? <a href="#" onclick="dispregister()">Sign Up</a></span>
+                    <header>Sign In</header>
+                </div>
+                <div class="input-box">
+                    <input type="email" class="input-field" placeholder="Email" id="username">
+                </div>
+                <div class="input-box">
+                    <input type="password" class="input-field" placeholder="Password" id="userpwd">
+                </div>
+                <div class="input-box">
+                    <input type="submit" class="submit" value="Sign In" id="usersignin">
+                </div>
+                <div class="two-col">
+                    <div class="one">
+                        <input type="checkbox" id="register-check">
+                        <label for="register-check"> Remember Me</label>
+                    </div>
+                    <div class="two">
+                        <label><a href="#">Forgot Password?</a></label>
+                    </div>
+                </div>
+            </div>            
+        </div>
+    </div>
+
+    <script src="{{url_for('static', filename='login.js')}}"></script>
+</body>
+</html>
