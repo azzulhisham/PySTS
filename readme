@@ -1,3 +1,56 @@
+# activate virtual environment
+source venv/bin/activate
+
+
 # -----  Streamlit Application  -----
 # run the streamlit application using the following command
 streamlit run ./st_app/app.py --server.port 8080
+
+
+# -----  Web Application (backend)  -----
+python3 socket_server.py 
+
+
+# -----  Web Application (frontend)  -----
+python3 app.py
+
+
+
+function destinationPoint(latDeg, lonDeg, distanceM, bearingDeg) {
+  const R = 6378137.0; // WGS84 Earth radius in meters
+  const lat1 = toRadians(latDeg);
+  const lon1 = toRadians(lonDeg);
+  const theta = toRadians(bearingDeg);
+  const dOverR = distanceM / R;
+
+  const lat2 = Math.asin(
+    Math.sin(lat1) * Math.cos(dOverR) +
+    Math.cos(lat1) * Math.sin(dOverR) * Math.cos(theta)
+  );
+
+  const lon2 = lon1 + Math.atan2(
+    Math.sin(theta) * Math.sin(dOverR) * Math.cos(lat1),
+    Math.cos(dOverR) - Math.sin(lat1) * Math.sin(lat2)
+  );
+
+  return {
+    latitude: toDegrees(lat2),
+    longitude: toDegrees(lon2)
+  };
+}
+
+function toRadians(deg) {
+  return deg * Math.PI / 180;
+}
+
+function toDegrees(rad) {
+  return rad * 180 / Math.PI;
+}
+
+// Example usage:
+const startLat = 3.1390;   // Kuala Lumpur latitude
+const startLon = 101.6869; // Kuala Lumpur longitude
+const result = destinationPoint(startLat, startLon, 300, 30);
+
+console.log(result);
+// { latitude: ..., longitude: ... }

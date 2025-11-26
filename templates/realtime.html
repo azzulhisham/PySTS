@@ -1,0 +1,10 @@
+{% extends "layout.html" %}
+{% block content %}
+    <div id="map">
+        <input id="inp_mmsi" type="hidden" value="{{mmsi}}" />
+        <input id="inp_startDateTime" type="hidden" value="{{startDateTime}}" />  
+    </div>
+
+    <script src="{{url_for('static', filename='realtime.js')}}"></script>
+{% endblock content %}
+

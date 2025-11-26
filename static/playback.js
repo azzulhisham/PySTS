@@ -227,6 +227,37 @@ map.on('load', ()=> {
 });
 
 
+// Listen for zoom or move events
+map.on('zoomend', () => {
+    const zoom = map.getZoom();
+    const center = map.getCenter();
+    const bounds = map.getBounds();
+  
+    console.log('Zoom level:', zoom);
+    console.log('Center:', center);
+    console.log('Bounds:', bounds);
+  });
+  
+  map.on('moveend', () => {
+    const zoom = map.getZoom();
+    const center = map.getCenter();
+    const bounds = map.getBounds();
+  
+    console.log('Zoom level:', zoom);
+    console.log('Center:', center);
+    console.log('Bounds:', bounds);
+  });
+
+map.on('mousemove', (e) => {
+  // e.lngLat contains the longitude and latitude of the mouse position
+  const lng = e.lngLat.lng;
+  const lat = e.lngLat.lat;
+
+  console.log('Longitude:', lng, 'Latitude:', lat);
+
+
+});
+
 const navbar = document.querySelector('navbar')
 const menuBtn = document.getElementById("menubtn")
 const playbackPopup = document.getElementById('playback-popup')

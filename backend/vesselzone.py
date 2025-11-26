@@ -186,7 +186,9 @@ def upsert_ais_position(data):
         gc.collect()  
 
     except:
-        pass
+        logging.info(f'Error reading database....')
+        return 0
+        
 
 
     with Session(get_pgEngine()) as session:
@@ -206,19 +208,12 @@ def upsert_ais_position(data):
                 try:
                     existing_vessel_zone = next(filter(lambda x: x["mmsi"] == i['mmsi'] and x["zone"] == idx and pd.isnull(x['tsOut']), current_vessels_zone), None)      
                 except:
-                    pass
+                    continue
 
 
                 if in_zone:
                     if existing_vessel_zone:
                         logging.info(f"[UPDATE] :: vessel {i['mmsi']} in zone {existing_vessel_zone['zone']}")
-                        
-                        if pd.isnull(existing_vessel_zone['tsOut']): 
-                            if datetime.now() - existing_vessel_zone['tsDetected'] > timedelta(hours=6) and (existing_vessel_zone['zone'] == 10 or existing_vessel_zone['zone'] == 11):
-                                existing_vessel_zone['tsOut'] = datetime.now() 
-                            else:
-                                existing_vessel_zone['tsOut'] = None 
-                        
                         payload = existing_vessel_zone.copy()      #.model_dump()
 
                         payload["longitude"] = i['longitude']
@@ -277,12 +272,70 @@ def upsert_ais_position(data):
         if len(items_to_insert) != 0: session.bulk_insert_mappings(Ais_VesselInRestrictZone, items_to_insert)
         if len(items_to_update) != 0 or len(items_to_insert) != 0: session.commit() 
 
-        logging.info(f'Upserting data done....')
-        
-        del data
-        gc.collect()
+    
+    logging.info(f'Upserting data done....')    
 
-        return 0            
+    del data
+    gc.collect()
+
+    return 0            
+
+
+def chk_invalid_data():
+    logging.info(f'Clearing invalid data....')
+
+    current_vessels_inrec = []
+
+    query = text("""
+        SELECT *
+        FROM public.ais_position
+        WHERE mmsi in (
+            SELECT mmsi
+            FROM public.ais_vesselinrestrictzone
+            where "tsOut" is null
+            AND "tsDetected" < NOW() - INTERVAL '5 days'
+        )
+    """)
+
+    try:
+        df = pd.read_sql(query, con=get_pgEngine())  
+        current_vessels_inrec = df.to_dict(orient='records')   
+
+        for idx, itm in enumerate(current_vessels_inrec):
+            rslt = duckdb.sql(f'''
+                SELECT ST_Within(ST_Point({itm['longitude']}, {itm['latitude']}), ST_GeomFromGeoJSON({outter_restricted_region})) as within_area
+            ''').fetchall()       
+
+            in_zone = rslt[0][0]  
+
+            if not in_zone:
+                with get_pgEngine().connect() as conn:
+                    # Write your raw SQL UPDATE statement
+                    update_qry = text(f"""
+                        UPDATE public.ais_vesselinrestrictzone
+                        SET "tsOut" = now()   
+                        WHERE mmsi = :mmsi
+                    """)
+
+                    # Execute the statement with parameters
+                    conn.execute(update_qry, {
+                        "mmsi": itm['mmsi']
+                    })
+
+                    # Commit the transaction
+                    print(f'Updating data for mmsi: {itm["mmsi"]}')
+                    conn.commit()  
+
+
+        del df
+        gc.collect()  
+
+    except:
+        pass
+
+
+    return 0
+
 
 
 if __name__ == "__main__":
@@ -298,6 +351,8 @@ if __name__ == "__main__":
             del vessels_data
             gc.collect()
 
+            chk_invalid_data()
+
         except KeyboardInterrupt:
             runFlg = False
 
@@ -308,7 +363,7 @@ if __name__ == "__main__":
         logging.info(f'System sleep....')
         time.sleep(10)     
        
-
+    
 
 
 

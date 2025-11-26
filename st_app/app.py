@@ -255,7 +255,7 @@ def get_ais_position_data():
 
     # query all vessel on its latest position
     query = text("""
-        SELECT p.*, s."shipType", s."shipTypeDesc", s."shipName", s."callsign", s."imo",
+        SELECT p.*, s."shipType", s."shipTypeDesc", s."shipName", s."callsign", s."imo", s.to_bow, s.to_stern, s.to_port, s.to_starboard, s."destination",
 			CASE
 				WHEN s."shipType" >= 40 AND s."shipType" < 50 THEN 'hs_craft'
 				WHEN s."shipType" >= 50 AND s."shipType" < 60 THEN 'tug'
@@ -263,15 +263,37 @@ def get_ais_position_data():
 				WHEN s."shipType" >= 70 AND s."shipType" < 80 THEN 'cargo'
 				WHEN s."shipType" >= 80 AND s."shipType" < 90 THEN 'tanker'
 				ELSE 'others'
-			END AS "shipcatagory"
+			END AS "shipcatagory",
+            (s.to_bow + s.to_stern) AS length_m,
+            (s.to_port + s.to_starboard) AS beam_m
         FROM public.ais_position p
         LEFT JOIN public.ais_static s on s.mmsi = p.mmsi
         WHERE p.latitude >= :lat_min AND p.latitude <= :lat_max AND p.ts >= :ts_min
-        ORDER BY p."ts"
+            AND p.mmsi != 0
+        --ORDER BY p."ts"
+
+		UNION ALL
+		
+		SELECT p.*, s."shipType", s."shipTypeDesc", s."shipName", s."callsign", s."imo", s.to_bow, s.to_stern, s.to_port, s.to_starboard, s."destination",
+			CASE
+				WHEN s."shipType" >= 40 AND s."shipType" < 50 THEN 'hs_craft'
+				WHEN s."shipType" >= 50 AND s."shipType" < 60 THEN 'tug'
+				WHEN s."shipType" >= 60 AND s."shipType" < 70 THEN 'passenger'
+				WHEN s."shipType" >= 70 AND s."shipType" < 80 THEN 'cargo'
+				WHEN s."shipType" >= 80 AND s."shipType" < 90 THEN 'tanker'
+				ELSE 'others'
+			END AS "shipcatagory",
+            (s.to_bow + s.to_stern) AS length_m,
+            (s.to_port + s.to_starboard) AS beam_m
+        FROM public.ais_positionb p
+        LEFT JOIN public.ais_staticb s on s.mmsi = p.mmsi
+        WHERE p.latitude >= -90 AND p.latitude <= 90 
+            AND p.mmsi != 0
+		ORDER BY "ts"        
     """)
 
     # Define parameters
-    params = {"lat_min": -90, "lat_max": 90, "ts_min": datetime.now(UTC) - timedelta(days=5)}
+    params = {"lat_min": -90, "lat_max": 90, "ts_min": datetime.now(UTC) - timedelta(days=10)}
 
     df = pd.read_sql(query, con=get_pgEngine(), params=params)  
 
@@ -289,7 +311,7 @@ def get_ais_position_data():
 
     # query all vessel in restricted area for more that 2 hours
     query = text("""
-        SELECT p.*, s."shipType", s."shipTypeDesc", s."shipName", s."callsign", s."imo",
+        SELECT p.*, s."shipType", s."shipTypeDesc", s."shipName", s."callsign", s."imo", s.to_bow, s.to_stern, s.to_port, s.to_starboard, s."destination",
             CASE
                 WHEN s."shipType" >= 40 AND s."shipType" < 50 THEN 'hs_craft'
                 WHEN s."shipType" >= 50 AND s."shipType" < 60 THEN 'tug'
@@ -297,18 +319,36 @@ def get_ais_position_data():
                 WHEN s."shipType" >= 70 AND s."shipType" < 80 THEN 'cargo'
                 WHEN s."shipType" >= 80 AND s."shipType" < 90 THEN 'tanker'
                 ELSE 'others'
-            END AS "shipcatagory"    
+            END AS "shipcatagory",
+            CASE
+                WHEN p.cog = 360 THEN 0
+                ELSE p.cog
+            END AS cog_v,            
+            (s.to_bow + s.to_stern) AS length_m,
+            (s.to_port + s.to_starboard) AS beam_m,
+            CASE
+                WHEN NOW() - "tsCurrent" > INTERVAL '2.0 hours' THEN 50
+                WHEN NOW() - "tsCurrent" < INTERVAL '0.5 hours' THEN 10
+                WHEN NOW() - "tsCurrent" < INTERVAL '0.1 hours' THEN 2.5
+                ELSE 30
+            END AS ts_margin,
+            CASE
+                WHEN NOW() - "tsCurrent" > INTERVAL '1.0 hours' THEN 1.0
+                WHEN NOW() - "tsCurrent" < INTERVAL '0.5 hours' THEN 0.5
+                WHEN NOW() - "tsCurrent" < INTERVAL '0.1 hours' THEN 0.3
+                ELSE 1
+            END AS ts_sog                              
         FROM public.ais_vesselinrestrictzone p
         LEFT JOIN public.ais_static s on s.mmsi = p.mmsi
         WHERE "tsOut" IS NULL AND "latitude" >= :lat_min AND "latitude" <= :lat_max
-            AND NOW() - "tsDetected" > INTERVAL '0.5 hours'
+            AND NOW() - "tsCurrent" > INTERVAL '0.5 hours'
             --AND ("navStatus" = 1)
             AND ("sog" <= 0.7)
         ORDER BY "tsDetected"      
     """)
 
     # Define parameters
-    params = {"lat_min": -90, "lat_max": 90,}
+    params = {"lat_min": -90, "lat_max": 90}
 
     restrict_df = pd.read_sql(query, con=get_pgEngine(), params=params)   
     mmsi_lst = restrict_df['mmsi'].tolist()
@@ -321,17 +361,34 @@ def get_ais_position_data():
         if mmsi not in sts:
             rec = restrict_df[restrict_df['mmsi'] == mmsi]
 
-            if rec.iloc[0]['shipType'] >= 80 and rec.iloc[0]['shipType'] < 90:
+            if rec.iloc[0]['shipType'] >= 80 and rec.iloc[0]['shipType'] < 90: # and rec.iloc[0]['cog'] != 0 and rec.iloc[0]['cog'] != 360:
                 dist_nm = duckdb.sql(f'''
-                    SELECT *
+                    SELECT *, 
+                    CASE
+                        WHEN cog = 360 THEN 0
+                        ELSE cog
+                    END AS cog_v,
+                    ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) AS dist
                     FROM restrict_df
-                    WHERE ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']}))/1852 <= 0.5
+                    WHERE ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) <= CASE
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 30 OR (ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210) THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 30 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 80 THEN beam_m + {rec.iloc[0]['to_stern']}  
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 80 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 110 THEN beam_m + {rec.iloc[0]['to_stern']} 
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 260 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 280 THEN beam_m + {rec.iloc[0]['to_stern']} 
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 300 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 350 THEN beam_m + {rec.iloc[0]['to_stern']}   
+                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 350 THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin                        
+                            ELSE (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
+                        END
                         AND mmsi != {rec.iloc[0]['mmsi']}
-                        AND shipType >= 80 AND shipType < 90
-                        AND sog <= 0.3
+                        AND mmsi != 0
+                        AND sog <= ts_sog
+                        --AND ((shipType >= 70 AND shipType < 80) OR (shipType >= 80 AND shipType < 90))
+                        --AND cog != 0 AND cog != 360
+                        --AND (ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 90 OR ((ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150) AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210))
                 ''').fetchdf()
-
+                
                 if dist_nm.shape[0] > 0:
+                    # print(dist_nm)
                     mmsi_dist_nm = dist_nm['mmsi'].tolist()
                     ts_dist_nm = dist_nm['tsDetected'].tolist()
 
@@ -370,13 +427,16 @@ def get_ais_position_data():
                                 "navStatusDesc": rec.iloc[0]['navStatusDesc'],
                                 "imo": rec.iloc[0]['imo'],
                                 "callsign": rec.iloc[0]['callsign'],
+                                "length_m": rec.iloc[0]['length_m'],
+                                "beam_m": rec.iloc[0]['beam_m'],
                                 "sog": rec.iloc[0]['sog'],
                                 "cog": rec.iloc[0]['cog'],
                                 "longitude": dist_nm['longitude'].mean(),
                                 "latitude": dist_nm['latitude'].mean(),
+                                "destination": rec.iloc[0]['destination'],
                                 "lcltime": (rec.iloc[0]['tsDetected'] + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
                                 "utctime": rec.iloc[0]['tsDetected'].strftime("%Y-%m-%d %H:%M:%S"),
-                                "color": [255, 0, 0, 150],
+                                "color": [255, 0, 0, 150] if rec.iloc[0]['length_m'] == 0 or (dist_nm["length_m"] == 0).any() else ([66, 247, 255, 150] if rec.iloc[0]['length_m'] <= 68 or (dist_nm["length_m"] <= 68).any() else [255, 0, 0, 150]),
                                 "radius": 2000
                             }                        
                         sts_det.append(sts_info)
@@ -477,6 +537,7 @@ def load_streamlit_page():
 
 def show_summary_board():
     counting_data = get_ais_counting_data()
+    show_col1 = True
 
     with st.sidebar:
         with summary_placeholder:
@@ -485,84 +546,84 @@ def show_summary_board():
             df.columns = ['Total']
             st.dataframe(df.iloc[::-1], height=210)
 
+    if show_col1:
+        with col1:
+            card_placeholder.markdown(f"""
+                <br/>
+                <br/>
 
-    with col1:
-        card_placeholder.markdown(f"""
-            <br/>
-            <br/>
-
-            <div class="card card1-color">
-                <div class="card-title">Sector 1</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
-                </div>                    
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector1_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector1_South']}</div>
-                </div>
-            </div>   
-            
-            <div class="card card2-color">
-                <div class="card-title">Sector 2</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
+                <div class="card card1-color">
+                    <div class="card-title">Sector 1</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div>                    
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector1_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector1_South']}</div>
+                    </div>
+                </div>   
+                
+                <div class="card card2-color">
+                    <div class="card-title">Sector 2</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div> 
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector2_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector2_South']}</div>
+                    </div>
                 </div> 
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector2_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector2_South']}</div>
-                </div>
-            </div> 
 
-            <div class="card card3-color">
-                <div class="card-title">Sector 3</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
+                <div class="card card3-color">
+                    <div class="card-title">Sector 3</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div> 
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector3_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector3_South']}</div>
+                    </div>
                 </div> 
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector3_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector3_South']}</div>
-                </div>
-            </div> 
 
-            <div class="card card4-color">
-                <div class="card-title">Sector 4</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
+                <div class="card card4-color">
+                    <div class="card-title">Sector 4</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div> 
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector4_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector4_South']}</div>
+                    </div>
                 </div> 
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector4_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector4_South']}</div>
-                </div>
-            </div> 
 
-            <div class="card card5-color">
-                <div class="card-title">Sector 5</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
+                <div class="card card5-color">
+                    <div class="card-title">Sector 5</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div> 
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector5_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector5_South']}</div>
+                    </div>
                 </div> 
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector5_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector5_South']}</div>
-                </div>
-            </div> 
 
-            <div class="card card6-color">
-                <div class="card-title">Sector 6</div>
-                <div class="card-det">
-                    <div class="card-label">North</div>
-                    <div class="card-label">South</div>
-                </div> 
-                <div class="card-det">
-                    <div class="card-text">{counting_data[0]['Sector6_North']}</div>
-                    <div class="card-text">{counting_data[0]['Sector6_South']}</div>
-                </div>
-            </div>                                                                                                       
-        """, unsafe_allow_html=True)    
+                <div class="card card6-color">
+                    <div class="card-title">Sector 6</div>
+                    <div class="card-det">
+                        <div class="card-label">North</div>
+                        <div class="card-label">South</div>
+                    </div> 
+                    <div class="card-det">
+                        <div class="card-text">{counting_data[0]['Sector6_North']}</div>
+                        <div class="card-text">{counting_data[0]['Sector6_South']}</div>
+                    </div>
+                </div>                                                                                                       
+            """, unsafe_allow_html=True)    
 
 
 
@@ -970,11 +1031,14 @@ if not show_chart:
                     Vessel Type Desc: {shipTypeDesc}<br/>
                     IMO: {imo}<br/>
                     CallSign: {callsign}<br/>
+                    Length: {length_m}<br/>
+                    Beam: {beam_m}<br/>
                     Lat: {latitude}<br/>
                     Lon: {longitude}<br/>
                     Sog: {sog}<br/>
                     Cog: {cog}<br/>
                     Status: {navStatusDesc}<br/>
+                    Destination: {destination}<br/>
                     Last Seen (lcl): {lcltime}<br/>
                     Last Seen (utc): {utctime}<br/>
 
