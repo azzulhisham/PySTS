@@ -357,91 +357,95 @@ def get_ais_position_data():
     sts_det = []
 
     # Intelligent Detection
-    for mmsi in mmsi_lst:
-        if mmsi not in sts:
-            rec = restrict_df[restrict_df['mmsi'] == mmsi]
+    try:
+        for mmsi in mmsi_lst:
+            if mmsi not in sts:
+                rec = restrict_df[restrict_df['mmsi'] == mmsi]
 
-            if rec.iloc[0]['shipType'] >= 80 and rec.iloc[0]['shipType'] < 90: # and rec.iloc[0]['cog'] != 0 and rec.iloc[0]['cog'] != 360:
-                dist_nm = duckdb.sql(f'''
-                    SELECT *, 
-                    CASE
-                        WHEN cog = 360 THEN 0
-                        ELSE cog
-                    END AS cog_v,
-                    ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) AS dist
-                    FROM restrict_df
-                    WHERE ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) <= CASE
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 30 OR (ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210) THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 30 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 80 THEN beam_m + {rec.iloc[0]['to_stern']}  
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 80 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 110 THEN beam_m + {rec.iloc[0]['to_stern']} 
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 260 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 280 THEN beam_m + {rec.iloc[0]['to_stern']} 
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 300 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 350 THEN beam_m + {rec.iloc[0]['to_stern']}   
-                            WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 350 THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin                        
-                            ELSE (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
-                        END
-                        AND mmsi != {rec.iloc[0]['mmsi']}
-                        AND mmsi != 0
-                        AND sog <= ts_sog
-                        --AND ((shipType >= 70 AND shipType < 80) OR (shipType >= 80 AND shipType < 90))
-                        --AND cog != 0 AND cog != 360
-                        --AND (ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 90 OR ((ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150) AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210))
-                ''').fetchdf()
-                
-                if dist_nm.shape[0] > 0:
-                    # print(dist_nm)
-                    mmsi_dist_nm = dist_nm['mmsi'].tolist()
-                    ts_dist_nm = dist_nm['tsDetected'].tolist()
+                if rec.iloc[0]['shipType'] >= 80 and rec.iloc[0]['shipType'] < 90: # and rec.iloc[0]['cog'] != 0 and rec.iloc[0]['cog'] != 360:
+                    dist_nm = duckdb.sql(f'''
+                        SELECT *, 
+                        CASE
+                            WHEN cog = 360 THEN 0
+                            ELSE cog
+                        END AS cog_v,
+                        ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) AS dist
+                        FROM restrict_df
+                        WHERE ST_Distance_Sphere(ST_Point(latitude, longitude), ST_Point({rec.iloc[0]['latitude']}, {rec.iloc[0]['longitude']})) <= CASE
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 30 OR (ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210) THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 30 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 80 THEN beam_m + {rec.iloc[0]['to_stern']}  
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 80 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 110 THEN beam_m + {rec.iloc[0]['to_stern']} 
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 260 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 280 THEN beam_m + {rec.iloc[0]['to_stern']} 
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) > 300 AND ABS(cog_v - {rec.iloc[0]['cog_v']}) < 350 THEN beam_m + {rec.iloc[0]['to_stern']}   
+                                WHEN ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 350 THEN (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin                        
+                                ELSE (beam_m + {rec.iloc[0]['beam_m']})/2 + ts_margin
+                            END
+                            AND mmsi != {rec.iloc[0]['mmsi']}
+                            AND mmsi != 0
+                            AND sog <= ts_sog
+                            --AND ((shipType >= 70 AND shipType < 80) OR (shipType >= 80 AND shipType < 90))
+                            --AND cog != 0 AND cog != 360
+                            --AND (ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 90 OR ((ABS(cog_v - {rec.iloc[0]['cog_v']}) >= 150) AND ABS(cog_v - {rec.iloc[0]['cog_v']}) <= 210))
+                    ''').fetchdf()
+                    
+                    if dist_nm.shape[0] > 0:
+                        # print(dist_nm)
+                        mmsi_dist_nm = dist_nm['mmsi'].tolist()
+                        ts_dist_nm = dist_nm['tsDetected'].tolist()
 
-                    mean_lng = df['longitude'].mean()
-                    mean_lat = df['latitude'].mean()
+                        mean_lng = df['longitude'].mean()
+                        mean_lat = df['latitude'].mean()
 
-                    if mmsi not in sts:
-                        sts.append(mmsi)
-
-
-                    all_not_in_lst = True
-                    all_suspect = True
-
-                    for idx, i in enumerate(mmsi_dist_nm):
-                        suspect_time = (datetime.now() - timedelta(hours=8)) - ts_dist_nm[idx]
-                        
-                        if suspect_time.total_seconds() < 3600:
-                            all_suspect = False
-
-                        if i not in sts:
-                            sts.append(i)
-                        else:
-                            all_not_in_lst = False
+                        if mmsi not in sts:
+                            sts.append(mmsi)
 
 
-                    if all_not_in_lst and all_suspect:
-                        mmsi_dist_nm.append(mmsi)
-                        mmsi_list = sorted(mmsi_dist_nm)
+                        all_not_in_lst = True
+                        all_suspect = True
 
-                        sts_info = {
-                                "mmsi":  "|".join(str(n) for n in mmsi_list),
-                                "mmsi_": rec.iloc[0]['mmsi'],
-                                "shipName": rec.iloc[0]['shipName'],
-                                "shipType": rec.iloc[0]['shipcatagory'],
-                                "shipTypeDesc": rec.iloc[0]['shipTypeDesc'],
-                                "navStatusDesc": rec.iloc[0]['navStatusDesc'],
-                                "imo": rec.iloc[0]['imo'],
-                                "callsign": rec.iloc[0]['callsign'],
-                                "length_m": rec.iloc[0]['length_m'],
-                                "beam_m": rec.iloc[0]['beam_m'],
-                                "sog": rec.iloc[0]['sog'],
-                                "cog": rec.iloc[0]['cog'],
-                                "longitude": dist_nm['longitude'].mean(),
-                                "latitude": dist_nm['latitude'].mean(),
-                                "destination": rec.iloc[0]['destination'],
-                                "lcltime": (rec.iloc[0]['tsDetected'] + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
-                                "utctime": rec.iloc[0]['tsDetected'].strftime("%Y-%m-%d %H:%M:%S"),
-                                "color": [255, 0, 0, 150] if rec.iloc[0]['length_m'] == 0 or (dist_nm["length_m"] == 0).any() else ([66, 247, 255, 150] if rec.iloc[0]['length_m'] <= 68 or (dist_nm["length_m"] <= 68).any() else [255, 0, 0, 150]),
-                                "radius": 2000
-                            }                        
-                        sts_det.append(sts_info)
-                        # print(sts_info)
+                        for idx, i in enumerate(mmsi_dist_nm):
+                            suspect_time = (datetime.now() - timedelta(hours=8)) - ts_dist_nm[idx]
+                            
+                            if suspect_time.total_seconds() < 3600:
+                                all_suspect = False
 
+                            if i not in sts:
+                                sts.append(i)
+                            else:
+                                all_not_in_lst = False
+
+
+                        if all_not_in_lst and all_suspect:
+                            mmsi_dist_nm.append(mmsi)
+                            mmsi_list = sorted(mmsi_dist_nm)
+
+                            sts_info = {
+                                    "mmsi":  "|".join(str(n) for n in mmsi_list),
+                                    "mmsi_": rec.iloc[0]['mmsi'],
+                                    "shipName": rec.iloc[0]['shipName'],
+                                    "shipType": rec.iloc[0]['shipcatagory'],
+                                    "shipTypeDesc": rec.iloc[0]['shipTypeDesc'],
+                                    "navStatusDesc": rec.iloc[0]['navStatusDesc'],
+                                    "imo": rec.iloc[0]['imo'],
+                                    "callsign": rec.iloc[0]['callsign'],
+                                    "length_m": rec.iloc[0]['length_m'],
+                                    "beam_m": rec.iloc[0]['beam_m'],
+                                    "sog": rec.iloc[0]['sog'],
+                                    "cog": rec.iloc[0]['cog'],
+                                    "longitude": dist_nm['longitude'].mean(),
+                                    "latitude": dist_nm['latitude'].mean(),
+                                    "destination": rec.iloc[0]['destination'],
+                                    "lcltime": (rec.iloc[0]['tsDetected'] + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "utctime": rec.iloc[0]['tsDetected'].strftime("%Y-%m-%d %H:%M:%S"),
+                                    "color": [255, 0, 0, 150] if rec.iloc[0]['length_m'] == 0 or (dist_nm["length_m"] == 0).any() else ([66, 247, 255, 150] if rec.iloc[0]['length_m'] <= 68 or (dist_nm["length_m"] <= 68).any() else [255, 0, 0, 150]),
+                                    "radius": 2000
+                                }                        
+                            sts_det.append(sts_info)
+                            # print(sts_info)
+
+    except:
+        pass
+    
 
     for i in results:
         area_loc = 0
@@ -692,18 +696,18 @@ with col2:
     if not show_chart:
         map_placeholder = st.empty()  
 
-        st.markdown(f'''
-            <br/>
-            <br/>
-            <br/>
-            <br/>
-            <br/>
-            <br/> 
-            <div class="empty-div"></div>                       
-            <br/>
-            <br/>
-            <br/>
-        ''', unsafe_allow_html=True)           
+        # st.markdown(f'''
+        #     <br/>
+        #     <br/>
+        #     <br/>
+        #     <br/>
+        #     <br/>
+        #     <br/> 
+        #     <div class="empty-div"></div>                       
+        #     <br/>
+        #     <br/>
+        #     <br/>
+        # ''', unsafe_allow_html=True)           
 
         # with st.container(height=60, border=True):
         st.markdown(f'''
@@ -1016,7 +1020,7 @@ if not show_chart:
                 get_fill_color = 'shipcolor2',
                 get_line_color = [0, 0, 0],
                 get_line_width = 1,
-                highlight_color = [0, 0, 255, 200],
+                highlight_color = [255, 255, 255, 200],
                 pickable = True,
                 auto_highlight = True, 
             )    
@@ -1162,7 +1166,7 @@ if not show_chart:
             )
 
             if st.session_state.reload == False:
-                map_placeholder.pydeck_chart(deck)   
+                map_placeholder.pydeck_chart(deck, height=750)   
 
             else:  
                 st.session_state.reload = False

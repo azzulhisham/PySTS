@@ -7,12 +7,16 @@
     width: 100% !important;
 } 
  
-#deckgl-wrapper {
+/* #deckgl-wrapper {
     height: 750px !important;
 }
 
 .mapboxgl-ctrl {
     margin-top: 50px !important;
+} */
+
+#view-default-view {
+    top: 50px
 }
 
 .card {
