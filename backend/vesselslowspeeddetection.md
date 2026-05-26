@@ -107,6 +107,42 @@ tsstop = tscurrent
 
 This means the vessel did not provide enough AIS updates to be confirmed stopped, but it was already in a slow-speed candidate state and then disappeared from AIS.
 
+## Estimated Dark-Stop Location
+
+The Python file includes an `estimate_latlng()` helper that can project a possible stop location from the vessel's last known AIS position and course over ground (`cog`).
+
+The current helper uses a fixed projected distance of `540m`. This distance assumes the vessel was travelling at about `3 knots` when the projection starts.
+
+If the projection is scaled linearly by speed, the estimated distance becomes:
+
+- `3 knots`: about `540m`.
+- `2 knots`: about `360m`.
+- `1 knot`: about `180m`.
+- Below `1 knot`: less than `180m`; for example, `0.5 knot` is about `90m`.
+
+A simple speed-aware projection could therefore calculate distance as:
+
+```python
+d = 540.0 * (sog / 3.0)
+```
+
+Another interpretation is to model the vessel as decelerating to a stop with the same deceleration rate. In that case, stopping distance scales with the square of speed:
+
+- `3 knots`: about `540m`.
+- `2 knots`: about `240m`.
+- `1 knot`: about `60m`.
+- Below `1 knot`: less than `60m`; for example, `0.5 knot` is about `15m`.
+
+The non-linear deceleration projection can be calculated as:
+
+```python
+d = 540.0 * (sog / 3.0) ** 2
+```
+
+The linear version is easier to explain operationally, while the non-linear version is closer to a constant-deceleration stopping-distance model. The better choice depends on real vessel behavior, AIS update frequency, and the vessel type.
+
+This should be interpreted as an estimated dark-stop location, not an actual confirmed stop position. The vessel may turn, drift, anchor, or slow down at a different rate after the last AIS message. The original last-known AIS latitude and longitude should therefore be preserved separately from any estimated stop latitude and longitude.
+
 ## How To Interpret Detection Results
 
 Use `tsstop`, `tsout`, and `rowcount` together when interpreting the detection result.
