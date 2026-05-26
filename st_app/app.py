@@ -60,7 +60,7 @@ for lat, lng in restrictedlimit:
     lngs += lng
 
 
-MAPBOX_TOKEN = ''
+MAPBOX_TOKEN = 'pk.eyJ1IjoiYXp6dWxoaXNoYW0iLCJhIjoiY2s5bjR1NDBqMDJqNDNubjdveXdiOGswYyJ9.SYlfXRzRtpbFoM2PHskvBg'
 
 INITIAL_VIEW_STATE = pdk.ViewState(
     latitude=lats/len(restrictedlimit),
