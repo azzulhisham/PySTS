@@ -25,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 
 
 STALE_TRANSPONDER_MINUTES = 30
-STALE_TRANSPONDER_MIN_ROWCOUNT = 10
+STALE_TRANSPONDER_MIN_ROWCOUNT = 1
 
 
 # install duckdb extensions
@@ -218,13 +218,14 @@ def upsert_vessel_activities(engine: Engine):
             distance = df_dist['distance_m'][0]
 
             if existing_activity:
-                if existing_activity.tsstop is None and existing_activity.tsout is None:
+                if existing_activity.tsout is None:
                     # update existing row
                     is_newer_position = existing_activity.tscurrent is None or row["ts"] > existing_activity.tscurrent
 
                     if is_newer_position:
                         has_position_changed = (
                             float(distance) > 0
+                            and existing_activity.tsstop is None
                             and row["longitude"] != existing_activity.curlongitude
                             and row["latitude"] != existing_activity.curlatitude
                         )
@@ -232,7 +233,7 @@ def upsert_vessel_activities(engine: Engine):
                         existing_activity.navstatus = row["navStatus"]
                         existing_activity.navstatusdesc = row["navStatusDesc"]
                         existing_activity.rowcount += 1 if has_position_changed else 0
-                        existing_activity.tsstop = None if existing_activity.rowcount < 30 or float(distance) >= 30 else row["ts"]
+                        existing_activity.tsstop = row["ts"] if existing_activity.rowcount >= 30 and float(distance) < 30 and existing_activity.tsstop is None else (None if existing_activity.tsstop is None else existing_activity.tsstop)
                         existing_activity.tscurrent = row["ts"]
                         existing_activity.curlongitude = row["longitude"]
                         existing_activity.curlatitude = row["latitude"]

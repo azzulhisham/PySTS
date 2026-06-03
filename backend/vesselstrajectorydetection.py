@@ -77,7 +77,6 @@ class Ais_VesselMovementActivities(SQLModel, table=True):
     curcog: Optional[float] = Field(default=None) 
  
 
-
 def get_pgEngine():
     engine = create_engine(
         DATABASE_URL, 
@@ -175,12 +174,12 @@ def upsert_vessel_activities(engine: Engine):
             distance = df_dist['distance_m'][0]
 
             if existing_activity:
-                if existing_activity.tsstop is None and existing_activity.tsout is None:
+                if existing_activity.tsout is None:
                     # update existing row
                     existing_activity.navstatus = row["navStatus"]
                     existing_activity.navstatusdesc = row["navStatusDesc"]
-                    existing_activity.rowcount += 1 if row["ts"] > existing_activity.tscurrent and float(distance) > 0 and row["longitude"] != existing_activity.curlongitude and row["latitude"] != existing_activity.curlatitude else 0
-                    existing_activity.tsstop = None if existing_activity.rowcount < 20 or float(distance) >= 30 else row["ts"]
+                    existing_activity.rowcount += 1 if existing_activity.tsstop is None and row["ts"] > existing_activity.tscurrent and float(distance) > 0 and row["longitude"] != existing_activity.curlongitude and row["latitude"] != existing_activity.curlatitude else 0
+                    existing_activity.tsstop = row["ts"] if existing_activity.rowcount >= 20 and float(distance) < 30 and existing_activity.tsstop is None else (None if existing_activity.tsstop is None else existing_activity.tsstop)
                     existing_activity.tscurrent = row["ts"]
                     existing_activity.curlongitude = row["longitude"]
                     existing_activity.curlatitude = row["latitude"]
