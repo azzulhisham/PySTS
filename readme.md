@@ -15,6 +15,14 @@ python3 socket_server.py
 python3 app.py
 
 
+# -----  MANTIS API (Anchorage Polygons REST)  -----
+# see restapi/README.md for full details
+cd restapi
+pip install -r requirements.txt
+gunicorn -c gunicorn_config.py main:app
+# Swagger UI: http://localhost:8080/swagger
+
+
 # Python Library
 pip install langchain-google-genai
 

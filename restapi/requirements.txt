@@ -1,0 +1,11 @@
+flask
+flask-cors
+flask-swagger-ui
+PyJWT
+gunicorn
+pandas
+SQLAlchemy
+duckdb
+psycopg2-binary
+shapely
+folium

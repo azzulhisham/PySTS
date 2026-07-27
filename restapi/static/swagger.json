@@ -1,0 +1,730 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "MANTIS API",
+    "version": "1.0.0",
+    "description": "MANTIS API.\n\n## Authentication\n\nProtected endpoints require a valid **Bearer token**.\n\n### Step 1 \u2014 Obtain an access token\n\nSend a **POST** request to **`/authentication/token`** with:\n\n```json\n{\n  \"userId\": \"user@sts.my\",\n  \"accessKey\": \"<your-access-key>\"\n}\n```\n\n**Example response (200 OK):**\n\n```json\n{\n  \"accessToken\": \"<jwt-token>\",\n  \"expiredDate\": \"2026-01-01 12:00:00\"\n}\n```\n\n### Step 2 \u2014 Authorize in Swagger UI\n\n1. Call **POST /authentication/token** and copy the `accessToken`.\n2. Click **Authorize** (lock icon).\n3. Paste the `accessToken` into **BearerAuth** and click **Authorize**.\n\n### Using the token with external clients\n\n```\nAuthorization: Bearer <accessToken>\n```",
+    "license": {
+      "name": "MIT",
+      "url": "https://opensource.org/licenses/MIT"
+    }
+  },
+  "tags": [
+    {
+      "name": "Token",
+      "description": "Obtain an authentication access token."
+    },
+    {
+      "name": "mantis",
+      "description": "MANTIS detection and polygon endpoints."
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "BearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT",
+        "description": "JWT access token from **POST /authentication/token**. Enter the `accessToken` value only (Swagger adds the `Bearer` prefix)."
+      }
+    },
+    "schemas": {
+      "User": {
+        "type": "object",
+        "required": [
+          "userId",
+          "accessKey"
+        ],
+        "properties": {
+          "userId": {
+            "type": "string",
+            "description": "The ID of the user.",
+            "example": "user@sts.my"
+          },
+          "accessKey": {
+            "type": "string",
+            "description": "The access key given to the user."
+          }
+        }
+      },
+      "UserToken": {
+        "type": "object",
+        "properties": {
+          "accessToken": {
+            "type": "string",
+            "description": "The JWT access token."
+          },
+          "expiredDate": {
+            "type": "string",
+            "description": "Token expiry datetime (yyyy-MM-dd HH:mm:ss).",
+            "example": "2026-12-31 23:59:59"
+          }
+        }
+      },
+      "Coordinate": {
+        "type": "array",
+        "description": "GeoJSON-ordered coordinate pair [longitude, latitude].",
+        "minItems": 2,
+        "maxItems": 2,
+        "items": {
+          "type": "number",
+          "format": "double"
+        },
+        "example": [
+          104.8106002778,
+          2.2179960278
+        ]
+      },
+      "AnchoragePolygon": {
+        "type": "object",
+        "required": [
+          "name",
+          "polygon"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Name of the anchorage place.",
+            "example": "East Malaysia OPL, Malaysia"
+          },
+          "polygon": {
+            "type": "array",
+            "description": "Closed polygon ring as a list of [longitude, latitude] points.",
+            "items": {
+              "$ref": "#/components/schemas/Coordinate"
+            }
+          }
+        }
+      },
+      "StsVessel": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipName": {
+            "type": "string"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "sog": {
+            "type": "number",
+            "format": "double",
+            "description": "Speed over ground (knots)."
+          },
+          "cog": {
+            "type": "number",
+            "format": "double",
+            "description": "Course over ground (degrees)."
+          }
+        }
+      },
+      "StsPair": {
+        "type": "object",
+        "properties": {
+          "observationId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "anchorageName": {
+            "type": "string"
+          },
+          "suspicionScore": {
+            "type": "number",
+            "format": "double"
+          },
+          "distanceM": {
+            "type": "number",
+            "format": "double",
+            "description": "Pair distance in meters."
+          },
+          "durationSeconds": {
+            "type": "number",
+            "format": "double",
+            "description": "How long the cluster has been open."
+          },
+          "durationHours": {
+            "type": "number",
+            "format": "double"
+          },
+          "durationLabel": {
+            "type": "string",
+            "example": "4h 43m"
+          },
+          "pairedAt": {
+            "type": "string",
+            "description": "Timestamp when the pairing was last determined (last_detected_at)."
+          },
+          "firstDetectedAt": {
+            "type": "string",
+            "description": "When the proximity cluster was first opened."
+          },
+          "vesselA": {
+            "$ref": "#/components/schemas/StsVessel"
+          },
+          "vesselB": {
+            "$ref": "#/components/schemas/StsVessel"
+          }
+        }
+      },
+      "StsActivitiesResponse": {
+        "type": "object",
+        "properties": {
+          "minSuspicionScore": {
+            "type": "number",
+            "format": "double",
+            "description": "Minimum suspicion_score filter applied (default 4.5).",
+            "example": 4.5
+          },
+          "maxDistanceM": {
+            "type": "number",
+            "format": "double",
+            "example": 35.0
+          },
+          "openHighScoreCount": {
+            "type": "integer",
+            "description": "Active (is_open) clusters meeting the suspicion score threshold (all areas)."
+          },
+          "inAnchorageClusterCount": {
+            "type": "integer",
+            "description": "High-score open clusters whose centroid is inside an anchorage polygon."
+          },
+          "pairCount": {
+            "type": "integer",
+            "description": "Pairs within maxDistanceM belonging to those clusters."
+          },
+          "pairedVesselCount": {
+            "type": "integer",
+            "description": "Vessels that appear in pairs (map markers)."
+          },
+          "pairedVessels": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "pairs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StsPair"
+            }
+          }
+        }
+      },
+      "IllegalAnchoringVessel": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipName": {
+            "type": "string"
+          },
+          "shipType": {
+            "type": "integer"
+          },
+          "shipTypeDesc": {
+            "type": "string"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double"
+          },
+          "sog": {
+            "type": "number",
+            "format": "double"
+          },
+          "cog": {
+            "type": "number",
+            "format": "double"
+          },
+          "navStatusDesc": {
+            "type": "string"
+          },
+          "tsStop": {
+            "type": "string"
+          },
+          "tsCurrent": {
+            "type": "string"
+          },
+          "durationSeconds": {
+            "type": "number",
+            "format": "double"
+          },
+          "durationHours": {
+            "type": "number",
+            "format": "double"
+          },
+          "durationLabel": {
+            "type": "string",
+            "example": "3h 12m"
+          },
+          "inRestrictedZone": {
+            "type": "boolean"
+          },
+          "inWatchPolygon": {
+            "type": "boolean"
+          },
+          "inPortLimit": {
+            "type": "boolean"
+          },
+          "watchPolygonName": {
+            "type": "string",
+            "nullable": true
+          },
+          "portLimitName": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "description": "in_restricted_zone and/or in_watch_polygon",
+            "example": "in_watch_polygon"
+          },
+          "detectedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "IllegalAnchoringResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": {
+            "type": "string",
+            "example": "v2-in-restricted-or-watch-exclude-port-limit"
+          },
+          "shipTypeFilter": {
+            "type": "string",
+            "example": "70-89 (cargo/tanker/container Class-A large vessels)"
+          },
+          "stoppedCandidateCount": {
+            "type": "integer"
+          },
+          "illegalCount": {
+            "type": "integer"
+          },
+          "byReason": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "watchPolygonCount": {
+            "type": "integer"
+          },
+          "portLimitPolygonCount": {
+            "type": "integer"
+          },
+          "vessels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IllegalAnchoringVessel"
+            }
+          }
+        }
+      },
+      "DarkVessel": {
+        "type": "object",
+        "properties": {
+          "activityId": {
+            "type": "integer"
+          },
+          "mmsi": {
+            "type": "integer"
+          },
+          "shipName": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipType": {
+            "type": "integer",
+            "nullable": true
+          },
+          "shipTypeDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "sog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "cog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "navStatusDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "rowCount": {
+            "type": "integer",
+            "nullable": true
+          },
+          "distanceM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "ts": {
+            "type": "string",
+            "nullable": true
+          },
+          "tsStop": {
+            "type": "string",
+            "nullable": true
+          },
+          "tsCurrent": {
+            "type": "string",
+            "nullable": true
+          },
+          "silenceSeconds": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "silenceHours": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "silenceLabel": {
+            "type": "string",
+            "nullable": true,
+            "example": "2h 15m"
+          },
+          "darkReason": {
+            "type": "string",
+            "description": "suspected_dark_after_slowdown | possible_coverage_exit | low_evidence_ais_gap",
+            "example": "suspected_dark_after_slowdown"
+          },
+          "confidence": {
+            "type": "string",
+            "description": "high | medium | low",
+            "example": "high"
+          }
+        }
+      },
+      "DarkVesselsResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": {
+            "type": "string",
+            "example": "v1-slowmove-dark-after-slowdown"
+          },
+          "shipTypeFilter": {
+            "type": "string",
+            "example": "70-89 (cargo/tanker/container Class-A large vessels)"
+          },
+          "minSilenceMinutes": {
+            "type": "integer",
+            "example": 30
+          },
+          "coverageExitDays": {
+            "type": "integer",
+            "example": 3
+          },
+          "includeCoverageExit": {
+            "type": "boolean"
+          },
+          "candidateCount": {
+            "type": "integer"
+          },
+          "byReason": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "byConfidence": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "vessels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DarkVessel"
+            }
+          }
+        }
+      },
+      "ErrorMessage": {
+        "type": "object",
+        "properties": {
+          "message": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "API health check.",
+        "operationId": "getHealth",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Service is healthy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "example": "ok"
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "polygonCount": {
+                      "type": "integer"
+                    },
+                    "swagger": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          }
+        }
+      }
+    },
+    "/authentication/token": {
+      "post": {
+        "tags": [
+          "Token"
+        ],
+        "summary": "Get the authentication access token.",
+        "operationId": "getAccessToken",
+        "requestBody": {
+          "description": "Credentials required to obtain a token.",
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/User"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Access token issued.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserToken"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 invalid credentials."
+          },
+          "500": {
+            "description": "Server error."
+          }
+        }
+      }
+    },
+    "/mantis/darkvessels": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get suspected dark / AIS-transponder-off vessels.",
+        "description": "v1 heuristic over `ais_vesselslowmoveactivities`: Class-A large vessels (shipType 70\u201389) that slowed then went silent before a confirmed stop (`rowcount < 30`), with AIS silence \u2265 30 minutes. Reasons: `suspected_dark_after_slowdown` (higher interest), `possible_coverage_exit` (SEA footprint leave), `low_evidence_ais_gap`. Not proof of intentional dark \u2014 see `backend/vesselslowspeeddetection.md`. Independent of anchorage polygons.",
+        "operationId": "getDarkVessels",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "includeCoverageExit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            },
+            "description": "When false, exclude `possible_coverage_exit` rows (tighter ops list)."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Suspected dark-vessel candidates.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DarkVesselsResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/polygons": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get all anchorage polygons (including restricted limit).",
+        "description": "Returns every anchorage area polygon defined in `polygons.py`, plus the **Restricted Limit** polygon. Coordinates are GeoJSON-ordered `[longitude, latitude]`.",
+        "operationId": "getAllAnchoragePolygons",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of anchorage polygon objects.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AnchoragePolygon"
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/sts-activities": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside anchorage polygons. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt.",
+        "operationId": "getAnchorageStsActivities",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "minSuspicionScore",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double",
+              "default": 4.5
+            },
+            "description": "Minimum suspicion_score for open clusters."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Active high-suspicion STS pairs inside anchorages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StsActivitiesResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/illegal-anchoring": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get heuristic illegal-anchoring candidates.",
+        "description": "v2 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **watch polygons** from `polygons.py` (Malaysia/Indonesia OPL & anchorages). EXCLUDE vessels inside Singapore **port-limit** polygons (Singapore East / Western OPL / South + Excl*). Not a legal determination.",
+        "operationId": "getIllegalAnchoring",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Illegal-anchoring candidate vessels.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IllegalAnchoringResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    }
+  }
+}

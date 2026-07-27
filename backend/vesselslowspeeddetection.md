@@ -182,6 +182,184 @@ If a matching high-speed AIS record is found and the distance from the stored ac
 - Position jitter can affect distance and row counting, especially when a vessel is nearly stationary.
 
 
+# Dark / AIS-Transponder-Off Detection — Research Findings (2026-07)
+
+This section records findings for building a **suspected dark vessel** API on top of
+`ais_vesselslowmoveactivities`, independent of anchorage polygons in
+`PySTS/restapi/polygons.py`.
+
+## Goal
+
+Identify vessels that **likely stopped transmitting AIS after slowing down**
+(possible intentional transponder-off), using the slow-speed backend output.
+
+Important framing for future work:
+
+- AIS silence is **evidence of disappearance from the feed**, not proof of intent.
+- The operational area is **South-East Asia coverage**. Leaving the coverage footprint
+  can look identical to going dark.
+- Therefore API / research results should be labelled **suspected**, with confidence tiers.
+
+## Source of truth
+
+| Asset | Role |
+|-------|------|
+| `vesselslowspeeddetection.py` | Continuous detector: slow-down → stop / stale / exit |
+| `public.ais_vesselslowmoveactivities` | Persisted slow-move activities with `ts`, `tscurrent`, `tsstop`, `tsout`, `rowcount`, last position & sog/cog |
+| `public.ais_static` | Vessel name / type for cargo–tanker filtering |
+| `public.ais_position` | Raw AIS (used by the backend loop; not required for a v1 read API) |
+
+Anchorage polygons are **not required** for dark detection. They may be joined later
+as context (where the vessel went dark), not as the primary rule.
+
+## What the backend already encodes
+
+Constants (current code):
+
+```python
+STALE_TRANSPONDER_MINUTES = 30
+STALE_TRANSPONDER_MIN_ROWCOUNT = 1
+# low-speed path: sog <= 3.0
+# confirmed stop while still transmitting: rowcount >= 30 and distance < 30 m
+# high-speed exit: sog > 3.0 and distance >= 100 m → tsout
+```
+
+Interpretation for dark research:
+
+| Condition | Likely meaning |
+|-----------|----------------|
+| `tsstop IS NOT NULL` and `rowcount >= 30` | Confirmed stop **while still sending AIS** (not dark) |
+| `tsstop IS NOT NULL` and `rowcount < 30` | **Primary dark candidate**: slowed, then silence before confirmed stop |
+| Stale open row → backend sets `tsstop = tscurrent` | Suspected stop/dark after ~30 minutes without updates |
+| `tsout IS NOT NULL` | Left the location / resumed high speed (close the case) |
+| `tscurrent` many days old, last `cursog` high, little slow history | Often **coverage exit**, not intentional dark |
+
+## Coverage-exit vs intentional dark (core finding)
+
+Within SEA-only AIS:
+
+1. **Intentional dark (higher interest)**  
+   Vessel is already in a **slow-down / stop-preparation** state (`sog` low, `rowcount` climbing),
+   then AIS stops near the last known position.
+
+2. **Coverage exit / out-of-footprint (false dark)**  
+   Vessel was still moving (higher `sog`) near the edge of the monitored region,
+   then simply never appears again for days.
+
+3. **Normal AIS / satellite gap**  
+   Temporary silence (minutes to a few tens of minutes) without a clear slow-down story.
+
+v1 API strategy: prefer (1), down-rank or separately label (2), require a minimum silence age for (3).
+
+## Recommended v1 candidate SQL (dark after slow-down)
+
+Uses `ais_vesselslowmoveactivities` + `ais_static`. Class-A large vessels only (cargo/tanker 70–89).
+
+```sql
+SELECT
+    a.id AS activity_id,
+    a.mmsi,
+    a.ts,
+    a.tscurrent,
+    a.tsstop,
+    a.tsout,
+    a.longitude,
+    a.latitude,
+    a.curlongitude,
+    a.curlatitude,
+    a.sog,
+    a.cog,
+    a.cursog,
+    a.curcog,
+    a.rowcount,
+    a.distance,
+    a.navstatus,
+    a.navstatusdesc,
+    s."shipName" AS shipname,
+    s."shipType" AS shiptype,
+    s."shipTypeDesc" AS shiptypedesc,
+    EXTRACT(EPOCH FROM (now() - a.tscurrent)) AS silence_seconds,
+    CASE
+        WHEN a.rowcount >= 5
+             AND a.rowcount < 30
+             AND a.tscurrent > now() - interval '3 days'
+            THEN 'suspected_dark_after_slowdown'
+        WHEN a.tscurrent <= now() - interval '3 days'
+             OR COALESCE(a.cursog, a.sog, 0) > 3.0
+            THEN 'possible_coverage_exit'
+        ELSE 'low_evidence_ais_gap'
+    END AS dark_reason
+FROM (
+    SELECT *,
+           row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
+    FROM public.ais_vesselslowmoveactivities
+) a
+INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
+WHERE a.rowcount_mmsi = 1
+  AND a.tsout IS NULL
+  AND a.tsstop IS NOT NULL
+  AND a.rowcount < 30
+  AND a.tscurrent IS NOT NULL
+  AND a.tscurrent <= now() - interval '30 minutes'
+  AND s."shipType" >= 70 AND s."shipType" < 90
+ORDER BY a.tscurrent ASC;
+```
+
+Notes:
+
+- `rowcount < 30` keeps the “went silent before confirmed stop” class from the markdown interpretation rules.
+- Silence floor `30 minutes` aligns with `STALE_TRANSPONDER_MINUTES`.
+- `possible_coverage_exit` is returned for research, but ops UIs may filter it out.
+- Confirmed stops (`rowcount >= 30`) are excluded from dark candidates.
+
+## MANTIS API surface (v1)
+
+- Module: `PySTS/restapi/dark_vessels.py` (**implemented**)
+- Endpoint: `GET /mantis/darkvessels` (Bearer) — query `includeCoverageExit=false` for ops-tight list
+- Payload includes last known position, sog/cog, silence duration, `rowcount`, `darkReason`, and a simple confidence label.
+
+This is a **read API** over existing backend tables. No new continuous processor is required for v1.
+
+## Roadmap to improve reliability / accuracy
+
+Prioritised research and engineering items for future iterations:
+
+1. **Split `tsstop` semantics in the backend**  
+   Add `tsdark` / `detection_type` (`confirmed_stop` | `suspected_dark` | `stale_mark`) so APIs and ML do not overload one field.
+
+2. **Coverage / footprint model**  
+   Maintain a polygon (or raster) of “areas we reliably receive AIS”.  
+   Last fix near the outer boundary + high last sog → auto-label coverage exit.
+
+3. **Time-based dark score instead of rowcount alone**  
+   `rowcount` depends on AIS reporting rate. Prefer minutes spent sog≤3 before silence.
+
+4. **Reappearance tracking**  
+   If the same MMSI returns later far away with a plausible transit time, down-rank the earlier dark event (likely coverage gap, not dark ops).
+
+5. **Cross-check with trajectory / movement activities**  
+   Join `ais_vesselmovementactivities` and proximity clusters: dark near an STS cluster is higher interest than dark alone.
+
+6. **Class / size filters and denylist**  
+   Keep cargo/tanker focus; optionally exclude offshore supply / dredgers if they create noise.
+
+7. **Minimum evidence thresholds for ops mode**  
+   Example ops filter: `dark_reason = suspected_dark_after_slowdown` AND silence between 30 min and 72 h AND `rowcount >= 5`.
+
+8. **Ground-truth labeling loop**  
+   Export candidates to Parquet (same pattern as proximity ML export), manual label dark vs coverage-exit vs normal gap, then tune thresholds.
+
+9. **Optional second backend task (only if needed)**  
+   Only add a dedicated dark lifecycle table if you need continuous open/close history and alerts beyond on-demand SQL. For research and API v1, querying `ais_vesselslowmoveactivities` is enough.
+
+## Working conclusion
+
+- **Yes**, it is sensible to expose a dark-vessel endpoint from current data.
+- Treat results as **suspected AIS disappearance after slow-down**.
+- Explicitly model **SEA coverage exit** as a competing explanation.
+- Improve accuracy by separating stop vs dark fields, adding a coverage footprint, and using time-based scores plus reappearance checks.
+
+
 # Query Statement
 
 When a specific vessel has been stopped for more than one hour, or its transponder may have been switched off for about 30 minutes:
