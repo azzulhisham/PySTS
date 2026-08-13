@@ -4,7 +4,7 @@ Flask REST API that **serves the frontend** from AIS activities already produced
 
 This team owns **backend processing** and **this API**. The operations frontend is another developer’s repository.
 
-This file is the **technical contract** for the API: how polygons are registered, how Excl holes work, and how each detector must apply those rules. Marketing copy lives in `marketing/` and must not replace this document.
+This file is the **technical contract** for the API: how polygons are registered, how Excl holes work, how each detector must apply those rules, and how OFAC identity labels are attached. Marketing copy lives in `marketing/` and must not replace this document.
 
 ## Where this API sits (read this first)
 
@@ -34,7 +34,7 @@ Frontend                separate repo / separate developer
 | Pipeline | `backend/vesselproximitydetection.py` | STS clusters → `ais_vesselproximityobservation` / `member` |
 | Pipeline | `backend/vesselslowspeeddetection.py` | Slow-move / silence → `ais_vesselslowmoveactivities` |
 | Pipeline | `backend/vesselstrajectorydetection.py` | Stops / movement → `ais_vesselmovementactivities` |
-| API | `PySTS/restapi/` (here) | Read those tables, apply polygon / Excl rules, return JSON |
+| API | `PySTS/restapi/` (here) | Read those tables, apply polygon / Excl rules, attach OFAC labels, return JSON |
 | MCP | `PySTS/mcp/` | Optional tools that **call this API** |
 | Whole-repo map | [`../readme.md`](../readme.md) | What is MANTIS vs what is not |
 
@@ -47,9 +47,9 @@ Frontend                separate repo / separate developer
 ## Features
 
 - `GET /mantis/polygons` — all named polygons + restricted limit
-- `GET /mantis/sts-activities` — STS proximity pairs inside parent polygons (Excl holes excluded)
-- `GET /mantis/illegal-anchoring` — heuristic illegal-anchoring candidates (v3)
-- `GET /mantis/darkvessels` — suspected dark / AIS-transponder-off vessels (label by polygon; never drop)
+- `GET /mantis/sts-activities` — STS proximity pairs inside parent polygons (Excl holes excluded; OFAC labels on each vessel)
+- `GET /mantis/illegal-anchoring` — heuristic illegal-anchoring candidates (v3; OFAC labels)
+- `GET /mantis/sanctions` — OFAC vessel list (search by `imo` or `mmsi`; full list otherwise)
 - `GET /mantis/vessel-timeline` — derived activity/events for one vessel
 - `GET /mantis/vessel-track` — AIS position track for map replay
 - `POST /authentication/token` — issue a JWT access token
@@ -66,6 +66,8 @@ restapi/
 ├── sts_detection.py        # STS proximity inside parent polygons
 ├── illegal_anchoring.py    # Illegal-anchoring detection (v3, Excl holes excluded)
 ├── dark_vessels.py         # Dark / AIS-off detection (polygon label only)
+├── sanctions.py            # OFAC identity labels (IMO / MMSI join; not a detector)
+├── swagger_sample.py       # 20-row cap when Try it out is run from /swagger
 ├── gunicorn_config.py      # Gunicorn WSGI settings
 ├── requirements.txt
 ├── Dockerfile
@@ -201,6 +203,25 @@ http://localhost:8080/swagger
 
 OpenAPI spec file: `static/swagger.json` (OpenAPI 3.1.0)
 
+### 20-row sample on this page (all list endpoints)
+
+Try it out from `/swagger` is detected via the `Referer` header. If a list in the JSON is longer than **20** rows, the API returns **20 samples** only so the page does not lag.
+
+| Field | Meaning |
+| --- | --- |
+| `sample` | `true` when a list was capped |
+| `sampleLimit` | `20` |
+| `fromSwagger` | `true` |
+| `totalCount` / `totalCounts` | Size before the cap |
+| `returnedCount` / `returnedCounts` | Rows actually in the payload |
+| `message` | Explains that curl / frontend / MCP get the full result |
+
+Applies to: polygons (Swagger gets a wrapped object), STS `pairs` / `pairedVessels`, illegal-anchoring `vessels`, dark `vessels`, sanctions `vessels`, timeline `events`, track `track`.
+
+**Not sampled:** `POST /authentication/token` and `GET /` (health).
+
+curl, the operations frontend, and MCP always receive the **full** payload. `/mantis/polygons` stays a **bare JSON array** for those clients; only Swagger gets `{ "polygons": [ ...20 ], "sample": true, ... }`.
+
 ## Detection rules (maintainer source of truth)
 
 These rules are the product contract. Do not “simplify” them without an explicit product decision. A named polygon that is **not** listed in `anchorage_areas` is **dead code** — `/mantis/polygons`, STS, illegal-anchoring and dark-vessel labels will ignore it.
@@ -267,10 +288,135 @@ Singapore East Anchorage, Singapore Western OPL and Singapore South Anchorage ar
 | Detector | File | Keep / drop | Polygon fields |
 | --- | --- | --- | --- |
 | STS | `sts_detection.py` | Centroid in a **parent**; drop if centroid is also in any Excl | `anchorageName` from the parent match |
-| Illegal anchoring | `illegal_anchoring.py` (`rule_version` `v3-in-restricted-or-watch-exclude-excl-holes`) | Stopped Class-A 70–89; keep if in Restricted Limit **or** a parent; **drop if in any Excl** | `watchPolygonName`; `inPortLimit` / `portLimitName` / `portLimitPolygonCount` are **compat keys for Excl holes** |
-| Dark vessels | `dark_vessels.py` (`rule_version` `v1.1-slowmove-dark-polygon-label`) | **Never drop** because of a polygon | `polygonName` (Excl preferred if in a hole); `inExclPolygon` |
+| Illegal anchoring | `illegal_anchoring.py` (`rule_version` `v3.1-…-ofac-label`) | Stopped Class-A 70–89; keep if in Restricted Limit **or** a parent; **drop if in any Excl** | `watchPolygonName`; `inPortLimit` / `portLimitName` / `portLimitPolygonCount` are **compat keys for Excl holes** |
+| Dark vessels | `dark_vessels.py` (`rule_version` `v1.2-slowmove-dark-polygon-ofac-label`) | **Never drop** because of a polygon | `polygonName` (Excl preferred if in a hole); `inExclPolygon` |
 
-MCP (`PySTS/mcp`) is a pass-through to this API. It does not re-implement polygon rules.
+OFAC identity (all three): `imo`, `sanctionsMatch`, `matchConfidence` (`confirmed` \| `possible` \| `none`), `sanctionsList`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+
+MCP (`PySTS/mcp`) is a pass-through to this API. It does not re-implement polygon or OFAC rules.
+
+## OFAC labels (identity, not a detector)
+
+This is the **product contract** for sanctions fields on the API. Detection knobs and ingest tables also live in [`../backend/mantis-detection.md`](../backend/mantis-detection.md). Do not turn OFAC into a fourth MANTIS job, and do not treat a match as a legal finding.
+
+Code: `sanctions.py` (`match_vessel`, `attach_sanctions`, `attach_sanctions_pair_sides`).
+
+OFAC data is already in Postgres `pnav` (loaded by `backend/ofac_sdn_ingest.py` and `backend/ofac_cons_ingest.py`). This API **only joins** those tables onto candidates that already passed STS / dark / illegal-anchoring rules.
+
+| What | Detail |
+| --- | --- |
+| Not a new table | No OFAC “events” table. No new pipeline job. |
+| Not a score | Does **not** change `suspicionScore`, dark `confidence`, or the 4.5 STS cut. |
+| Not a drop rule | Unmatched vessels **stay**. A listed ship that is not already a candidate does **not** appear. |
+| Not bunker | `onBunkerRegister` is skipped until a bunker register exists. |
+
+### Data used
+
+| Source | View | Typical content |
+| --- | --- | --- |
+| OFAC SDN | `ofac_sdn_vessel` | Ships (`sdn_type = Vessel`), IMO on most rows |
+| OFAC consolidated non-SDN | `ofac_cons_vessel` | Joined if the view exists. Current file is companies/people — **zero vessels is valid** |
+| Candidate identity | `ais_static."imo"` and MMSI on the activity row | IMO preferred |
+
+If `ofac_sdn_vessel` is missing, every candidate gets `sanctionsMatch: false` and the API still returns the list.
+
+### Match rules
+
+Apply **in this order**. Name, callsign, and flag are **not** used.
+
+| Candidate has | OFAC has | Result | `matchConfidence` |
+| --- | --- | --- | --- |
+| IMO (7 digits, from `ais_static` or `IMO 9187629`) | Same IMO on SDN or CONS | match | `confirmed` |
+| IMO | That IMO **not** on OFAC | **no match** — do **not** try MMSI | `none` |
+| No IMO, has MMSI | Same MMSI on OFAC | match (weaker; MMSI can be missing or spoofed) | `possible` |
+| No IMO, MMSI not on OFAC | — | no match | `none` |
+| Neither IMO nor MMSI | — | no match | `none` |
+
+If the same IMO exists on both lists, **SDN wins**. `sanctionsList` is then `SDN`. CONS has no ships today, so almost every hit is `SDN`.
+
+### JSON fields (every vessel on the three lists)
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `imo` | string or `null` | Normalized 7-digit IMO from `ais_static`, if present |
+| `sanctionsMatch` | boolean | `true` if this ship matched OFAC |
+| `matchConfidence` | `confirmed` \| `possible` \| `none` | How sure the **identity** match is — not how sure the AIS behaviour is |
+| `sanctionsList` | `SDN` \| `CONS` \| `null` | Which OFAC file matched. `null` when `sanctionsMatch` is false |
+
+STS pairs also have pair-level `sanctionsMatch` / `matchConfidence` (true / best of vessel A and B). Each of `vesselA` and `vesselB` still has its own fields.
+
+Example (dark vessel that matched by IMO):
+
+```json
+{
+  "mmsi": 256845000,
+  "shipName": "APAMA",
+  "imo": "9187631",
+  "darkReason": "suspected_dark_after_slowdown",
+  "confidence": "high",
+  "sanctionsMatch": true,
+  "matchConfidence": "confirmed",
+  "sanctionsList": "SDN"
+}
+```
+
+Unmatched example:
+
+```json
+{
+  "imo": "9234567",
+  "sanctionsMatch": false,
+  "matchConfidence": "none",
+  "sanctionsList": null
+}
+```
+
+### Sort (priority, not score)
+
+On STS, dark, and illegal-anchoring payloads, rows are ordered:
+
+1. `confirmed`
+2. `possible`
+3. `none`
+
+Inside the same band, existing ops order is kept (STS still prefers higher `suspicionScore` then shorter distance; dark still prefers older `tscurrent`).
+
+That is so a listed ship that is also dark or in an STS pair is seen first. It is **not** a higher AIS confidence.
+
+### Counts in the response envelope
+
+| Endpoint | Extra count fields |
+| --- | --- |
+| `/mantis/darkvessels` | `sanctionsMatchCount` |
+| `/mantis/illegal-anchoring` | `sanctionsMatchCount` |
+| `/mantis/sts-activities` | `sanctionsMatchPairCount`, `sanctionsMatchVesselCount` |
+
+### Frontend
+
+New fields on all three list endpoints. Brief the frontend developer before painting them on the map. Do not treat `sanctionsMatch: true` as an auto-verdict in the UI.
+
+### Lookup endpoint (`GET /mantis/sanctions`)
+
+Browse or search the ingested OFAC **vessel** list (not people/companies). This is a directory, not a detector.
+
+| Query | Behaviour |
+| --- | --- |
+| `imo=9187631` (or `IMO 9187631`) | Rows whose IMO matches |
+| `mmsi=256845000` | Rows whose MMSI matches |
+| both `imo` and `mmsi` | Rows matching **either** |
+| neither | **Entire** vessel list (~1,500 SDN ships today) |
+
+**Swagger UI:** same 20-row sample cap as every other list endpoint (see [20-row sample](#20-row-sample-on-this-page-all-list-endpoints)). curl / frontend / MCP get the full vessel list.
+
+```bash
+# Full list (not from Swagger)
+curl "http://localhost:8080/mantis/sanctions" \
+  -H "Authorization: Bearer <jwt-token>"
+
+# Lookup by IMO
+curl "http://localhost:8080/mantis/sanctions?imo=9187631" \
+  -H "Authorization: Bearer <jwt-token>"
+```
 
 ## API endpoints
 
@@ -278,9 +424,10 @@ MCP (`PySTS/mcp`) is a pass-through to this API. It does not re-implement polygo
 | --- | --- | --- | --- |
 | `POST` | `/authentication/token` | No | Issue JWT access token |
 | `GET` | `/mantis/polygons` | Bearer | All named polygons + Restricted Limit |
-| `GET` | `/mantis/sts-activities` | Bearer | STS pairs inside parent polygons (Excl excluded) |
-| `GET` | `/mantis/illegal-anchoring` | Bearer | Illegal-anchoring candidates (v3) |
-| `GET` | `/mantis/darkvessels` | Bearer | Dark / AIS-off candidates (polygon label only) |
+| `GET` | `/mantis/sts-activities` | Bearer | STS pairs inside parent polygons (Excl excluded); OFAC labels |
+| `GET` | `/mantis/illegal-anchoring` | Bearer | Illegal-anchoring candidates (v3); OFAC labels |
+| `GET` | `/mantis/darkvessels` | Bearer | Dark / AIS-off candidates (polygon + OFAC label only) |
+| `GET` | `/mantis/sanctions` | Bearer | OFAC vessel list (`imo` / `mmsi` search) |
 | `GET` | `/mantis/vessel-timeline` | Bearer | Derived events for one MMSI (`mmsi`, `from`, `to`) |
 | `GET` | `/mantis/vessel-track` | Bearer | AIS track replay (`mmsi`, `from`, `to`; optional `includeClassB`) |
 | `GET` | `/` | Bearer | Health check (`polygonCount` = `len(all_polygons)`) |
@@ -316,14 +463,15 @@ Pairs are recomputed at **≤ 35 m**. Only **paired vessels** are included.
 
 Each pair payload includes:
 
-- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`
+- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`, `imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`
+- pair-level `sanctionsMatch` / `matchConfidence` (best of the two vessels)
 - `distanceM`
 - `durationSeconds` / `durationHours` / `durationLabel` (how long the cluster has been open)
 - `pairedAt` (`last_detected_at` — when the pairing was last determined)
 - `firstDetectedAt`
 - `anchorageName` — the **parent** polygon (never an Excl name)
 
-Optional query param: `minSuspicionScore` (float, default `4.5`).
+Optional query param: `minSuspicionScore` (float, default `4.5`). OFAC does **not** let a pair through if the score is below this cut. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 Example:
 
@@ -360,7 +508,9 @@ curl http://localhost:8080/mantis/illegal-anchoring \
   -H "Authorization: Bearer <jwt-token>"
 ```
 
-### Dark vessels (v1.1 heuristic)
+Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+
+### Dark vessels (v1.2 heuristic)
 
 `GET /mantis/darkvessels` returns **Class-A large vessels** (shipType **70–89**) from `ais_vesselslowmoveactivities` that slowed then went silent before a confirmed stop (`rowcount < 30`, silence ≥ 30 minutes).
 
@@ -376,7 +526,7 @@ curl http://localhost:8080/mantis/illegal-anchoring \
 | `possible_coverage_exit` | Likely left SEA AIS footprint (competing explanation) |
 | `low_evidence_ais_gap` | Silence without strong slow-down evidence |
 
-Research notes and improvement roadmap: `../backend/vesselslowspeeddetection.md` (section *Dark / AIS-Transponder-Off Detection*).
+Research notes and improvement roadmap: `../backend/mantis-detection.md`. OFAC fields are the same as on STS / illegal-anchoring; dark `confidence` is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 ```bash
 # All candidates (including possible coverage exit)
@@ -402,6 +552,8 @@ Zone-visit rows (`ais_vesselinzone`, `ais_vesselinrestrictzone`) are **not** wri
 ## Related packages (boundaries)
 
 - Whole MANTIS layout: [`../readme.md`](../readme.md)
+- Detection knobs + OFAC ingest spec: [`../backend/mantis-detection.md`](../backend/mantis-detection.md)
+- OFAC load into `pnav`: `backend/ofac_sdn_ingest.py`, `backend/ofac_cons_ingest.py`
 - MANTIS pipeline only: `vesselproximitydetection.py`, `vesselslowspeeddetection.py`, `vesselstrajectorydetection.py`
 - MCP wrapper: `PySTS/mcp/` (HTTP client to this API only)
 - Frontend: separate developer, not in this repo

@@ -22,6 +22,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from polygons import anchorage_areas, is_excl_name
+from sanctions import (
+    attach_sanctions,
+    attach_sanctions_pair_sides,
+    payload_fields,
+    sort_listed_first,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -74,9 +80,11 @@ SELECT
     m.tsstop,
     m.activity_id,
     a.cursog AS sog,
-    a.curcog AS cog
+    a.curcog AS cog,
+    s."imo" AS imo
 FROM public.ais_vesselproximitymember m
 LEFT JOIN public.ais_vesselmovementactivities a ON a.id = m.activity_id
+LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
 WHERE m.observation_id = ANY(%(obs_ids)s)
 """
 
@@ -225,6 +233,7 @@ def find_pairs_within_observations(
         "shipname_a", "shipname_b", "shiptype_a", "shiptype_b",
         "lon_a", "lat_a", "lon_b", "lat_b", "sog_a", "sog_b", "cog_a", "cog_b",
         "tscurrent_a", "tscurrent_b", "tsstop_a", "tsstop_b",
+        "imo_a", "imo_b",
     ]
     if observations.empty or members.empty or len(members) < 2:
         return pd.DataFrame(columns=empty_cols)
@@ -275,7 +284,9 @@ def find_pairs_within_observations(
             a.tscurrent AS tscurrent_a,
             b.tscurrent AS tscurrent_b,
             a.tsstop AS tsstop_a,
-            b.tsstop AS tsstop_b
+            b.tsstop AS tsstop_b,
+            a.imo AS imo_a,
+            b.imo AS imo_b
         FROM members_for_pairs a
         INNER JOIN members_for_pairs b
           ON a.observation_id = b.observation_id
@@ -342,6 +353,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_a"]),
                 "sog": float(p["sog_a"]) if pd.notna(p.get("sog_a")) else None,
                 "cog": float(p["cog_a"]) if pd.notna(p.get("cog_a")) else None,
+                **payload_fields(p, side="a"),
             },
             "vesselB": {
                 "mmsi": int(p["mmsi_b"]),
@@ -350,7 +362,14 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_b"]),
                 "sog": float(p["sog_b"]) if pd.notna(p.get("sog_b")) else None,
                 "cog": float(p["cog_b"]) if pd.notna(p.get("cog_b")) else None,
+                **payload_fields(p, side="b"),
             },
+            "sanctionsMatch": bool(p.get("sanctions_match")),
+            "matchConfidence": (
+                "none"
+                if p.get("match_confidence") is None or pd.isna(p.get("match_confidence"))
+                else str(p.get("match_confidence"))
+            ),
         })
     return records
 
@@ -377,6 +396,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "durationLabel": duration["durationLabel"],
             "pairedAt": _fmt_ts(v.get("last_detected_at")),
             "firstDetectedAt": _fmt_ts(v.get("first_detected_at")),
+            **payload_fields(v),
         })
     return records
 
@@ -398,13 +418,31 @@ def detect_sts_in_anchorages(
     obs_ids = in_anchorage["observation_id"].astype(int).tolist() if not in_anchorage.empty else []
     members = load_members(obs_ids, engine)
     pairs = find_pairs_within_observations(in_anchorage, members, max_distance_m)
+    pairs = attach_sanctions_pair_sides(pairs, engine)
+    extra_pair = [c for c in ("suspicion_score", "distance_m") if c in pairs.columns]
+    extra_asc = [False, True][: len(extra_pair)]
+    pairs = sort_listed_first(pairs, extra_sort=extra_pair, extra_ascending=extra_asc)
+
     paired_vessels = paired_vessels_only(pairs, members)
+    paired_vessels = attach_sanctions(paired_vessels, engine)
+    extra_v = ["suspicion_score"] if "suspicion_score" in paired_vessels.columns else []
+    extra_v_asc = [False] if extra_v else []
+    paired_vessels = sort_listed_first(
+        paired_vessels, extra_sort=extra_v, extra_ascending=extra_v_asc
+    )
+
+    sanctions_match_pair_count = int(pairs["sanctions_match"].sum()) if not pairs.empty else 0
+    sanctions_match_vessel_count = (
+        int(paired_vessels["sanctions_match"].sum()) if not paired_vessels.empty else 0
+    )
 
     return {
         "open_high_score_count": int(len(observations)),
         "in_anchorage_cluster_count": int(len(in_anchorage)),
         "pair_count": int(len(pairs)),
         "paired_vessel_count": int(len(paired_vessels)),
+        "sanctions_match_pair_count": sanctions_match_pair_count,
+        "sanctions_match_vessel_count": sanctions_match_vessel_count,
         "max_distance_m": float(max_distance_m),
         "min_suspicion_score": float(min_suspicion_score),
         "observations": in_anchorage,

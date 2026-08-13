@@ -5,7 +5,7 @@ MANTIS MCP server
 What is MCP?
   Model Context Protocol — a standard way for AI apps (like Cursor)
   to call your tools. Cursor starts this script, then the AI can
-  invoke the five tools below instead of writing curl by hand.
+  invoke the six tools below instead of writing curl by hand.
 
 How it runs:
   Cursor launches:  python server.py
@@ -18,6 +18,7 @@ Tools exposed:
   3. get_sts_activities
   4. get_illegal_anchoring
   5. get_dark_vessels
+  6. get_sanctions_list
 """
 
 from __future__ import annotations
@@ -60,6 +61,8 @@ def get_sts_activities(
     """
     Return active high-suspicion STS (ship-to-ship) pairs inside
     anchorage polygons from GET /mantis/sts-activities.
+    Each vessel may include OFAC sanctionsMatch (label only;
+    suspicion score is unchanged).
 
     Optional filters:
       min_suspicion_score — e.g. 4.5
@@ -77,6 +80,7 @@ def get_illegal_anchoring() -> dict[str, Any]:
     Return heuristic illegal-anchoring candidates
     from GET /mantis/illegal-anchoring
     (restricted / parent polygons; Excl carve-outs excluded).
+    OFAC sanctionsMatch is attached as a label; keep/drop is unchanged.
     """
     return client.get_illegal_anchoring()
 
@@ -88,10 +92,26 @@ def get_dark_vessels(include_coverage_exit: bool = True) -> dict[str, Any]:
     from GET /mantis/darkvessels.
 
     Candidates are labeled with polygonName when inside a polygon;
-    they are not dropped. Set include_coverage_exit=False for a
-    tighter ops list (excludes possible_coverage_exit).
+    they are not dropped. OFAC `sanctionsMatch` is a label only
+    (IMO confirmed / MMSI possible); unmatched vessels stay.
+    Set include_coverage_exit=False for a tighter ops list
+    (excludes possible_coverage_exit).
     """
     return client.get_dark_vessels(include_coverage_exit=include_coverage_exit)
+
+
+@mcp.tool()
+def get_sanctions_list(
+    imo: str | None = None,
+    mmsi: str | None = None,
+) -> dict[str, Any]:
+    """
+    Return the OFAC vessel list from GET /mantis/sanctions.
+
+    Optional imo and/or mmsi to search. If neither is set, the full
+    vessel list is returned (not sampled — MCP is not Swagger).
+    """
+    return client.get_sanctions_list(imo=imo, mmsi=mmsi)
 
 
 if __name__ == "__main__":

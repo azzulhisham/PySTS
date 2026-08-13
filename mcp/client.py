@@ -133,6 +133,19 @@ class MantisClient:
             params={"includeCoverageExit": str(include_coverage_exit).lower()},
         )
 
+    def get_sanctions_list(
+        self,
+        imo: str | None = None,
+        mmsi: str | None = None,
+    ) -> dict[str, Any]:
+        """GET /mantis/sanctions — full OFAC vessel list, or search by IMO / MMSI."""
+        params: dict[str, Any] = {}
+        if imo:
+            params["imo"] = imo
+        if mmsi:
+            params["mmsi"] = mmsi
+        return self._get("/mantis/sanctions", params=params or None)
+
 
 def _safe_json(response: httpx.Response) -> Any:
     try:

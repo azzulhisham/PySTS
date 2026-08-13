@@ -15,6 +15,8 @@ from sts_detection import (
 from illegal_anchoring import detect_illegal_anchoring
 from dark_vessels import detect_dark_vessels
 from timelineplayback import get_vessel_activity_timeline, get_vessel_track_replay
+from sanctions import query_ofac_vessels
+from swagger_sample import apply_swagger_sample, is_swagger_referer
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -63,6 +65,21 @@ def authorize_user(token):
         return -1
 
 
+def is_swagger_request() -> bool:
+    """True when Try it out is run from /swagger (Referer). Real clients get the full list."""
+    referer = request.headers.get("Referer") or request.headers.get("Referrer") or ""
+    return is_swagger_referer(referer)
+
+
+def json_for_client(payload, list_keys: list[str], wrap_list_as: str | None = None):
+    return apply_swagger_sample(
+        payload,
+        list_keys,
+        from_swagger=is_swagger_request(),
+        wrap_list_as=wrap_list_as,
+    )
+
+
 @app.route("/authentication/token", methods=["POST"])
 @cross_origin()
 def get_token():
@@ -101,8 +118,9 @@ def get_all_polygons():
         return jsonify({"message": "Unauthorized"}), 401
 
     try:
-        # Anchorage areas + restricted-limit polygon
-        return jsonify(all_polygons), 200
+        # Anchorage areas + restricted-limit polygon.
+        # Frontend/curl: bare array. Swagger: wrapped + 20-row sample.
+        return jsonify(json_for_client(all_polygons, ["polygons"], wrap_list_as="polygons")), 200
     except Exception as e:
         logging.error(f"[get_all_polygons] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
@@ -137,8 +155,10 @@ def get_sts_activities():
             "pairedVesselCount": result["paired_vessel_count"],
             "pairedVessels": result["paired_vessels_payload"],
             "pairs": result["pairs_payload"],
+            "sanctionsMatchPairCount": result["sanctions_match_pair_count"],
+            "sanctionsMatchVesselCount": result["sanctions_match_vessel_count"],
         }
-        return jsonify(payload), 200
+        return jsonify(json_for_client(payload, ["pairs", "pairedVessels"])), 200
     
     except Exception as e:
         logging.error(f"[get_sts_activities] error: {e}")
@@ -166,9 +186,10 @@ def get_illegal_anchoring():
             "byReason": result["by_reason"],
             "watchPolygonCount": result["watch_polygon_count"],
             "portLimitPolygonCount": result["port_limit_polygon_count"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
             "vessels": result["vessels_payload"],
         }
-        return jsonify(payload), 200
+        return jsonify(json_for_client(payload, ["vessels"])), 200
     
     except Exception as e:
         logging.error(f"[get_illegal_anchoring] error: {e}")
@@ -183,7 +204,7 @@ def get_dark_vessels():
     Candidates are not dropped by polygon. When the last position is inside
     a polygon from polygons.py, polygonName is attached (Excl name preferred
     if the point is in a hole). Labels are heuristics — coverage exit is a
-    competing explanation (see vesselslowspeeddetection.md).
+    competing explanation (see backend/mantis-detection.md).
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -202,13 +223,42 @@ def get_dark_vessels():
             "candidateCount": result["candidate_count"],
             "byReason": result["by_reason"],
             "byConfidence": result["by_confidence"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
             "vessels": result["vessels_payload"],
         }
 
-        return jsonify(payload), 200
+        return jsonify(json_for_client(payload, ["vessels"])), 200
     
     except Exception as e:
         logging.error(f"[get_dark_vessels] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/sanctions", methods=["GET"])
+@cross_origin()
+def get_sanctions_list():
+    """
+    OFAC vessel list from pnav (SDN + consolidated non-SDN if loaded).
+
+    Query imo and/or mmsi to search. If neither is set, return the full
+    vessel list. Requests from Swagger UI are capped at 20 sample rows.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        result = query_ofac_vessels(
+            imo=request.args.get("imo"),
+            mmsi=request.args.get("mmsi"),
+        )
+        payload = {
+            "imo": result["imo"],
+            "mmsi": result["mmsi"],
+            "vessels": result["vessels"],
+        }
+        return jsonify(json_for_client(payload, ["vessels"])), 200
+    except Exception as e:
+        logging.error(f"[get_sanctions_list] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 
@@ -235,7 +285,7 @@ def get_vessel_timeline():
 
     try:
         payload = get_vessel_activity_timeline(mmsi, date_from, date_to)
-        return jsonify(payload), 200
+        return jsonify(json_for_client(payload, ["events"])), 200
     except ValueError as e:
         return jsonify({"message": str(e)}), 400
     except Exception as e:
@@ -271,7 +321,7 @@ def get_vessel_track():
             date_to,
             include_class_b=include_class_b,
         )
-        return jsonify(payload), 200
+        return jsonify(json_for_client(payload, ["track"])), 200
     except ValueError as e:
         return jsonify({"message": str(e)}), 400
     except Exception as e:

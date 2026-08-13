@@ -25,6 +25,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from polygons import anchorage_areas, is_excl_name
+from sanctions import attach_sanctions, payload_fields, sort_listed_first
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -64,6 +65,7 @@ SELECT
     s."shipName" AS shipname,
     s."shipType" AS shiptype,
     s."shipTypeDesc" AS shiptypedesc,
+    s."imo" AS imo,
     EXTRACT(EPOCH FROM (now() - a.tscurrent)) AS silence_seconds,
     CASE
         WHEN a.rowcount >= {MIN_SLOWDOWN_ROWCOUNT}
@@ -263,6 +265,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "confidence": v.get("confidence"),
             "polygonName": None if v.get("polygon_name") is None or pd.isna(v.get("polygon_name")) else v.get("polygon_name"),
             "inExclPolygon": bool(v.get("in_excl_polygon")) if pd.notna(v.get("in_excl_polygon")) else False,
+            **payload_fields(v),
         })
     return records
 
@@ -284,24 +287,30 @@ def detect_dark_vessels(
         df = df[df["dark_reason"] != "possible_coverage_exit"].reset_index(drop=True)
 
     df = attach_polygon_names(df)
+    df = attach_sanctions(df, engine)
+    extra = ["tscurrent"] if "tscurrent" in df.columns else []
+    df = sort_listed_first(df, extra_sort=extra)
 
     by_reason: dict[str, int] = {}
     by_confidence: dict[str, int] = {}
+    sanctions_match_count = 0
     if not df.empty:
         for reason, cnt in df["dark_reason"].value_counts().items():
             by_reason[str(reason)] = int(cnt)
         for conf, cnt in df["confidence"].value_counts().items():
             by_confidence[str(conf)] = int(cnt)
+        sanctions_match_count = int(df["sanctions_match"].sum())
 
     return {
         "candidate_count": int(len(df)),
         "by_reason": by_reason,
         "by_confidence": by_confidence,
+        "sanctions_match_count": sanctions_match_count,
         "min_silence_minutes": MIN_SILENCE_MINUTES,
         "coverage_exit_days": COVERAGE_EXIT_DAYS,
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "include_coverage_exit": include_coverage_exit,
-        "rule_version": "v1.1-slowmove-dark-polygon-label",
+        "rule_version": "v1.2-slowmove-dark-polygon-ofac-label",
         "vessels": df,
         "vessels_payload": vessels_to_payload(df),
         "sql": DARK_VESSEL_SQL,

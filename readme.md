@@ -49,9 +49,7 @@ API contract (polygons, Excl holes, keep/drop/label): **[restapi/README.md](rest
 | `vesselslowspeeddetection.py` | `ais_vesselslowmoveactivities` | `GET /mantis/darkvessels` |
 | `vesselstrajectorydetection.py` | `ais_vesselmovementactivities` | `GET /mantis/illegal-anchoring` (also enriches STS members with sog/cog) |
 
-Research notes for slow-speed / dark: `backend/vesselslowspeeddetection.md`.
-
-**Detection factors and formulas (living maintenance spec):** [`backend/vesselslowspeeddetection.md`](backend/vesselslowspeeddetection.md) — thresholds, ship types, durations, and scoring for all three MANTIS pipeline jobs plus the API filters. Update that file whenever a knob changes.
+**Detection factors and formulas (living maintenance spec):** [`backend/mantis-detection.md`](backend/mantis-detection.md) — thresholds, ship types, durations, and scoring for all three MANTIS pipeline jobs plus the API filters. Update that file whenever a knob changes.
 
 ## Not MANTIS (same `PySTS` folder, different purpose)
 

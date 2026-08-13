@@ -3,7 +3,7 @@
   "info": {
     "title": "MANTIS API",
     "version": "1.0.1",
-    "description": "MANTIS API.\n\n## Authentication\n\nProtected endpoints require a valid **Bearer token**.\n\n### Step 1 \u2014 Obtain an access token\n\nSend a **POST** request to **`/authentication/token`** with:\n\n```json\n{\n  \"userId\": \"user@sts.my\",\n  \"accessKey\": \"<your-access-key>\"\n}\n```\n\n**Example response (200 OK):**\n\n```json\n{\n  \"accessToken\": \"<jwt-token>\",\n  \"expiredDate\": \"2026-01-01 12:00:00\"\n}\n```\n\n### Step 2 \u2014 Authorize in Swagger UI\n\n1. Call **POST /authentication/token** and copy the `accessToken`.\n2. Click **Authorize** (lock icon).\n3. Paste the `accessToken` into **BearerAuth** and click **Authorize**.\n\n### Using the token with external clients\n\n```\nAuthorization: Bearer <accessToken>\n```",
+    "description": "MANTIS API.\n\n## Authentication\n\nProtected endpoints require a valid **Bearer token**.\n\n### Step 1 \u2014 Obtain an access token\n\nSend a **POST** request to **`/authentication/token`** with:\n\n```json\n{\n  \"userId\": \"user@sts.my\",\n  \"accessKey\": \"<your-access-key>\"\n}\n```\n\n**Example response (200 OK):**\n\n```json\n{\n  \"accessToken\": \"<jwt-token>\",\n  \"expiredDate\": \"2026-01-01 12:00:00\"\n}\n```\n\n### Step 2 \u2014 Authorize in Swagger UI\n\n1. Call **POST /authentication/token** and copy the `accessToken`.\n2. Click **Authorize** (lock icon).\n3. Paste the `accessToken` into **BearerAuth** and click **Authorize**.\n\n### Using the token with external clients\n\n```\nAuthorization: Bearer <accessToken>\n```\n\n## Swagger sample cap (all list endpoints)\n\n**Try it out from this page** is detected via the `Referer` header (`/swagger`). Each list in the JSON is capped at **20 sample rows** so the UI does not lag. The body includes `sample: true`, `fromSwagger: true`, `totalCount` (or `totalCounts`), and a `message`. curl, the operations frontend, and MCP receive the **full** result. `POST /authentication/token` and `GET /` (health) are not sampled.",
     "license": {
       "name": "MIT",
       "url": "https://opensource.org/licenses/MIT"
@@ -123,6 +123,25 @@
             "type": "number",
             "format": "double",
             "description": "Course over ground (degrees)."
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true,
+            "description": "Normalized 7-digit IMO from ais_static, if present."
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this vessel matches OFAC SDN or consolidated non-SDN. Label only — not a legal finding and not used in suspicion_score."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"],
+            "description": "confirmed = IMO match. possible = MMSI match when the candidate has no IMO. none = no match. Unmatched vessels are still returned."
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
           }
         }
       },
@@ -171,6 +190,15 @@
           },
           "vesselB": {
             "$ref": "#/components/schemas/StsVessel"
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if vesselA or vesselB matches OFAC. Does not change suspicionScore."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"],
+            "description": "Best of the two vessels (confirmed > possible > none)."
           }
         }
       },
@@ -215,6 +243,14 @@
             "items": {
               "$ref": "#/components/schemas/StsPair"
             }
+          },
+          "sanctionsMatchPairCount": {
+            "type": "integer",
+            "description": "Pairs where at least one vessel matches OFAC."
+          },
+          "sanctionsMatchVesselCount": {
+            "type": "integer",
+            "description": "Paired vessels that match OFAC."
           }
         }
       },
@@ -297,6 +333,23 @@
           },
           "detectedAt": {
             "type": "string"
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this vessel matches OFAC. Label only — AIS keep/drop rules are unchanged."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
           }
         }
       },
@@ -305,7 +358,7 @@
         "properties": {
           "ruleVersion": {
             "type": "string",
-            "example": "v3-in-restricted-or-watch-exclude-excl-holes"
+            "example": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -329,6 +382,10 @@
           "portLimitPolygonCount": {
             "type": "integer",
             "description": "Count of Excl carve-out polygons (API key kept for compatibility)."
+          },
+          "sanctionsMatchCount": {
+            "type": "integer",
+            "description": "Candidates that match OFAC. Unmatched vessels are still returned."
           },
           "vessels": {
             "type": "array",
@@ -437,6 +494,23 @@
           "inExclPolygon": {
             "type": "boolean",
             "description": "True when the last position is inside an Excl carve-out. Label only \u2014 the vessel is still returned."
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this vessel matches OFAC. Label only \u2014 not used in dark confidence and candidates are not dropped."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
           }
         }
       },
@@ -445,7 +519,7 @@
         "properties": {
           "ruleVersion": {
             "type": "string",
-            "example": "v1.1-slowmove-dark-polygon-label"
+            "example": "v1.2-slowmove-dark-polygon-ofac-label"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -477,10 +551,116 @@
               "type": "integer"
             }
           },
+          "sanctionsMatchCount": {
+            "type": "integer",
+            "description": "Candidates that match OFAC. Unmatched vessels are still returned."
+          },
           "vessels": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/DarkVessel"
+            }
+          }
+        }
+      },
+      "OfacVessel": {
+        "type": "object",
+        "properties": {
+          "uid": {
+            "type": "integer"
+          },
+          "listName": {
+            "type": "string",
+            "enum": ["SDN", "CONS"]
+          },
+          "vesselName": {
+            "type": "string",
+            "nullable": true
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "mmsi": {
+            "type": "string",
+            "nullable": true
+          },
+          "callSign": {
+            "type": "string",
+            "nullable": true
+          },
+          "vesselType": {
+            "type": "string",
+            "nullable": true
+          },
+          "vesselFlag": {
+            "type": "string",
+            "nullable": true
+          },
+          "vesselOwner": {
+            "type": "string",
+            "nullable": true
+          },
+          "programs": {
+            "type": "array",
+            "nullable": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "remarks": {
+            "type": "string",
+            "nullable": true
+          },
+          "publishDate": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "SanctionsListResponse": {
+        "type": "object",
+        "properties": {
+          "imo": {
+            "type": "string",
+            "nullable": true,
+            "description": "Normalized IMO used for the search, if provided."
+          },
+          "mmsi": {
+            "type": "string",
+            "nullable": true,
+            "description": "Normalized MMSI used for the search, if provided."
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows matching the filter (before Swagger sample cap)."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `vessels`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "vessels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OfacVessel"
             }
           }
         }
@@ -758,7 +938,7 @@
           "mantis"
         ],
         "summary": "Get suspected dark / AIS-transponder-off vessels.",
-        "description": "v1 heuristic over `ais_vesselslowmoveactivities`: Class-A large vessels (shipType 70\u201389) that slowed then went silent before a confirmed stop (`rowcount < 30`), with AIS silence \u2265 30 minutes. Reasons: `suspected_dark_after_slowdown` (higher interest), `possible_coverage_exit` (SEA footprint leave), `low_evidence_ais_gap`. Not proof of intentional dark \u2014 see `backend/vesselslowspeeddetection.md`. Candidates are labeled with `polygonName` when the last position is inside a polygon from `polygons.py` (Excl name preferred if inside a hole). They are not dropped by polygon.",
+        "description": "v1 heuristic over `ais_vesselslowmoveactivities`: Class-A large vessels (shipType 70\u201389) that slowed then went silent before a confirmed stop (`rowcount < 30`), with AIS silence \u2265 30 minutes. Reasons: `suspected_dark_after_slowdown` (higher interest), `possible_coverage_exit` (SEA footprint leave), `low_evidence_ais_gap`. Not proof of intentional dark \u2014 see `backend/mantis-detection.md`. Candidates are labeled with `polygonName` when the last position is inside a polygon from `polygons.py` (Excl name preferred if inside a hole). They are not dropped by polygon. OFAC SDN/CONS is attached as `sanctionsMatch` / `matchConfidence` (IMO = confirmed, MMSI-only = possible). Unmatched vessels stay. Listed ships are sorted first; dark `confidence` is unchanged.\n\n**This Swagger page:** `vessels` is capped at 20 samples.",
         "operationId": "getDarkVessels",
         "security": [
           {
@@ -797,13 +977,68 @@
         }
       }
     },
+    "/mantis/sanctions": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Search the OFAC vessel list (IMO or MMSI).",
+        "description": "Returns OFAC **vessels** from `pnav` (SDN plus consolidated non-SDN if loaded). This is a lookup of the ingested list, not a MANTIS detector and not a legal finding.\n\n- Pass `imo` and/or `mmsi` to search (either identifier matches).\n- If neither is passed, the **full vessel list** is returned (~1,500 SDN ships).\n- **Swagger UI Try it out** is capped at **20 sample rows** so the page does not lag. `sample` is true and `message` explains this. `totalCount` is still the full match count.\n- curl, the frontend, and MCP receive the entire result.\n\nPeople and companies on SDN are not included (no IMO/MMSI).",
+        "operationId": "getSanctionsList",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "imo",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "9187631"
+            },
+            "description": "IMO number (7 digits, or `IMO 9187631`). Optional."
+          },
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "example": "256845000"
+            },
+            "description": "MMSI. Optional. If both imo and mmsi are set, a row matching either is returned."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OFAC vessel rows. From Swagger UI, at most 20 rows plus a sample message.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SanctionsListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
     "/mantis/polygons": {
       "get": {
         "tags": [
           "mantis"
         ],
         "summary": "Get all anchorage polygons (including restricted limit).",
-        "description": "Returns every anchorage area polygon defined in `polygons.py`, plus the **Restricted Limit** polygon. Polygons whose name contains **Excl** are carve-outs (holes) inside a parent polygon and are included in this catalogue. Coordinates are GeoJSON-ordered `[longitude, latitude]`.",
+        "description": "Returns every anchorage area polygon defined in `polygons.py`, plus the **Restricted Limit** polygon. Polygons whose name contains **Excl** are carve-outs (holes) inside a parent polygon and are included in this catalogue. Coordinates are GeoJSON-ordered `[longitude, latitude]`.\n\n**Clients (curl / frontend):** a JSON array of all polygons.\n**This Swagger page:** an object with `polygons` (first 20), `sample`, `totalCount`, and `message`.",
         "operationId": "getAllAnchoragePolygons",
         "security": [
           {
@@ -812,7 +1047,7 @@
         ],
         "responses": {
           "200": {
-            "description": "List of anchorage polygon objects.",
+            "description": "Full polygon catalogue (array) for curl/frontend. From this Swagger page: object with 20 sample polygons.",
             "content": {
               "application/json": {
                 "schema": {
@@ -839,7 +1074,7 @@
           "mantis"
         ],
         "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {
@@ -885,7 +1120,7 @@
           "mantis"
         ],
         "summary": "Get heuristic illegal-anchoring candidates.",
-        "description": "v3 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **parent / watch polygons** from `polygons.py`. EXCLUDE vessels inside any **Excl** carve-out (a hole inside a parent polygon, e.g. Singapore South Anchorage Excl1). Parent polygons such as Singapore East / Western OPL / South are used as watch zones. Not a legal determination.",
+        "description": "v3 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **parent / watch polygons** from `polygons.py`. EXCLUDE vessels inside any **Excl** carve-out (a hole inside a parent polygon, e.g. Singapore South Anchorage Excl1). Parent polygons such as Singapore East / Western OPL / South are used as watch zones. OFAC labels (`sanctionsMatch`) are attached; keep/drop rules are unchanged. Not a legal determination.\n\n**This Swagger page:** `vessels` is capped at 20 samples.",
         "operationId": "getIllegalAnchoring",
         "security": [
           {
@@ -918,7 +1153,7 @@
           "mantis"
         ],
         "summary": "Get derived activity timeline for one vessel.",
-        "description": "Returns discrete activity/events for a vessel between two datetimes from PostgreSQL derived tables: zone visits (`ais_vesselinzone`), restricted zone visits (`ais_vesselinrestrictzone`), stop/low-speed activities (`ais_vesselmovementactivities`), slow-move activities (`ais_vesselslowmoveactivities`), and static identity changes (`ais_static_evt`). Does not include raw AIS position points \u2014 use **GET /mantis/vessel-track** for full track replay.",
+        "description": "Returns discrete activity/events for a vessel between two datetimes from PostgreSQL derived tables: zone visits (`ais_vesselinzone`), restricted zone visits (`ais_vesselinrestrictzone`), stop/low-speed activities (`ais_vesselmovementactivities`), slow-move activities (`ais_vesselslowmoveactivities`), and static identity changes (`ais_static_evt`). Does not include raw AIS position points \u2014 use **GET /mantis/vessel-track** for full track replay.\n\n**This Swagger page:** `events` is capped at 20 samples.",
         "operationId": "getVesselTimeline",
         "security": [
           {
@@ -996,7 +1231,7 @@
           "mantis"
         ],
         "summary": "Get full AIS track for map replay.",
-        "description": "Returns ordered AIS position reports for one vessel between two datetimes from ClickHouse (`pnav.ais_position`, optionally `pnav.ais_type18` for Class B). Use for map playback and route visualization.",
+        "description": "Returns ordered AIS position reports for one vessel between two datetimes from ClickHouse (`pnav.ais_position`, optionally `pnav.ais_type18` for Class B). Use for map playback and route visualization.\n\n**This Swagger page:** `track` is capped at 20 sample points.",
         "operationId": "getVesselTrack",
         "security": [
           {

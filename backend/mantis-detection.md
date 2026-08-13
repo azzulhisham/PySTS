@@ -1,7 +1,10 @@
-# MANTIS backend detection — maintenance
+# MANTIS detection — maintenance spec
 
-Living document for **detection factors, formulas, and thresholds**.  
+Living document for **detection factors, formulas, and thresholds** across STS, dark vessels, and illegal anchoring.  
+Formerly `vesselslowspeeddetection.md`. The pipeline script `vesselslowspeeddetection.py` is unchanged.  
 Update this file whenever a constant or formula in the three pipeline scripts (or the matching `restapi` filters) changes. Accuracy work is expected to be continuous.
+
+Work still open vs done: [`todo.md`](todo.md). Keep both files in step — if you finish an ingest, join key, or label, mark `todo.md` **and** record the current behaviour here.
 
 **Last verified against code:** 2026-08-13
 
@@ -10,6 +13,8 @@ Update this file whenever a constant or formula in the three pipeline scripts (o
 | STS | `backend/vesselproximitydetection.py` | `ais_vesselproximityobservation` / `member` / `edge` | `restapi/sts_detection.py` |
 | Dark vessels | `backend/vesselslowspeeddetection.py` | `ais_vesselslowmoveactivities` | `restapi/dark_vessels.py` |
 | Illegal anchoring | `backend/vesselstrajectorydetection.py` | `ais_vesselmovementactivities` | `restapi/illegal_anchoring.py` |
+
+Identity ingest (not a detector): `backend/ofac_sdn_ingest.py` (SDN) and `backend/ofac_cons_ingest.py` (non-SDN). See [Identity enrichment](#identity-enrichment-not-a-fourth-detector).
 
 Not MANTIS: `backend/vesselzone.py`, `backend/polygons.py`, `st_app/`.  
 Product polygon / Excl rules: `restapi/README.md`.  
@@ -21,12 +26,13 @@ AIS silence is **disappearance from the feed**, not proof of intent. Labels must
 
 ## How to maintain this file
 
-When you tune accuracy:
+When you tune accuracy **or** add identity data:
 
-1. Change the constant or formula in the Python file.
-2. Update the matching row in [Master knob table](#master-knob-table) and the section for that job.
-3. Note the date and why (false positives / misses).
+1. Change the constant, formula, or ingest in the Python file.
+2. Update the matching row in [Master knob table](#master-knob-table), the job section, or [Identity enrichment](#identity-enrichment-not-a-fourth-detector).
+3. Note the date and why (false positives / misses / new list).
 4. If pipeline and API both have a related knob (e.g. pair distance 30 m vs 35 m), update **both** rows and the [Layer mismatch](#layer-mismatch-do-not-ignore) table.
+5. Tick or add the matching item in [`todo.md`](todo.md) so the work list and this spec do not drift.
 
 ---
 
@@ -119,6 +125,24 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Dark: ship type | `70–89` | `dark_vessels.py` |
 | Dark: polygons | **label only, never drop**; Excl name preferred if in a hole | `dark_vessels.py` |
 | Dark: Restricted Limit | **not** used for `polygonName` | `dark_vessels.py` |
+| Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring; `onBunkerRegister` later |
+
+### Identity ingest (`ofac_sdn_ingest.py` / `ofac_cons_ingest.py` — not a detector loop)
+
+| Factor | Current value | Role |
+| --- | --- | --- |
+| SDN source | official XML `https://www.treasury.gov/ofac/downloads/sdn.xml` | not the search website |
+| Non-SDN source | official XML `https://www.treasury.gov/ofac/downloads/consolidated/consolidated.xml` | SSI, FSE, PLC, CAPTA, NS-MBS, NS-CMIC, … |
+| Connection | same RDS `pnav` URL as the three pipeline jobs | one-shot write |
+| Refresh | **once a day** (or cron `15 8 * * *` with `--list both`) | OFAC can change any US business day |
+| Replace policy | `TRUNCATE` then reload **that list’s** tables only | SDN run does not wipe CONS, and vice versa |
+| SDN tables | `ofac_sdn_entry`, `ofac_sdn_aka`, `ofac_sdn_identifier` | view `ofac_sdn_vessel` |
+| Non-SDN tables | `ofac_cons_entry`, `ofac_cons_aka`, `ofac_cons_identifier` | view `ofac_cons_vessel` |
+| History | `ofac_ingest_run` (`list_name` = `SDN` or `CONS`) | shared |
+| Join key | **IMO first** (7 digits). MMSI second if present. Name / callsign last. | `*_entry.imo` / `.mmsi` |
+| IMO in XML | `idType = Vessel Registration Identification`, value like `IMO 7406784` | parser stores `7406784` |
+| Non-SDN vessels | **none in the 07/27/2026 file** (481 entities/individuals) | empty `ofac_cons_vessel` is valid |
+| API attach | **done 2026-08-13** — labels on STS / dark / illegal-anchoring JSON; AIS scores unchanged | `restapi/sanctions.py` |
 
 ---
 
@@ -131,6 +155,7 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Slow-speed vs trajectory SOG | dark uses **3.0 kn**; movement uses **0.5 kn** | — | “slow” and “stopped” are different populations |
 | Confirmed-stop rowcount | dark **30**; movement **20** | dark API excludes `rowcount >= 30` | do not mix the two tables’ `rowcount` meaning |
 | Ship type | only proximity filters 70–89 | all MANTIS detectors filter 70–89 | pipeline tables still contain other types |
+| Sanctions | OFAC SDN + CONS tables in `pnav` | API adds `sanctionsMatch` / `matchConfidence`; **does not** change `suspicion_score` or dark `confidence` | listed ships sorted first; unmatched still returned |
 
 ---
 
@@ -305,19 +330,90 @@ tanker = count of members with 80 <= shipType < 90
 
 ---
 
+## Identity enrichment (not a fourth detector)
+
+AIS behaviour stays first. Sanctions lists are **labels on existing STS / dark / anchoring candidates**. They do not create a new MANTIS job and they are **not** a legal finding. Bunker / barge register is **skipped for now** (no source yet).
+
+Open vs done for this work: [`todo.md`](todo.md) section **Now — obtain and join identity lists**.
+
+### In pnav today (2026-08-13)
+
+| Object | Purpose |
+| --- | --- |
+| `backend/ofac_sdn_ingest.py` | SDN XML → `ofac_sdn_*`. Same `pnav` connection as the three detectors. Default `--list sdn`. |
+| `backend/ofac_cons_ingest.py` | Consolidated non-SDN XML → `ofac_cons_*`. Wrapper for `--list cons`. |
+| `ofac_sdn_entry` / `ofac_cons_entry` | One record. Vessel fields plus normalized `imo` / `mmsi`. |
+| `ofac_sdn_aka` / `ofac_cons_aka` | Aliases |
+| `ofac_sdn_identifier` / `ofac_cons_identifier` | Raw OFAC IDs |
+| `ofac_sdn_vessel` / `ofac_cons_vessel` | View: `sdn_type = 'Vessel'` |
+| `ofac_ingest_run` | Each run’s list name, publish date, and row counts |
+| `restapi/sanctions.py` | Join OFAC onto existing STS / dark / anchoring JSON. Lookup: `GET /mantis/sanctions`. |
+
+SDN parse of the 08/07/2026 file: **19,199** entries, **1,524** vessels, **1,519** with IMO, **792** with MMSI.
+
+Non-SDN parse of the 07/27/2026 file: **481** entries (118 individual, 363 entity), **0 vessels**. Empty `ofac_cons_vessel` is expected until OFAC lists a ship on a non-SDN program.
+
+Run once:
+
+```bash
+python3 backend/ofac_sdn_ingest.py
+python3 backend/ofac_cons_ingest.py
+# or both:
+python3 backend/ofac_sdn_ingest.py --list both
+```
+
+Daily cron (Singapore 08:15, after a typical US-afternoon OFAC publish):
+
+```cron
+15 8 * * * /usr/bin/python3 /opt/PySTS/backend/ofac_sdn_ingest.py --list both >> /var/log/ofac_ingest.log 2>&1
+```
+
+Check after a run:
+
+```sql
+SELECT list_name, COUNT(*) FROM ofac_sdn_entry GROUP BY list_name;
+SELECT sdn_type, COUNT(*) FROM ofac_cons_entry GROUP BY sdn_type;
+SELECT COUNT(*) FROM ofac_sdn_vessel;
+SELECT COUNT(*) FROM ofac_cons_vessel;  -- may be 0
+SELECT * FROM ofac_ingest_run ORDER BY ingested_at DESC LIMIT 5;
+```
+
+### Not in pnav / API yet
+
+Matches `todo.md` still unchecked:
+
+- Bunker / barge register — **skipped 2026-08-13**; no file yet
+- UN / UK OFSI / EU files (after OFAC is stable)
+- `onBunkerRegister` on API payloads (after a register exists)
+- Brief the frontend developer on `sanctionsMatch` before UI work
+
+### Join rules (API today — `restapi/sanctions.py`)
+
+1. Match **IMO** on `ais_static` vs `ofac_sdn_vessel` (then `ofac_cons_vessel`) → `matchConfidence = confirmed`.
+2. If the candidate has **no IMO**: MMSI vs OFAC MMSI → `possible`.
+3. If the candidate **has an IMO that does not match**, do **not** fall back to MMSI.
+4. No name / callsign match.
+5. AIS keep/drop, `suspicion_score`, and dark `confidence` are unchanged. Listed rows are sorted first.
+6. Unmatched vessels stay (`sanctionsMatch: false`, `matchConfidence: none`).
+7. A listed vessel that is not dark / STS / stopped still does not appear just because it is listed.
+
+---
+
 ## Accuracy roadmap (planned enhancements)
 
-Do not treat these as current behaviour.
+Do not treat these as current behaviour except item 1, which is in the API now.
 
-1. Split `tsstop` vs `tsdark` / `detection_type` on slow-move rows.
-2. Coverage / footprint polygon: last fix on the outer boundary + high sog → coverage exit.
-3. Time-based dark score (minutes at `sog ≤ 3`) instead of `rowcount` alone (`rowcount` depends on AIS rate).
-4. Reappearance: same MMSI later far away with plausible transit → down-rank earlier dark.
-5. Cross-check dark near an open STS cluster (higher interest).
-6. Optional extra type denylist (OSV, dredger) if they add noise.
-7. Ops-tight dark: `suspected_dark_after_slowdown` AND silence 30 min–72 h AND `rowcount >= 5`.
-8. Label loop: export candidates, mark dark vs coverage-exit vs gap, retune knobs.
-9. Optionally align pipeline 30 m with API 35 m later. **API stays at 35 m for now.**
+1. **Done 2026-08-13.** OFAC labels on STS / dark / anchoring payloads. Bunker labels later.
+2. Human review stays. Optional extra UN/UK/EU lists later.
+3. Split `tsstop` vs `tsdark` / `detection_type` on slow-move rows.
+4. Coverage / footprint polygon: last fix on the outer boundary + high sog → coverage exit.
+5. Time-based dark score (minutes at `sog ≤ 3`) instead of `rowcount` alone (`rowcount` depends on AIS rate).
+6. Reappearance: same MMSI later far away with plausible transit → down-rank earlier dark.
+7. Cross-check dark near an open STS cluster (higher interest).
+8. Optional extra type denylist (OSV, dredger) if they add noise. Do not wait on a bunker list.
+9. Ops-tight dark: `suspected_dark_after_slowdown` AND silence 30 min–72 h AND `rowcount >= 5`.
+10. Label loop: export candidates, mark dark vs coverage-exit vs gap, retune knobs.
+11. Optionally align pipeline 30 m with API 35 m later. **API stays at 35 m for now.**
 
 ---
 
@@ -382,6 +478,10 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-08-13 | API OFAC labels: `restapi/sanctions.py` on STS / dark / illegal-anchoring. IMO = confirmed, MMSI-only = possible, no name match, unmatched kept, listed sorted first. `suspicion_score` / dark `confidence` unchanged. |
+| 2026-08-13 | Bunker / barge register **skipped** until a source exists. |
+| 2026-08-13 | OFAC consolidated non-SDN ingest added (`ofac_cons_ingest.py` / `--list cons`). Tables `ofac_cons_*`. Current file has **0 vessels** (entities/individuals only). SDN tables untouched. |
+| 2026-08-13 | OFAC SDN ingest added (`ofac_sdn_ingest.py`). Tables/view in `pnav`; IMO normalized from `Vessel Registration Identification`. API labels **not** attached yet. Cross-linked with `todo.md`. |
 | 2026-08-13 | `vesselstrajectorydetection.py`: `ST_Point` corrected to `(longitude, latitude)`. API STS pair distance left at **35 m** by product decision. |
 | 2026-08-13 | Rewritten as MANTIS maintenance spec. Values taken from current Python (not old comments). Stale rowcount is **1**, AIS dark lookback **3 days**, movement lookback **2 days**, movement SOG **0.5 kn**, confirmed-stop rowcount movement **20** / dark **30**. API STS **4.5 / 35 m** vs pipeline **30 m** recorded as intentional for now. |
 | 2026-07 | Dark API research (reasons, coverage exit, cargo/tanker 70–89). |

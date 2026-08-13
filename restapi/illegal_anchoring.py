@@ -26,6 +26,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
 from polygons import anchorage_areas, is_excl_name, restricted_limit
+from sanctions import attach_sanctions, payload_fields, sort_listed_first
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -54,7 +55,8 @@ SELECT
     a.navstatusdesc,
     s."shipType" AS shiptype,
     s."shipTypeDesc" AS shiptypedesc,
-    s."shipName" AS shipname
+    s."shipName" AS shipname,
+    s."imo" AS imo
 FROM (
     SELECT *,
            row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
@@ -310,6 +312,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "portLimitName": port_name,
             "reason": v.get("reason"),
             "detectedAt": v.get("detected_at"),
+            **payload_fields(v),
         })
     return records
 
@@ -318,11 +321,15 @@ def detect_illegal_anchoring(engine: Engine | None = None) -> dict[str, Any]:
     engine = engine or get_pg_engine()
     stopped = load_stopped_vessels(engine)
     illegal = classify_illegal_anchoring(stopped)
+    illegal = attach_sanctions(illegal, engine)
+    illegal = sort_listed_first(illegal)
 
     by_reason: dict[str, int] = {}
+    sanctions_match_count = 0
     if not illegal.empty:
         for reason, cnt in illegal["reason"].value_counts().items():
             by_reason[str(reason)] = int(cnt)
+        sanctions_match_count = int(illegal["sanctions_match"].sum())
 
     watch = watch_polygons()
     port = port_limit_polygons()
@@ -330,11 +337,12 @@ def detect_illegal_anchoring(engine: Engine | None = None) -> dict[str, Any]:
     return {
         "stopped_candidate_count": int(len(stopped)),
         "illegal_count": int(len(illegal)),
+        "sanctions_match_count": sanctions_match_count,
         "by_reason": by_reason,
         "watch_polygon_count": len(watch),
         "port_limit_polygon_count": len(port),
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "vessels": illegal,
         "vessels_payload": vessels_to_payload(illegal),
-        "rule_version": "v3-in-restricted-or-watch-exclude-excl-holes",
+        "rule_version": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label",
     }

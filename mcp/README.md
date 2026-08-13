@@ -35,7 +35,7 @@ PySTS/mcp/
 ├── requirements.txt          ← Python packages
 ├── .env.example              ← copy to .env
 ├── client.py                 ← talks to MANTIS HTTP API
-├── server.py                 ← MCP server (5 tools)
+├── server.py                 ← MCP server (6 tools)
 └── cursor-mcp.example.json   ← paste into Cursor MCP settings
 ```
 
@@ -148,7 +148,7 @@ Cursor should call tools such as `get_dark_vessels` or `get_sts_activities`.
 
 ---
 
-## The five tools
+## The six tools
 
 | Tool | MANTIS endpoint | What it does |
 |------|-----------------|--------------|
@@ -157,18 +157,20 @@ Cursor should call tools such as `get_dark_vessels` or `get_sts_activities`.
 | `get_sts_activities` | `GET /mantis/sts-activities` | High-suspicion STS pairs |
 | `get_illegal_anchoring` | `GET /mantis/illegal-anchoring` | Suspect stops in watch / restricted zones |
 | `get_dark_vessels` | `GET /mantis/darkvessels` | Suspected AIS dark vessels |
+| `get_sanctions_list` | `GET /mantis/sanctions` | OFAC vessel list (optional `imo` / `mmsi`) |
 
 Optional tool args:
 
 - `get_sts_activities(min_suspicion_score=4.5, max_distance_m=35)`
 - `get_dark_vessels(include_coverage_exit=False)`
+- `get_sanctions_list(imo="9187631")`
 
 ---
 
 ## How the code fits together
 
 1. **`client.py`** — plain HTTP with `httpx` (token cache + GET helpers).
-2. **`server.py`** — registers five `@mcp.tool()` functions and runs on **stdio**.
+2. **`server.py`** — registers six `@mcp.tool()` functions and runs on **stdio**.
 3. **Cursor** — starts `server.py`, discovers tools, calls them when useful.
 
 You can read `server.py` top-to-bottom; it is intentionally short.
