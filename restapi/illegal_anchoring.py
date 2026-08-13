@@ -5,9 +5,9 @@ Rule:
 - Load stopped / stale Class-A large vessels (shipType 70–89).
 - KEEP vessels whose last position is inside:
     1) the restricted-limit polygon, OR
-    2) a watch polygon from restapi/polygons.py
-- EXCLUDE vessels inside Singapore port-limit polygons
-  (Singapore East / Western OPL / South + Excl* carve-outs).
+    2) a parent / watch polygon from restapi/polygons.py
+- EXCLUDE vessels inside any polygon whose name contains "Excl"
+  (carve-outs / holes inside a parent polygon).
 
 This is an operational heuristic for map/API study, not a legal determination.
 """
@@ -25,20 +25,12 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
-from polygons import anchorage_areas, restricted_limit
+from polygons import anchorage_areas, is_excl_name, restricted_limit
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Restricted limit ring (lon/lat) — single source in polygons.py
 RESTRICTED_LIMIT_LONLAT = restricted_limit["polygon"]
-
-# Singapore port waters drawn from polygons.py — exclude these from illegal candidates.
-# (Matches the dense green clusters around Jurong / Singapore South on the study map.)
-PORT_LIMIT_NAME_MARKERS = (
-    "singapore east anchorage",
-    "singapore western opl",
-    "singapore south anchorage",
-)
 
 pswd = "m4r1t1m3"
 DATABASE_URL = (
@@ -104,15 +96,15 @@ def polygon_to_geojson(coords_lonlat: list[list[float]]) -> dict:
 
 
 def is_port_limit_name(name: str) -> bool:
-    lower = name.lower()
-    return any(marker in lower for marker in PORT_LIMIT_NAME_MARKERS)
+    """Back-compat alias: Excl carve-outs are the exclusion polygons."""
+    return is_excl_name(name)
 
 
 def split_anchorage_polygons(areas: list[dict] | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
     Split polygons.py into:
-    - watch polygons (keep candidates that fall inside)
-    - port-limit polygons (exclude candidates that fall inside)
+    - watch / parent polygons (keep candidates that fall inside)
+    - Excl carve-outs (exclude candidates that fall inside a hole)
     """
     areas = areas or anchorage_areas
     watch_rows = []
@@ -120,7 +112,7 @@ def split_anchorage_polygons(areas: list[dict] | None = None) -> tuple[pd.DataFr
     for area in areas:
         row = {
             "anchorage_name": area["name"],
-            "is_excl": "excl" in area["name"].lower(),
+            "is_excl": is_excl_name(area["name"]),
             "geojson": json.dumps(polygon_to_geojson(area["polygon"])),
         }
         if is_port_limit_name(area["name"]):
@@ -131,13 +123,13 @@ def split_anchorage_polygons(areas: list[dict] | None = None) -> tuple[pd.DataFr
 
 
 def port_limit_polygons(areas: list[dict] | None = None) -> list[dict]:
-    """Polygon dicts treated as Singapore port limit (for maps / docs)."""
+    """Excl carve-out polygons (API key kept as port_limit for compatibility)."""
     areas = areas or anchorage_areas
     return [a for a in areas if is_port_limit_name(a["name"])]
 
 
 def watch_polygons(areas: list[dict] | None = None) -> list[dict]:
-    """Polygon dicts used as illegal-anchoring watch areas (non–port-limit)."""
+    """Parent / watch polygons used as illegal-anchoring detection zones."""
     areas = areas or anchorage_areas
     return [a for a in areas if not is_port_limit_name(a["name"])]
 
@@ -184,8 +176,8 @@ def load_stopped_vessels(engine: Engine | None = None) -> pd.DataFrame:
 
 def classify_illegal_anchoring(stopped: pd.DataFrame) -> pd.DataFrame:
     """
-    Keep stopped vessels inside restricted OR watch polygons,
-    excluding those inside Singapore port-limit polygons.
+    Keep stopped vessels inside restricted OR parent / watch polygons,
+    excluding those inside any Excl carve-out.
     """
     empty_cols = dict(
         in_restricted=pd.Series(dtype=bool),
@@ -344,5 +336,5 @@ def detect_illegal_anchoring(engine: Engine | None = None) -> dict[str, Any]:
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "vessels": illegal,
         "vessels_payload": vessels_to_payload(illegal),
-        "rule_version": "v2-in-restricted-or-watch-exclude-port-limit",
+        "rule_version": "v3-in-restricted-or-watch-exclude-excl-holes",
     }

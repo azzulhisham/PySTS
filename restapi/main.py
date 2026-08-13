@@ -14,6 +14,7 @@ from sts_detection import (
 )
 from illegal_anchoring import detect_illegal_anchoring
 from dark_vessels import detect_dark_vessels
+from timelineplayback import get_vessel_activity_timeline, get_vessel_track_replay
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -112,7 +113,8 @@ def get_all_polygons():
 def get_sts_activities():
     """
     Active (is_open) high-suspicion proximity pairs whose cluster centroid
-    falls inside anchorage polygons. Returns only paired vessels.
+    falls inside a parent / watch polygon (not an Excl hole). Returns only
+    paired vessels.
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -148,8 +150,8 @@ def get_sts_activities():
 def get_illegal_anchoring():
     """
     Heuristic illegal-anchoring candidates from stopped/stale vessels:
-    inside restricted-limit OR watch polygons from polygons.py, excluding
-    Singapore port-limit polygons (East / Western OPL / South + Excl*).
+    inside restricted-limit OR parent / watch polygons from polygons.py.
+    Vessels inside an Excl carve-out (hole inside a parent polygon) are excluded.
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -178,8 +180,10 @@ def get_illegal_anchoring():
 def get_dark_vessels():
     """
     Suspected dark / AIS-transponder-off vessels from slow-move activities.
-    Independent of anchorage polygons. Labels are heuristics — coverage exit
-    is a competing explanation (see vesselslowspeeddetection.md).
+    Candidates are not dropped by polygon. When the last position is inside
+    a polygon from polygons.py, polygonName is attached (Excl name preferred
+    if the point is in a hole). Labels are heuristics — coverage exit is a
+    competing explanation (see vesselslowspeeddetection.md).
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -200,9 +204,78 @@ def get_dark_vessels():
             "byConfidence": result["by_confidence"],
             "vessels": result["vessels_payload"],
         }
+
         return jsonify(payload), 200
+    
     except Exception as e:
         logging.error(f"[get_dark_vessels] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/vessel-timeline", methods=["GET"])
+@cross_origin()
+def get_vessel_timeline():
+    """
+    Derived activity/events for one vessel between two datetimes.
+
+    Sources: zone visits, restricted zones, stop/slow-move activities,
+    and static identity changes (PostgreSQL).
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    mmsi = request.args.get("mmsi", type=int)
+    date_from = request.args.get("from")
+    date_to = request.args.get("to")
+
+    if not mmsi or not date_from or not date_to:
+        return jsonify({
+            "message": "Query parameters mmsi, from, and to are required",
+        }), 400
+
+    try:
+        payload = get_vessel_activity_timeline(mmsi, date_from, date_to)
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_vessel_timeline] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/vessel-track", methods=["GET"])
+@cross_origin()
+def get_vessel_track():
+    """
+    Full AIS position track for map replay between two datetimes (ClickHouse).
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    mmsi = request.args.get("mmsi", type=int)
+    date_from = request.args.get("from")
+    date_to = request.args.get("to")
+    include_class_b = request.args.get("includeClassB", "false").lower() not in (
+        "0", "false", "no",
+    )
+
+    if not mmsi or not date_from or not date_to:
+        return jsonify({
+            "message": "Query parameters mmsi, from, and to are required",
+        }), 400
+
+    try:
+        payload = get_vessel_track_replay(
+            mmsi,
+            date_from,
+            date_to,
+            include_class_b=include_class_b,
+        )
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_vessel_track] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 

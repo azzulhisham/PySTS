@@ -163,10 +163,10 @@ def upsert_vessel_activities(engine: Engine):
 
             # # find the distance between 2 points
             df_dist = duckdb.sql(f"""
-                SELECT
+                    SELECT
                     ST_Distance_Sphere(
-                        ST_Point({row["latitude"]}, {row["longitude"]}),
-                        ST_Point({row["latitude"] if existing_activity is None else existing_activity.curlatitude}, {row["longitude"] if existing_activity is None else existing_activity.curlongitude})
+                        ST_Point({row["longitude"]}, {row["latitude"]}),
+                        ST_Point({row["longitude"] if existing_activity is None else existing_activity.curlongitude}, {row["latitude"] if existing_activity is None else existing_activity.curlatitude})
                     ) AS distance_m
             """).fetchdf()            
 
@@ -236,8 +236,8 @@ def upsert_vessel_activities(engine: Engine):
                 df_dist = duckdb.sql(f"""
                     SELECT
                         ST_Distance_Sphere(
-                            ST_Point({row["latitude"]}, {row["longitude"]}),
-                            ST_Point({row["latitude"] if vessel_in_high_speed is None else vessel_in_high_speed["latitude"].iloc[0]}, {row["longitude"] if vessel_in_high_speed is None else vessel_in_high_speed["longitude"].iloc[0]})
+                            ST_Point({row["longitude"]}, {row["latitude"]}),
+                            ST_Point({row["longitude"] if vessel_in_high_speed is None else vessel_in_high_speed["longitude"].iloc[0]}, {row["latitude"] if vessel_in_high_speed is None else vessel_in_high_speed["latitude"].iloc[0]})
                         ) AS distance_m
                 """).fetchdf()            
 

@@ -2,7 +2,11 @@
 Suspected dark / AIS-transponder-off vessels (v1).
 
 Reads ais_vesselslowmoveactivities produced by vesselslowspeeddetection.py.
-Does not depend on anchorage polygons.
+
+Candidates are never dropped because of polygons. When the last position
+falls inside a polygon from polygons.py, polygonName is attached. If the
+point is inside both a parent and an Excl hole, the Excl name is used
+(more specific). inExclPolygon is true in that case.
 
 Labels are operational heuristics — intentional dark cannot be proven from AIS alone.
 SEA coverage exit is a competing explanation and is returned as a separate reason.
@@ -15,9 +19,12 @@ import logging
 from typing import Any
 from urllib.parse import quote
 
+import duckdb
 import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
+from polygons import anchorage_areas, is_excl_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -104,6 +111,96 @@ def get_pg_engine() -> Engine:
     )
 
 
+def _ensure_duckdb_spatial() -> None:
+    duckdb.sql("INSTALL spatial")
+    duckdb.sql("LOAD spatial")
+
+
+def polygon_to_geojson(coords_lonlat: list[list[float]]) -> dict:
+    ring = [[float(lon), float(lat)] for lon, lat in coords_lonlat]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    return {"type": "Polygon", "coordinates": [ring]}
+
+
+def attach_polygon_names(
+    vessels: pd.DataFrame,
+    areas: list[dict] | None = None,
+) -> pd.DataFrame:
+    """
+    Label vessels with the polygon they last sat in. Never filters rows.
+    Prefers an Excl name when the point is inside a hole.
+    """
+    empty = dict(
+        polygon_name=pd.Series(dtype="object"),
+        in_excl_polygon=pd.Series(dtype=bool),
+    )
+    if vessels.empty:
+        return vessels.assign(**empty)
+
+    areas = areas or anchorage_areas
+    work = vessels.copy()
+    lon = work["curlongitude"] if "curlongitude" in work.columns else work["longitude"]
+    lat = work["curlatitude"] if "curlatitude" in work.columns else work["latitude"]
+    if "curlongitude" in work.columns and "longitude" in work.columns:
+        lon = work["curlongitude"].where(work["curlongitude"].notna(), work["longitude"])
+    if "curlatitude" in work.columns and "latitude" in work.columns:
+        lat = work["curlatitude"].where(work["curlatitude"].notna(), work["latitude"])
+    work["_lon"] = lon
+    work["_lat"] = lat
+
+    _ensure_duckdb_spatial()
+    df_poly = pd.DataFrame([
+        {
+            "anchorage_name": area["name"],
+            "is_excl": is_excl_name(area["name"]),
+            "geojson": json.dumps(polygon_to_geojson(area["polygon"])),
+        }
+        for area in areas
+    ])
+
+    duckdb.register("dark_vessels", work)
+    duckdb.register("anchorage_polys", df_poly)
+
+    located = duckdb.sql(
+        """
+        WITH hits AS (
+            SELECT
+                v.mmsi,
+                p.anchorage_name,
+                p.is_excl
+            FROM dark_vessels v
+            CROSS JOIN anchorage_polys p
+            WHERE v._lon IS NOT NULL
+              AND v._lat IS NOT NULL
+              AND ST_Within(
+                    ST_Point(v._lon, v._lat),
+                    ST_GeomFromGeoJSON(p.geojson)
+                  )
+        ),
+        picked AS (
+            SELECT
+                mmsi,
+                COALESCE(
+                    MIN(CASE WHEN is_excl THEN anchorage_name END),
+                    MIN(CASE WHEN NOT is_excl THEN anchorage_name END)
+                ) AS polygon_name,
+                BOOL_OR(is_excl) AS in_excl_polygon
+            FROM hits
+            GROUP BY mmsi
+        )
+        SELECT
+            v.* EXCLUDE (_lon, _lat),
+            p.polygon_name,
+            COALESCE(p.in_excl_polygon, FALSE) AS in_excl_polygon
+        FROM dark_vessels v
+        LEFT JOIN picked p ON p.mmsi = v.mmsi
+        """
+    ).df()
+
+    return located
+
+
 def _fmt_ts(value: Any) -> str | None:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -164,6 +261,8 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "silenceLabel": silence["silenceLabel"],
             "darkReason": v.get("dark_reason"),
             "confidence": v.get("confidence"),
+            "polygonName": None if v.get("polygon_name") is None or pd.isna(v.get("polygon_name")) else v.get("polygon_name"),
+            "inExclPolygon": bool(v.get("in_excl_polygon")) if pd.notna(v.get("in_excl_polygon")) else False,
         })
     return records
 
@@ -184,6 +283,8 @@ def detect_dark_vessels(
     if not include_coverage_exit and not df.empty:
         df = df[df["dark_reason"] != "possible_coverage_exit"].reset_index(drop=True)
 
+    df = attach_polygon_names(df)
+
     by_reason: dict[str, int] = {}
     by_confidence: dict[str, int] = {}
     if not df.empty:
@@ -200,7 +301,7 @@ def detect_dark_vessels(
         "coverage_exit_days": COVERAGE_EXIT_DAYS,
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "include_coverage_exit": include_coverage_exit,
-        "rule_version": "v1-slowmove-dark-after-slowdown",
+        "rule_version": "v1.1-slowmove-dark-polygon-label",
         "vessels": df,
         "vessels_payload": vessels_to_payload(df),
         "sql": DARK_VESSEL_SQL,

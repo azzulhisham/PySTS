@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "mantis": {
+      "command": "/Users/zultan/sources/python/PySTS/mcp/venv/bin/python",
+      "args": ["/Users/zultan/sources/python/PySTS/mcp/server.py"],
+      "env": {
+        "MANTIS_BASE_URL": "http://127.0.0.1:8080",
+        "MANTIS_USER_ID": "user@sts.my",
+        "MANTIS_ACCESS_KEY": "vZOODBrmB3cc0nvMiLwXtssAnchorageuj15dNSohbDgldkW_NI"
+      }
+    }
+  }
+}

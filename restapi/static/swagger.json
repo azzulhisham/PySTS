@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "MANTIS API",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "MANTIS API.\n\n## Authentication\n\nProtected endpoints require a valid **Bearer token**.\n\n### Step 1 \u2014 Obtain an access token\n\nSend a **POST** request to **`/authentication/token`** with:\n\n```json\n{\n  \"userId\": \"user@sts.my\",\n  \"accessKey\": \"<your-access-key>\"\n}\n```\n\n**Example response (200 OK):**\n\n```json\n{\n  \"accessToken\": \"<jwt-token>\",\n  \"expiredDate\": \"2026-01-01 12:00:00\"\n}\n```\n\n### Step 2 \u2014 Authorize in Swagger UI\n\n1. Call **POST /authentication/token** and copy the `accessToken`.\n2. Click **Authorize** (lock icon).\n3. Paste the `accessToken` into **BearerAuth** and click **Authorize**.\n\n### Using the token with external clients\n\n```\nAuthorization: Bearer <accessToken>\n```",
     "license": {
       "name": "MIT",
@@ -194,7 +194,7 @@
           },
           "inAnchorageClusterCount": {
             "type": "integer",
-            "description": "High-score open clusters whose centroid is inside an anchorage polygon."
+            "description": "High-score open clusters whose centroid is inside a parent / watch polygon and not inside an Excl hole."
           },
           "pairCount": {
             "type": "integer",
@@ -278,7 +278,8 @@
             "type": "boolean"
           },
           "inPortLimit": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "True if the last position is inside an Excl carve-out (hole). Returned candidates are already filtered so this is typically false."
           },
           "watchPolygonName": {
             "type": "string",
@@ -286,7 +287,8 @@
           },
           "portLimitName": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Name of the Excl hole if the position was inside one. Returned candidates are already filtered so this is typically null."
           },
           "reason": {
             "type": "string",
@@ -303,7 +305,7 @@
         "properties": {
           "ruleVersion": {
             "type": "string",
-            "example": "v2-in-restricted-or-watch-exclude-port-limit"
+            "example": "v3-in-restricted-or-watch-exclude-excl-holes"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -325,7 +327,8 @@
             "type": "integer"
           },
           "portLimitPolygonCount": {
-            "type": "integer"
+            "type": "integer",
+            "description": "Count of Excl carve-out polygons (API key kept for compatibility)."
           },
           "vessels": {
             "type": "array",
@@ -425,6 +428,15 @@
             "type": "string",
             "description": "high | medium | low",
             "example": "high"
+          },
+          "polygonName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Name of the polygon containing the last position. If inside both a parent and an Excl hole, the Excl name is used. Null when outside all anchorage polygons. Candidates are never dropped by polygon."
+          },
+          "inExclPolygon": {
+            "type": "boolean",
+            "description": "True when the last position is inside an Excl carve-out. Label only \u2014 the vessel is still returned."
           }
         }
       },
@@ -433,7 +445,7 @@
         "properties": {
           "ruleVersion": {
             "type": "string",
-            "example": "v1-slowmove-dark-after-slowdown"
+            "example": "v1.1-slowmove-dark-polygon-label"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -478,6 +490,180 @@
         "properties": {
           "message": {
             "type": "string"
+          }
+        }
+      },
+      "VesselTimelineEvent": {
+        "type": "object",
+        "properties": {
+          "eventTime": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Event start time (ISO 8601, UTC)."
+          },
+          "eventEnd": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Event end time for segment-style activities; null for point events."
+          },
+          "eventType": {
+            "type": "string",
+            "description": "Event category, e.g. ZONE_VISIT, STOPPED, SLOW_SPEED, SHIPNAME_CHANGED.",
+            "example": "ZONE_VISIT"
+          },
+          "eventSource": {
+            "type": "string",
+            "description": "PostgreSQL source table.",
+            "example": "ais_vesselinzone"
+          },
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string",
+            "example": "Zone 10 visit"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "details": {
+            "type": "object",
+            "description": "Source-specific metadata (zone id, nav status, previous/new values, etc.).",
+            "additionalProperties": true
+          }
+        }
+      },
+      "VesselTimelineResponse": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dateFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dateTo": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "eventCount": {
+            "type": "integer"
+          },
+          "byEventType": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VesselTimelineEvent"
+            }
+          }
+        }
+      },
+      "VesselTrackPoint": {
+        "type": "object",
+        "properties": {
+          "ts": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "sog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Speed over ground (knots)."
+          },
+          "cog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Course over ground (degrees)."
+          },
+          "rot": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "trueHeading": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "navStatus": {
+            "type": "integer",
+            "nullable": true
+          },
+          "navStatusDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "aisClass": {
+            "type": "string",
+            "description": "class_a or class_b",
+            "example": "class_a"
+          }
+        }
+      },
+      "VesselTrackResponse": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "dateFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dateTo": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "includeClassB": {
+            "type": "boolean"
+          },
+          "pointCount": {
+            "type": "integer"
+          },
+          "durationSeconds": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Elapsed time between first and last track point."
+          },
+          "track": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VesselTrackPoint"
+            }
           }
         }
       }
@@ -572,7 +758,7 @@
           "mantis"
         ],
         "summary": "Get suspected dark / AIS-transponder-off vessels.",
-        "description": "v1 heuristic over `ais_vesselslowmoveactivities`: Class-A large vessels (shipType 70\u201389) that slowed then went silent before a confirmed stop (`rowcount < 30`), with AIS silence \u2265 30 minutes. Reasons: `suspected_dark_after_slowdown` (higher interest), `possible_coverage_exit` (SEA footprint leave), `low_evidence_ais_gap`. Not proof of intentional dark \u2014 see `backend/vesselslowspeeddetection.md`. Independent of anchorage polygons.",
+        "description": "v1 heuristic over `ais_vesselslowmoveactivities`: Class-A large vessels (shipType 70\u201389) that slowed then went silent before a confirmed stop (`rowcount < 30`), with AIS silence \u2265 30 minutes. Reasons: `suspected_dark_after_slowdown` (higher interest), `possible_coverage_exit` (SEA footprint leave), `low_evidence_ais_gap`. Not proof of intentional dark \u2014 see `backend/vesselslowspeeddetection.md`. Candidates are labeled with `polygonName` when the last position is inside a polygon from `polygons.py` (Excl name preferred if inside a hole). They are not dropped by polygon.",
         "operationId": "getDarkVessels",
         "security": [
           {
@@ -617,7 +803,7 @@
           "mantis"
         ],
         "summary": "Get all anchorage polygons (including restricted limit).",
-        "description": "Returns every anchorage area polygon defined in `polygons.py`, plus the **Restricted Limit** polygon. Coordinates are GeoJSON-ordered `[longitude, latitude]`.",
+        "description": "Returns every anchorage area polygon defined in `polygons.py`, plus the **Restricted Limit** polygon. Polygons whose name contains **Excl** are carve-outs (holes) inside a parent polygon and are included in this catalogue. Coordinates are GeoJSON-ordered `[longitude, latitude]`.",
         "operationId": "getAllAnchoragePolygons",
         "security": [
           {
@@ -653,7 +839,7 @@
           "mantis"
         ],
         "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside anchorage polygons. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {
@@ -699,7 +885,7 @@
           "mantis"
         ],
         "summary": "Get heuristic illegal-anchoring candidates.",
-        "description": "v2 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **watch polygons** from `polygons.py` (Malaysia/Indonesia OPL & anchorages). EXCLUDE vessels inside Singapore **port-limit** polygons (Singapore East / Western OPL / South + Excl*). Not a legal determination.",
+        "description": "v3 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **parent / watch polygons** from `polygons.py`. EXCLUDE vessels inside any **Excl** carve-out (a hole inside a parent polygon, e.g. Singapore South Anchorage Excl1). Parent polygons such as Singapore East / Western OPL / South are used as watch zones. Not a legal determination.",
         "operationId": "getIllegalAnchoring",
         "security": [
           {
@@ -713,6 +899,172 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IllegalAnchoringResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/vessel-timeline": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get derived activity timeline for one vessel.",
+        "description": "Returns discrete activity/events for a vessel between two datetimes from PostgreSQL derived tables: zone visits (`ais_vesselinzone`), restricted zone visits (`ais_vesselinrestrictzone`), stop/low-speed activities (`ais_vesselmovementactivities`), slow-move activities (`ais_vesselslowmoveactivities`), and static identity changes (`ais_static_evt`). Does not include raw AIS position points \u2014 use **GET /mantis/vessel-track** for full track replay.",
+        "operationId": "getVesselTimeline",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Maritime Mobile Service Identity of the vessel.",
+            "example": 533000123
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Range start (ISO 8601, UTC recommended).",
+            "example": "2026-06-10T00:00:00Z"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Range end (ISO 8601, UTC recommended).",
+            "example": "2026-06-12T00:00:00Z"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ordered list of derived vessel activity events.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VesselTimelineResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid query parameters or date range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/vessel-track": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get full AIS track for map replay.",
+        "description": "Returns ordered AIS position reports for one vessel between two datetimes from ClickHouse (`pnav.ais_position`, optionally `pnav.ais_type18` for Class B). Use for map playback and route visualization.",
+        "operationId": "getVesselTrack",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Maritime Mobile Service Identity of the vessel.",
+            "example": 533000123
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Range start (ISO 8601, UTC recommended).",
+            "example": "2026-06-10T00:00:00Z"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Range end (ISO 8601, UTC recommended).",
+            "example": "2026-06-12T00:00:00Z"
+          },
+          {
+            "name": "includeClassB",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "When true, include Class B positions from `pnav.ais_type18` merged with Class A."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ordered AIS position track points.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VesselTrackResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing/invalid query parameters or date range.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
                 }
               }
             }

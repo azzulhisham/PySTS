@@ -3,8 +3,10 @@ STS (ship-to-ship) proximity inside restapi anchorage polygons.
 
 Uses active proximity clusters from ais_vesselproximityobservation
 (is_open = TRUE) with high suspicion_score, keeps those whose centroid
-falls inside polygons from polygons.py, recomputes pairs at MAX_DISTANCE_M,
-and returns only paired vessels with sog/cog enriched from movement activities.
+falls inside a parent / watch polygon from polygons.py, drops those whose
+centroid is inside an Excl carve-out (hole), recomputes pairs at
+MAX_DISTANCE_M, and returns only paired vessels with sog/cog enriched
+from movement activities.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ import pandas as pd
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
-from polygons import anchorage_areas
+from polygons import anchorage_areas, is_excl_name
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -154,7 +156,10 @@ def filter_observations_in_anchorages(
     observations: pd.DataFrame,
     areas: list[dict] | None = None,
 ) -> pd.DataFrame:
-    """Keep open clusters whose centroid falls inside any anchorage polygon."""
+    """
+    Keep open clusters whose centroid falls inside a parent polygon.
+    Drop clusters whose centroid is also inside an Excl carve-out.
+    """
     areas = areas or anchorage_areas
     if observations.empty:
         return observations.assign(anchorage_name=pd.Series(dtype="object"))
@@ -163,6 +168,7 @@ def filter_observations_in_anchorages(
     df_poly = pd.DataFrame([
         {
             "anchorage_name": area["name"],
+            "is_excl": is_excl_name(area["name"]),
             "geojson": json.dumps(polygon_to_geojson(area)),
         }
         for area in areas
@@ -173,15 +179,28 @@ def filter_observations_in_anchorages(
 
     out = duckdb.sql(
         """
-        SELECT
-            o.*,
-            p.anchorage_name
-        FROM observations o
-        CROSS JOIN anchorage_polys p
-        WHERE ST_Within(
-            ST_Point(o.centroid_longitude, o.centroid_latitude),
-            ST_GeomFromGeoJSON(p.geojson)
+        WITH hits AS (
+            SELECT
+                o.*,
+                p.anchorage_name,
+                p.is_excl
+            FROM observations o
+            CROSS JOIN anchorage_polys p
+            WHERE ST_Within(
+                ST_Point(o.centroid_longitude, o.centroid_latitude),
+                ST_GeomFromGeoJSON(p.geojson)
+            )
+        ),
+        excl_ids AS (
+            SELECT DISTINCT observation_id
+            FROM hits
+            WHERE is_excl
         )
+        SELECT h.* EXCLUDE (is_excl)
+        FROM hits h
+        LEFT JOIN excl_ids e ON e.observation_id = h.observation_id
+        WHERE e.observation_id IS NULL
+          AND NOT h.is_excl
         """
     ).df()
 

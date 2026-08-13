@@ -7,5 +7,6 @@ pandas
 SQLAlchemy
 duckdb
 psycopg2-binary
+clickhouse-connect
 shapely
 folium
