@@ -1,9 +1,32 @@
-.ipynb_checkpoints/
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
 venv/
+.venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 
-backend/__pycache__/
-st_app/__pycache__/
-restapi/__pycache__/
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
 
+# Secrets and local env
+.env
+.env.*
+!.env.example
+
+# Local data dumps (not source)
 data/
+backend/data/
 
+# MCP local venv (also listed in mcp/.gitignore)
+mcp/venv/
