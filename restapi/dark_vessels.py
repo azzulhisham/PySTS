@@ -26,6 +26,7 @@ from sqlalchemy.engine import Engine
 
 from polygons import anchorage_areas, is_excl_name
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from vessel_size import DIM_SELECT, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -66,6 +67,7 @@ SELECT
     s."shipType" AS shiptype,
     s."shipTypeDesc" AS shiptypedesc,
     s."imo" AS imo,
+{DIM_SELECT},
     EXTRACT(EPOCH FROM (now() - a.tscurrent)) AS silence_seconds,
     CASE
         WHEN a.rowcount >= {MIN_SLOWDOWN_ROWCOUNT}
@@ -93,6 +95,7 @@ FROM (
     FROM public.ais_vesselslowmoveactivities
 ) a
 INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
+{class_b_join("a.mmsi")}
 WHERE a.rowcount_mmsi = 1
   AND a.tsout IS NULL
   AND a.tsstop IS NOT NULL
@@ -265,6 +268,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "confidence": v.get("confidence"),
             "polygonName": None if v.get("polygon_name") is None or pd.isna(v.get("polygon_name")) else v.get("polygon_name"),
             "inExclPolygon": bool(v.get("in_excl_polygon")) if pd.notna(v.get("in_excl_polygon")) else False,
+            **dimension_fields(v),
             **payload_fields(v),
         })
     return records

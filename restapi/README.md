@@ -34,7 +34,7 @@ Frontend                separate repo / separate developer
 | Pipeline | `backend/vesselproximitydetection.py` | STS clusters → `ais_vesselproximityobservation` / `member` |
 | Pipeline | `backend/vesselslowspeeddetection.py` | Slow-move / silence → `ais_vesselslowmoveactivities` |
 | Pipeline | `backend/vesselstrajectorydetection.py` | Stops / movement → `ais_vesselmovementactivities` |
-| API | `PySTS/restapi/` (here) | Read those tables, apply polygon / Excl rules, attach OFAC labels, return JSON |
+| API | `PySTS/restapi/` (here) | Read those tables, apply polygon / Excl rules, attach OFAC labels and AIS size, return JSON |
 | MCP | `PySTS/mcp/` | Optional tools that **call this API** |
 | Whole-repo map | [`../readme.md`](../readme.md) | What is MANTIS vs what is not |
 
@@ -67,6 +67,7 @@ restapi/
 ├── illegal_anchoring.py    # Illegal-anchoring detection (v3, Excl holes excluded)
 ├── dark_vessels.py         # Dark / AIS-off detection (polygon label only)
 ├── sanctions.py            # OFAC identity labels (IMO / MMSI join; not a detector)
+├── vessel_size.py          # AIS Class A/B dimensions (to_bow / to_stern / to_port / to_starboard)
 ├── swagger_sample.py       # 20-row cap when Try it out is run from /swagger
 ├── gunicorn_config.py      # Gunicorn WSGI settings
 ├── requirements.txt
@@ -339,9 +340,17 @@ If the same IMO exists on both lists, **SDN wins**. `sanctionsList` is then `SDN
 | Field | Type | Meaning |
 | --- | --- | --- |
 | `imo` | string or `null` | Normalized 7-digit IMO from `ais_static`, if present |
+| `toBow` | number or `null` | Metres from AIS GPS antenna to bow |
+| `toStern` | number or `null` | Metres from AIS GPS antenna to stern |
+| `toPort` | number or `null` | Metres from AIS GPS antenna to port |
+| `toStarboard` | number or `null` | Metres from AIS GPS antenna to starboard |
+| `lengthM` | number or `null` | Overall length: `toBow + toStern`. `null` if either offset is missing |
+| `beamM` | number or `null` | Beam (width): `toPort + toStarboard`. `null` if either offset is missing |
 | `sanctionsMatch` | boolean | `true` if this ship matched OFAC |
 | `matchConfidence` | `confirmed` \| `possible` \| `none` | How sure the **identity** match is — not how sure the AIS behaviour is |
 | `sanctionsList` | `SDN` \| `CONS` \| `null` | Which OFAC file matched. `null` when `sanctionsMatch` is false |
+
+Size is from AIS static, not OFAC. Prefer `ais_static` (Class A); if those four offsets are missing, use `ais_staticb` (Class B). Dark and illegal-anchoring still require a Class A static row (`shipType` 70–89); Class B does **not** add extra candidates. Missing offsets stay `null` — vessels are not dropped.
 
 STS pairs also have pair-level `sanctionsMatch` / `matchConfidence` (true / best of vessel A and B). Each of `vesselA` and `vesselB` still has its own fields.
 
@@ -393,7 +402,7 @@ That is so a listed ship that is also dark or in an STS pair is seen first. It i
 
 ### Frontend
 
-New fields on all three list endpoints. Brief the frontend developer before painting them on the map. Do not treat `sanctionsMatch: true` as an auto-verdict in the UI.
+New fields on all three list endpoints (`sanctionsMatch` and AIS size). Brief the frontend developer before painting them on the map. Do not treat `sanctionsMatch: true` as an auto-verdict in the UI.
 
 ### Lookup endpoint (`GET /mantis/sanctions`)
 
@@ -463,7 +472,7 @@ Pairs are recomputed at **≤ 35 m**. Only **paired vessels** are included.
 
 Each pair payload includes:
 
-- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`, `imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`
+- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`, `imo`, `toBow`, `toStern`, `toPort`, `toStarboard`, `lengthM`, `beamM`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`
 - pair-level `sanctionsMatch` / `matchConfidence` (best of the two vessels)
 - `distanceM`
 - `durationSeconds` / `durationHours` / `durationLabel` (how long the cluster has been open)
@@ -508,7 +517,7 @@ curl http://localhost:8080/mantis/illegal-anchoring \
   -H "Authorization: Bearer <jwt-token>"
 ```
 
-Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`) and AIS size (`toBow`, `toStern`, `toPort`, `toStarboard`, `lengthM`, `beamM`). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 ### Dark vessels (v1.2 heuristic)
 
@@ -526,7 +535,7 @@ Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `s
 | `possible_coverage_exit` | Likely left SEA AIS footprint (competing explanation) |
 | `low_evidence_ais_gap` | Silence without strong slow-down evidence |
 
-Research notes and improvement roadmap: `../backend/mantis-detection.md`. OFAC fields are the same as on STS / illegal-anchoring; dark `confidence` is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+Research notes and improvement roadmap: `../backend/mantis-detection.md`. OFAC fields are the same as on STS / illegal-anchoring; dark `confidence` is unchanged. Size fields are the same AIS static join. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 ```bash
 # All candidates (including possible coverage exit)

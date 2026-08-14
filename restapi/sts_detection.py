@@ -28,6 +28,7 @@ from sanctions import (
     payload_fields,
     sort_listed_first,
 )
+from vessel_size import DIM_SELECT, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -66,7 +67,7 @@ WHERE o.is_open = TRUE
 ORDER BY o.suspicion_score DESC
 """
 
-MEMBERS_SQL = """
+MEMBERS_SQL = f"""
 SELECT
     m.observation_id,
     m.mmsi,
@@ -81,10 +82,12 @@ SELECT
     m.activity_id,
     a.cursog AS sog,
     a.curcog AS cog,
-    s."imo" AS imo
+    s."imo" AS imo,
+{DIM_SELECT}
 FROM public.ais_vesselproximitymember m
 LEFT JOIN public.ais_vesselmovementactivities a ON a.id = m.activity_id
 LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
+{class_b_join("m.mmsi")}
 WHERE m.observation_id = ANY(%(obs_ids)s)
 """
 
@@ -234,6 +237,8 @@ def find_pairs_within_observations(
         "lon_a", "lat_a", "lon_b", "lat_b", "sog_a", "sog_b", "cog_a", "cog_b",
         "tscurrent_a", "tscurrent_b", "tsstop_a", "tsstop_b",
         "imo_a", "imo_b",
+        "to_bow_a", "to_stern_a", "to_port_a", "to_starboard_a",
+        "to_bow_b", "to_stern_b", "to_port_b", "to_starboard_b",
     ]
     if observations.empty or members.empty or len(members) < 2:
         return pd.DataFrame(columns=empty_cols)
@@ -286,7 +291,15 @@ def find_pairs_within_observations(
             a.tsstop AS tsstop_a,
             b.tsstop AS tsstop_b,
             a.imo AS imo_a,
-            b.imo AS imo_b
+            b.imo AS imo_b,
+            a.to_bow AS to_bow_a,
+            a.to_stern AS to_stern_a,
+            a.to_port AS to_port_a,
+            a.to_starboard AS to_starboard_a,
+            b.to_bow AS to_bow_b,
+            b.to_stern AS to_stern_b,
+            b.to_port AS to_port_b,
+            b.to_starboard AS to_starboard_b
         FROM members_for_pairs a
         INNER JOIN members_for_pairs b
           ON a.observation_id = b.observation_id
@@ -353,6 +366,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_a"]),
                 "sog": float(p["sog_a"]) if pd.notna(p.get("sog_a")) else None,
                 "cog": float(p["cog_a"]) if pd.notna(p.get("cog_a")) else None,
+                **dimension_fields(p, side="a"),
                 **payload_fields(p, side="a"),
             },
             "vesselB": {
@@ -362,6 +376,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_b"]),
                 "sog": float(p["sog_b"]) if pd.notna(p.get("sog_b")) else None,
                 "cog": float(p["cog_b"]) if pd.notna(p.get("cog_b")) else None,
+                **dimension_fields(p, side="b"),
                 **payload_fields(p, side="b"),
             },
             "sanctionsMatch": bool(p.get("sanctions_match")),
@@ -396,6 +411,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "durationLabel": duration["durationLabel"],
             "pairedAt": _fmt_ts(v.get("last_detected_at")),
             "firstDetectedAt": _fmt_ts(v.get("first_detected_at")),
+            **dimension_fields(v),
             **payload_fields(v),
         })
     return records

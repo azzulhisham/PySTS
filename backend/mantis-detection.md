@@ -397,6 +397,8 @@ Matches `todo.md` still unchecked:
 6. Unmatched vessels stay (`sanctionsMatch: false`, `matchConfidence: none`).
 7. A listed vessel that is not dark / STS / stopped still does not appear just because it is listed.
 
+AIS hull size on the same three list payloads: `toBow` / `toStern` / `toPort` / `toStarboard` from `ais_static` (Class A), else `ais_staticb` (Class B). `lengthM` = bow+stern, `beamM` = port+starboard. Missing offsets stay `null`. This does not change keep/drop.
+
 ---
 
 ## Accuracy roadmap (planned enhancements)
@@ -478,6 +480,7 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-08-14 | API vessel size: `toBow` / `toStern` / `toPort` / `toStarboard` plus `lengthM` / `beamM` on STS, dark, and illegal-anchoring. Class A `ais_static` first, Class B `ais_staticb` fallback. Detectors unchanged. |
 | 2026-08-13 | API OFAC labels: `restapi/sanctions.py` on STS / dark / illegal-anchoring. IMO = confirmed, MMSI-only = possible, no name match, unmatched kept, listed sorted first. `suspicion_score` / dark `confidence` unchanged. |
 | 2026-08-13 | Bunker / barge register **skipped** until a source exists. |
 | 2026-08-13 | OFAC consolidated non-SDN ingest added (`ofac_cons_ingest.py` / `--list cons`). Tables `ofac_cons_*`. Current file has **0 vessels** (entities/individuals only). SDN tables untouched. |

@@ -129,6 +129,42 @@
             "nullable": true,
             "description": "Normalized 7-digit IMO from ais_static, if present."
           },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to bow. Class A from ais_static, else Class B from ais_staticb."
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to stern."
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to port."
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to starboard."
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Overall length in metres (toBow + toStern). Null if either offset is missing."
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Beam (width) in metres (toPort + toStarboard). Null if either offset is missing."
+          },
           "sanctionsMatch": {
             "type": "boolean",
             "description": "True if this vessel matches OFAC SDN or consolidated non-SDN. Label only — not a legal finding and not used in suspicion_score."
@@ -338,6 +374,42 @@
             "type": "string",
             "nullable": true
           },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to bow. Class A from ais_static, else Class B from ais_staticb."
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to stern."
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to port."
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to starboard."
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Overall length in metres (toBow + toStern). Null if either offset is missing."
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Beam (width) in metres (toPort + toStarboard). Null if either offset is missing."
+          },
           "sanctionsMatch": {
             "type": "boolean",
             "description": "True if this vessel matches OFAC. Label only — AIS keep/drop rules are unchanged."
@@ -498,6 +570,42 @@
           "imo": {
             "type": "string",
             "nullable": true
+          },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to bow. Class A from ais_static, else Class B from ais_staticb."
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to stern."
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to port."
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to starboard."
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Overall length in metres (toBow + toStern). Null if either offset is missing."
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Beam (width) in metres (toPort + toStarboard). Null if either offset is missing."
           },
           "sanctionsMatch": {
             "type": "boolean",
@@ -1074,7 +1182,7 @@
           "mantis"
         ],
         "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, distanceM, duration, and pairedAt. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, AIS size (toBow/toStern/toPort/toStarboard, lengthM, beamM), distanceM, duration, and pairedAt. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {

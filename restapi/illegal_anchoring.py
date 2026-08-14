@@ -27,6 +27,7 @@ from sqlalchemy.engine import Engine
 
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from vessel_size import DIM_SELECT, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -39,7 +40,7 @@ DATABASE_URL = (
     f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 )
 
-STOPPED_VESSEL_SQL = """
+STOPPED_VESSEL_SQL = f"""
 SELECT
     a.id AS activity_id,
     a.mmsi,
@@ -56,13 +57,15 @@ SELECT
     s."shipType" AS shiptype,
     s."shipTypeDesc" AS shiptypedesc,
     s."shipName" AS shipname,
-    s."imo" AS imo
+    s."imo" AS imo,
+{DIM_SELECT}
 FROM (
     SELECT *,
            row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
     FROM public.ais_vesselmovementactivities
 ) a
 INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
+{class_b_join("a.mmsi")}
 WHERE a.tsout IS NULL
   AND (
         (a.tsstop IS NOT NULL AND a.tsstop <= now() - interval '1 HOURS')
@@ -312,6 +315,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "portLimitName": port_name,
             "reason": v.get("reason"),
             "detectedAt": v.get("detected_at"),
+            **dimension_fields(v),
             **payload_fields(v),
         })
     return records
