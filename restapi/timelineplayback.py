@@ -4,10 +4,14 @@ Vessel activity timeline (PostgreSQL) and track replay (ClickHouse).
 Designed for use from restapi/main.py endpoints:
 
     GET /mantis/vessel-timeline?mmsi=...&from=...&to=...
-    GET /mantis/vessel-track?mmsi=...&from=...&to=...
+    GET /mantis/vessel-track?mmsi=...&from=...&to=...   (from/to optional; max 3 days; NDJSON stream)
 
 PostgreSQL holds derived activity segments (zones, stops, slow speed, static changes).
 ClickHouse holds the full AIS position history used for map replay.
+
+Track replay only returns rows with a usable fix: AIS "not available" positions
+(latitude 91 / longitude 181) are filtered out in ClickHouse. See
+VALID_POSITION_SQL.
 """
 
 from __future__ import annotations
@@ -15,8 +19,8 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, Iterator
 from urllib.parse import quote
 
 import clickhouse_connect
@@ -35,6 +39,9 @@ DATABASE_URL = (
 CLICKHOUSE_HOST = os.environ.get("clickhouse_host", "43.216.85.155")
 CLICKHOUSE_USER = os.environ.get("clickhouse_user", "default")
 CLICKHOUSE_PASSWORD = os.environ.get("clickhouse_password", "")
+
+MAX_TRACK_RANGE = timedelta(days=3)
+TRACK_CHUNK_MINUTES = 20
 
 # ---------------------------------------------------------------------------
 # SQL 1 — "What happened to vessel X between date A and date B?"
@@ -216,7 +223,18 @@ ORDER BY event_time ASC, event_type ASC
 # SQL 2 — "Show me the full track and replay movement over that period"
 # ClickHouse: ordered AIS position reports for map playback.
 # Class A (ais_position). Optional Class B (ais_type18) via include_class_b.
+#
+# Raw AIS encodes "position not available" as latitude 91 / longitude 181, and
+# those rows are stored verbatim (~1.3% of ais_position). They cannot be plotted
+# on any map, so the track endpoints drop them here rather than leaving every
+# client to recognise the sentinels. The range test also discards NaN and +/-Inf,
+# which ClickHouse treats as outside any BETWEEN.
 # ---------------------------------------------------------------------------
+VALID_POSITION_SQL = """
+  AND latitude BETWEEN -90 AND 90
+  AND longitude BETWEEN -180 AND 180
+"""
+
 VESSEL_TRACK_REPLAY_SQL_CLASS_A = """
 SELECT
     ts,
@@ -233,7 +251,8 @@ SELECT
 FROM pnav.ais_position
 WHERE mmsi = {mmsi}
   AND ts >= toDateTime64({date_from}, 3)
-  AND ts <= toDateTime64({date_to}, 3)
+  AND ts {ts_end_op} toDateTime64({date_to}, 3)
+  {position_filter}
 ORDER BY ts ASC
 """
 
@@ -253,7 +272,8 @@ SELECT
 FROM pnav.ais_type18
 WHERE mmsi = {mmsi}
   AND ts >= toDateTime64({date_from}, 3)
-  AND ts <= toDateTime64({date_to}, 3)
+  AND ts {ts_end_op} toDateTime64({date_to}, 3)
+  {position_filter}
 ORDER BY ts ASC
 """
 
@@ -329,22 +349,103 @@ def load_vessel_activity_timeline(
     )
 
 
+def _is_blank(value: datetime | str | None) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def resolve_track_range(
+    date_from: datetime | str | None = None,
+    date_to: datetime | str | None = None,
+) -> tuple[datetime, datetime, dict[str, Any]]:
+    """
+    Effective [from, to] for track replay. Both bounds are optional and the
+    window is never wider than 3 days.
+
+    both omitted    → the last 3 days, ending now (UTC)
+    to omitted      → now, or from + 3 days when that is earlier (rangeCapped)
+    from omitted    → 3 days before the effective to
+    both given      → to clamped to from + 3 days when the span is longer
+
+    A `from` in the future is left alone and paired with from + 3 days; there is
+    no data there, but it is not an error.
+    """
+    now = datetime.now(timezone.utc)
+    from_omitted = _is_blank(date_from)
+    to_omitted = _is_blank(date_to)
+
+    dt_from = None if from_omitted else parse_datetime(date_from)
+    dt_to = None if to_omitted else parse_datetime(date_to)
+    requested_from = None if dt_from is None else dt_from.isoformat()
+    requested_to = None if dt_to is None else dt_to.isoformat()
+    range_capped = False
+
+    if dt_from is None and dt_to is None:
+        dt_to = now
+        dt_from = dt_to - MAX_TRACK_RANGE
+    elif dt_to is None:
+        capped_to = dt_from + MAX_TRACK_RANGE
+        if capped_to <= now:
+            # The 3-day cap ends the window before now; more data exists after.
+            dt_to = capped_to
+            range_capped = True
+        elif dt_from < now:
+            dt_to = now
+        else:
+            dt_to = capped_to
+    elif dt_from is None:
+        dt_from = dt_to - MAX_TRACK_RANGE
+    else:
+        if dt_from > dt_to:
+            raise ValueError("date_from must be before or equal to date_to")
+        if dt_to - dt_from > MAX_TRACK_RANGE:
+            dt_to = dt_from + MAX_TRACK_RANGE
+            range_capped = True
+
+    return dt_from, dt_to, {
+        "fromOmitted": from_omitted,
+        "toOmitted": to_omitted,
+        "rangeCapped": range_capped,
+        "maxRangeDays": MAX_TRACK_RANGE.days,
+        "chunkMinutes": TRACK_CHUNK_MINUTES,
+        "requestedDateFrom": requested_from,
+        "requestedDateTo": requested_to,
+    }
+
+
+def _track_window_bounds(dt_from: datetime, dt_to: datetime) -> Iterator[tuple[datetime, datetime, bool]]:
+    """Yield (start, end, end_exclusive) 20-minute windows covering [dt_from, dt_to]."""
+    chunk = timedelta(minutes=TRACK_CHUNK_MINUTES)
+    cursor = dt_from
+    while cursor < dt_to:
+        nxt = min(cursor + chunk, dt_to)
+        yield cursor, nxt, nxt < dt_to
+        cursor = nxt
+
+
 def load_vessel_track_replay(
     mmsi: int,
     date_from: datetime,
     date_to: datetime,
     include_class_b: bool = False,
     client=None,
+    end_exclusive: bool = False,
 ) -> pd.DataFrame:
     client = client or get_clickhouse_client()
     mmsi_int = int(mmsi)
     ts_from = _ch_literal_ts(date_from)
     ts_to = _ch_literal_ts(date_to)
+    ts_end_op = "<" if end_exclusive else "<="
 
     qry_a = VESSEL_TRACK_REPLAY_SQL_CLASS_A.format(
         mmsi=mmsi_int,
         date_from=f"'{ts_from}'",
         date_to=f"'{ts_to}'",
+        ts_end_op=ts_end_op,
+        position_filter=VALID_POSITION_SQL.strip(),
     )
     result_a = client.query(qry_a)
 
@@ -356,6 +457,8 @@ def load_vessel_track_replay(
             mmsi=mmsi_int,
             date_from=f"'{ts_from}'",
             date_to=f"'{ts_to}'",
+            ts_end_op=ts_end_op,
+            position_filter=VALID_POSITION_SQL.strip(),
         )
         result_b = client.query(qry_b)
         rows.extend(result_b.result_rows)
@@ -457,30 +560,49 @@ def get_vessel_activity_timeline(
 
 def get_vessel_track_replay(
     mmsi: int,
-    date_from: datetime | str,
-    date_to: datetime | str,
+    date_from: datetime | str | None = None,
+    date_to: datetime | str | None = None,
     include_class_b: bool = False,
     client=None,
+    max_points: int | None = None,
 ) -> dict[str, Any]:
     """
-    Return full AIS position track for map replay in [date_from, date_to].
+    Assemble a JSON track payload from 20-minute ClickHouse windows.
 
-    Intended for:
-        GET /mantis/vessel-track?mmsi=533000123&from=...&to=...&includeClassB=false
+    Used for Swagger's 20-point sample. Production clients should use
+    iter_vessel_track_ndjson so points are not held in memory at once.
     """
-    dt_from = parse_datetime(date_from)
-    dt_to = parse_datetime(date_to)
-    if dt_from > dt_to:
-        raise ValueError("date_from must be before or equal to date_to")
-
-    df = load_vessel_track_replay(
-        mmsi,
-        dt_from,
-        dt_to,
-        include_class_b=include_class_b,
-        client=client,
-    )
-    points = track_to_payload(df)
+    dt_from, dt_to, range_meta = resolve_track_range(date_from, date_to)
+    own_client = client is None
+    client = client or get_clickhouse_client()
+    points: list[dict[str, Any]] = []
+    try:
+        for start, end, exclusive in _track_window_bounds(dt_from, dt_to):
+            df = load_vessel_track_replay(
+                mmsi,
+                start,
+                end,
+                include_class_b=include_class_b,
+                client=client,
+                end_exclusive=exclusive,
+            )
+            chunk_points = track_to_payload(df)
+            del df
+            if not chunk_points:
+                continue
+            remaining = None if max_points is None else max_points - len(points)
+            if remaining is not None:
+                points.extend(chunk_points[:remaining])
+                if len(points) >= max_points:
+                    break
+            else:
+                points.extend(chunk_points)
+    finally:
+        if own_client:
+            try:
+                client.close()
+            except Exception:
+                pass
 
     duration_seconds = None
     if len(points) >= 2:
@@ -496,4 +618,79 @@ def get_vessel_track_replay(
         "pointCount": len(points),
         "durationSeconds": duration_seconds,
         "track": points,
+        **range_meta,
     }
+
+
+def iter_vessel_track_ndjson(
+    mmsi: int,
+    date_from: datetime | str | None = None,
+    date_to: datetime | str | None = None,
+    include_class_b: bool = False,
+) -> Iterator[str]:
+    """
+    Yield NDJSON lines: one meta record, then one chunk per 20-minute
+    ClickHouse window that has points, then a done record.
+
+    Each ClickHouse window is discarded after it is yielded so the process
+    does not hold the full 3-day track.
+    """
+    dt_from, dt_to, range_meta = resolve_track_range(date_from, date_to)
+    client = get_clickhouse_client()
+    point_count = 0
+    chunk_index = 0
+    windows_scanned = 0
+    try:
+        yield json.dumps({
+            "type": "meta",
+            "mmsi": int(mmsi),
+            "dateFrom": dt_from.isoformat(),
+            "dateTo": dt_to.isoformat(),
+            "includeClassB": include_class_b,
+            **range_meta,
+        }, separators=(",", ":")) + "\n"
+
+        for start, end, exclusive in _track_window_bounds(dt_from, dt_to):
+            windows_scanned += 1
+            df = load_vessel_track_replay(
+                mmsi,
+                start,
+                end,
+                include_class_b=include_class_b,
+                client=client,
+                end_exclusive=exclusive,
+            )
+            points = track_to_payload(df)
+            del df
+            if not points:
+                continue
+            point_count += len(points)
+            yield json.dumps({
+                "type": "chunk",
+                "chunkIndex": chunk_index,
+                "chunkFrom": start.isoformat(),
+                "chunkTo": end.isoformat(),
+                "pointCount": len(points),
+                "points": points,
+            }, separators=(",", ":")) + "\n"
+            chunk_index += 1
+            del points
+
+        yield json.dumps({
+            "type": "done",
+            "pointCount": point_count,
+            "chunkCount": chunk_index,
+            "windowsScanned": windows_scanned,
+        }, separators=(",", ":")) + "\n"
+    except Exception:
+        logging.exception("[iter_vessel_track_ndjson] ClickHouse/stream error")
+        yield json.dumps({
+            "type": "error",
+            "message": "Internal server error",
+        }, separators=(",", ":")) + "\n"
+    finally:
+        try:
+            client.close()
+        except Exception:
+            pass
+

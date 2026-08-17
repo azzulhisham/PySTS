@@ -29,6 +29,7 @@ from sanctions import (
     sort_listed_first,
 )
 from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from api_timestamps import format_last_seen_at
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -80,12 +81,14 @@ SELECT
     m.tscurrent,
     m.tsstop,
     m.activity_id,
+    COALESCE(m.tscurrent, p.ts) AS last_seen_at,
     a.cursog AS sog,
     a.curcog AS cog,
     s."imo" AS imo,
 {DIM_SELECT}
 FROM public.ais_vesselproximitymember m
 LEFT JOIN public.ais_vesselmovementactivities a ON a.id = m.activity_id
+LEFT JOIN public.ais_position p ON p.mmsi = m.mmsi
 LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
 {class_b_join("m.mmsi")}
 WHERE m.observation_id = ANY(%(obs_ids)s)
@@ -288,6 +291,8 @@ def find_pairs_within_observations(
             b.cog AS cog_b,
             a.tscurrent AS tscurrent_a,
             b.tscurrent AS tscurrent_b,
+            COALESCE(a.tscurrent, a.last_seen_at) AS last_seen_at_a,
+            COALESCE(b.tscurrent, b.last_seen_at) AS last_seen_at_b,
             a.tsstop AS tsstop_a,
             b.tsstop AS tsstop_b,
             a.imo AS imo_a,
@@ -366,6 +371,9 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_a"]),
                 "sog": float(p["sog_a"]) if pd.notna(p.get("sog_a")) else None,
                 "cog": float(p["cog_a"]) if pd.notna(p.get("cog_a")) else None,
+                "lastSeenAt": format_last_seen_at(
+                    p.get("last_seen_at_a") if pd.notna(p.get("last_seen_at_a")) else p.get("tscurrent_a")
+                ),
                 **dimension_fields(p, side="a"),
                 **payload_fields(p, side="a"),
             },
@@ -376,6 +384,9 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 "longitude": float(p["lon_b"]),
                 "sog": float(p["sog_b"]) if pd.notna(p.get("sog_b")) else None,
                 "cog": float(p["cog_b"]) if pd.notna(p.get("cog_b")) else None,
+                "lastSeenAt": format_last_seen_at(
+                    p.get("last_seen_at_b") if pd.notna(p.get("last_seen_at_b")) else p.get("tscurrent_b")
+                ),
                 **dimension_fields(p, side="b"),
                 **payload_fields(p, side="b"),
             },
@@ -411,6 +422,9 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "durationLabel": duration["durationLabel"],
             "pairedAt": _fmt_ts(v.get("last_detected_at")),
             "firstDetectedAt": _fmt_ts(v.get("first_detected_at")),
+            "lastSeenAt": format_last_seen_at(
+                v.get("last_seen_at") if pd.notna(v.get("last_seen_at")) else v.get("tscurrent")
+            ),
             **dimension_fields(v),
             **payload_fields(v),
         })

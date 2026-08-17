@@ -80,7 +80,7 @@ Product endpoints (fed by the three pipeline jobs):
 Also in this API (playback helpers; zone events are **not** produced by the MANTIS-critical pipeline):
 
 - `GET /mantis/vessel-timeline`
-- `GET /mantis/vessel-track`
+- `GET /mantis/vessel-track` — AIS track replay from ClickHouse (NDJSON stream, max 3 days)
 
 ```bash
 cd restapi

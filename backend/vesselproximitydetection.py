@@ -23,16 +23,25 @@ track open/close lifecycle with duration and suspicion scoring, and persist to P
 
 Runs on a fixed interval; each cluster is one open observation until it disappears
 beyond CLOSE_GRACE_SECONDS.
+
+Pairs that resolve to the same hull (a re-flagged vessel still broadcasting its
+retired MMSI) are skipped, and any open observation that collapses to one hull is
+closed with reason 'same_vessel'.
 """
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-DETECTION_VERSION = "2.0"
+DETECTION_VERSION = "2.1"
 MAX_DISTANCE_M = 30.0
 LOOP_INTERVAL_SECONDS = 30
 CLOSE_GRACE_SECONDS = 60
 GEOCODE_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client"
+
+# Same-hull suppression: a re-flagged vessel keeps broadcasting its retired MMSI,
+# so the two identities sit metres apart and look like an STS pair.
+MIN_IDENTITY_TEXT_CHARS = 3
+PLACEHOLDER_IMOS = frozenset({1234567, 7654321, 9999999})
 
 EXPORT_DIR = Path(__file__).resolve().parent / "data" / "ml_export"
 MIN_EXPORT_DURATION_SECONDS = 0.0
@@ -386,6 +395,156 @@ def count_ship_types(members: pd.DataFrame) -> tuple[int, int]:
 
 
 # ---------------------------------------------------------------------------
+# Vessel identity (same-hull suppression)
+# ---------------------------------------------------------------------------
+
+def _normalize_identity_text(value) -> Optional[str]:
+    """Uppercase a name or callsign and strip AIS '@' padding; None if too short to trust."""
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+
+    cleaned = " ".join(str(value).replace("@", " ").split()).upper()
+
+    if len(cleaned) < MIN_IDENTITY_TEXT_CHARS:
+        return None
+
+    return cleaned
+
+
+
+def _normalize_imo(value) -> Optional[int]:
+    """Return a plausible 7-digit IMO; None for 0, repdigits, and other placeholders."""
+    if value is None:
+        return None
+
+    try:
+        if pd.isna(value):
+            return None
+
+        imo = int(value)
+    except (TypeError, ValueError):
+        return None
+
+    if not 1_000_000 <= imo <= 9_999_999:
+        return None
+
+    if imo in PLACEHOLDER_IMOS or len(set(str(imo))) == 1:
+        return None
+
+    return imo
+
+
+
+def _normalize_dimensions(row) -> Optional[tuple[int, int, int, int]]:
+    """Return the hull dimension tuple; None when any part is missing or all are zero."""
+    dims = []
+
+    for col in ("to_bow", "to_stern", "to_port", "to_starboard"):
+        value = row.get(col)
+
+        try:
+            if value is None or pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            return None
+
+        dims.append(int(value))
+
+    if sum(dims) == 0:
+        return None
+
+    return tuple(dims)
+
+
+
+def vessel_identity(row) -> dict:
+    """Collect the identity evidence (IMO, name, callsign, dimensions) for one MMSI."""
+    return {
+        "imo": _normalize_imo(row.get("imo")),
+        "name": _normalize_identity_text(row.get("shipName")),
+        "callsign": _normalize_identity_text(row.get("callsign")),
+        "dims": _normalize_dimensions(row),
+    }
+
+
+
+def build_identity_map(vessels: pd.DataFrame) -> dict[int, dict]:
+    """Map each MMSI in a vessel dataframe to its identity evidence."""
+    if vessels is None or vessels.empty or "mmsi" not in vessels.columns:
+        return {}
+
+    return {int(row["mmsi"]): vessel_identity(row) for _, row in vessels.iterrows()}
+
+
+
+def is_same_vessel(a: dict, b: dict) -> bool:
+    """
+    True when two MMSIs describe the same hull.
+
+    One shared field is never enough: the feed carries placeholder IMOs (1234567
+    is shared by 39 unrelated MMSIs) and duplicated names, and suppressing on a
+    single match would hide real encounters. So a match needs an IMO plus one
+    more agreeing attribute, or a name backed by the callsign or the dimensions.
+    """
+    imo_match = a["imo"] is not None and a["imo"] == b["imo"]
+    name_match = a["name"] is not None and a["name"] == b["name"]
+    callsign_match = a["callsign"] is not None and a["callsign"] == b["callsign"]
+    dims_match = a["dims"] is not None and a["dims"] == b["dims"]
+
+    if imo_match and (name_match or callsign_match or dims_match):
+        return True
+
+    return name_match and (callsign_match or dims_match)
+
+
+
+def drop_same_vessel_pairs(pairs: pd.DataFrame, identities: dict[int, dict]) -> tuple[pd.DataFrame, list[tuple[int, int]]]:
+    """Remove pair edges whose two MMSIs are one hull, so it cannot cluster with itself."""
+    if pairs.empty:
+        return pairs, []
+
+    keep: list[bool] = []
+    dropped: list[tuple[int, int]] = []
+
+    for _, row in pairs.iterrows():
+        mmsi_a, mmsi_b = int(row["mmsi_a"]), int(row["mmsi_b"])
+        a, b = identities.get(mmsi_a), identities.get(mmsi_b)
+        same = a is not None and b is not None and is_same_vessel(a, b)
+
+        keep.append(not same)
+
+        if same:
+            dropped.append((mmsi_a, mmsi_b))
+
+    return pairs[keep].reset_index(drop=True), dropped
+
+
+
+def signature_is_one_vessel(sig: str, identities: dict[int, dict]) -> bool:
+    """True when every MMSI in a cluster signature resolves to the same hull."""
+    try:
+        mmsis = [int(part) for part in sig.split("_")]
+    except ValueError:
+        return False
+
+    if len(mmsis) < 2:
+        return False
+
+    members = [identities.get(mmsi) for mmsi in mmsis]
+
+    if any(member is None for member in members):
+        return False
+
+    return all(is_same_vessel(members[0], other) for other in members[1:])
+
+
+# ---------------------------------------------------------------------------
 # Persist open clusters (upsert + close)
 # ---------------------------------------------------------------------------
 
@@ -607,8 +766,22 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
                     sig, obs.vessel_count, obs.suspicion_score or 0,
                 )
 
+        identities = build_identity_map(vessels)
+
         for sig, obs in open_by_sig.items():
             if sig in current_signatures:
+                continue
+
+            if signature_is_one_vessel(sig, identities):
+                # One hull broadcasting two identities: close now, no grace period.
+                _close_observation(obs, detected_at, "same_vessel")
+                closed += 1
+
+                logging.info(
+                    "Closed cluster %s: members are the same vessel (duration %.0fs, score %.2f)",
+                    sig, obs.duration_seconds or 0, obs.suspicion_score or 0,
+                )
+
                 continue
 
             last_seen = obs.last_detected_at or obs.first_detected_at or detected_at
@@ -640,13 +813,18 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
 def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
     """Load stopped/stale cargo and tanker vessels eligible for proximity detection."""
     static_query = """
-        SELECT mmsi, "shipType", "shipTypeDesc", "shipName"
-        FROM public.ais_static
+        SELECT mmsi, "shipType", "shipTypeDesc", "shipName", callsign, imo,
+               to_bow, to_stern, to_port, to_starboard
+        FROM (
+            SELECT *, row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_static
+            FROM public.ais_static
+        ) sub
+        WHERE rowcount_static = 1
     """
     df_static = pd.read_sql(static_query, con=engine)
     df_static = df_static.drop_duplicates(subset="mmsi", keep="first")
 
-    for col in ("shipTypeDesc", "shipName"):
+    for col in ("shipTypeDesc", "shipName", "callsign"):
         df_static[col] = df_static[col].astype("object")
 
     activity_query = """
@@ -697,6 +875,15 @@ def run_proximity_detection(engine: Engine | None = None) -> dict:
         }
 
     pairs = find_close_pairs(df, MAX_DISTANCE_M)
+    pairs, same_vessel_pairs = drop_same_vessel_pairs(pairs, build_identity_map(df))
+
+    if same_vessel_pairs:
+        logging.info(
+            "Skipped %s same-vessel pair(s): %s",
+            len(same_vessel_pairs),
+            ", ".join(f"{a}/{b}" for a, b in same_vessel_pairs),
+        )
+
     clusters = build_clusters(pairs)
 
     if not clusters:

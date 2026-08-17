@@ -1,4 +1,4 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, Response, stream_with_context
 from flask_cors import CORS, cross_origin
 from flask_swagger_ui import get_swaggerui_blueprint
 from datetime import datetime, timedelta
@@ -14,7 +14,13 @@ from sts_detection import (
 )
 from illegal_anchoring import detect_illegal_anchoring
 from dark_vessels import detect_dark_vessels
-from timelineplayback import get_vessel_activity_timeline, get_vessel_track_replay
+from identity_conflict import detect_identity_conflicts
+from timelineplayback import (
+    get_vessel_activity_timeline,
+    get_vessel_track_replay,
+    iter_vessel_track_ndjson,
+    resolve_track_range,
+)
 from sanctions import query_ofac_vessels
 from swagger_sample import apply_swagger_sample, is_swagger_referer
 
@@ -234,6 +240,41 @@ def get_dark_vessels():
         return jsonify({"message": "Internal server error"}), 500
 
 
+@app.route("/mantis/identity-conflict", methods=["GET"])
+@cross_origin()
+def get_identity_conflict():
+    """
+    Groups of MMSIs that resolve to one hull (re-flag / dual identity).
+
+    detectedAt is the latest AIS timestamp in the group (position.ts,
+    else static.ts) — not the API wall clock. OFAC labels are attached
+    per identity and rolled up on the group.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        max_distance = request.args.get("maxDistanceM", type=float)
+        result = detect_identity_conflicts(max_distance_m=max_distance)
+        payload = {
+            "ruleVersion": result["rule_version"],
+            "shipTypeFilter": result["ship_type_filter"],
+            "matchRule": result["match_rule"],
+            "maxDistanceM": result["max_distance_m"],
+            "candidateCount": result["candidate_count"],
+            "groupCount": result["group_count"],
+            "identityCount": result["identity_count"],
+            "sanctionsMatchGroupCount": result["sanctions_match_group_count"],
+            "sanctionsMatchIdentityCount": result["sanctions_match_identity_count"],
+            "groups": result["groups_payload"],
+            "identities": result["identities_payload"],
+        }
+        return jsonify(json_for_client(payload, ["groups", "identities"])), 200
+    except Exception as e:
+        logging.error(f"[get_identity_conflict] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
 @app.route("/mantis/sanctions", methods=["GET"])
 @cross_origin()
 def get_sanctions_list():
@@ -297,7 +338,12 @@ def get_vessel_timeline():
 @cross_origin()
 def get_vessel_track():
     """
-    Full AIS position track for map replay between two datetimes (ClickHouse).
+    AIS position track for map replay (ClickHouse).
+
+    Only `mmsi` is required. Missing `to` means now (UTC); missing `from` means
+    3 days before `to`. The window is never wider than 3 days. Real clients
+    receive an NDJSON stream of 20-minute ClickHouse chunks. Swagger Try it out
+    still gets a 20-point JSON sample.
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -305,23 +351,49 @@ def get_vessel_track():
     mmsi = request.args.get("mmsi", type=int)
     date_from = request.args.get("from")
     date_to = request.args.get("to")
+    if date_from is not None and not str(date_from).strip():
+        date_from = None
+    if date_to is not None and not str(date_to).strip():
+        date_to = None
     include_class_b = request.args.get("includeClassB", "false").lower() not in (
         "0", "false", "no",
     )
 
-    if not mmsi or not date_from or not date_to:
-        return jsonify({
-            "message": "Query parameters mmsi, from, and to are required",
-        }), 400
+    if not mmsi:
+        return jsonify({"message": "Query parameter mmsi is required"}), 400
 
     try:
-        payload = get_vessel_track_replay(
-            mmsi,
-            date_from,
-            date_to,
-            include_class_b=include_class_b,
+        resolve_track_range(date_from, date_to)
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+
+    try:
+        if is_swagger_request():
+            payload = get_vessel_track_replay(
+                mmsi,
+                date_from,
+                date_to,
+                include_class_b=include_class_b,
+                max_points=20,
+            )
+            return jsonify(json_for_client(payload, ["track"])), 200
+
+        def generate():
+            yield from iter_vessel_track_ndjson(
+                mmsi,
+                date_from,
+                date_to,
+                include_class_b=include_class_b,
+            )
+
+        return Response(
+            stream_with_context(generate()),
+            mimetype="application/x-ndjson",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+            },
         )
-        return jsonify(json_for_client(payload, ["track"])), 200
     except ValueError as e:
         return jsonify({"message": str(e)}), 400
     except Exception as e:

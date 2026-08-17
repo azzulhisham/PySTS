@@ -5,7 +5,7 @@ MANTIS MCP server
 What is MCP?
   Model Context Protocol — a standard way for AI apps (like Cursor)
   to call your tools. Cursor starts this script, then the AI can
-  invoke the six tools below instead of writing curl by hand.
+  invoke the seven tools below instead of writing curl by hand.
 
 How it runs:
   Cursor launches:  python server.py
@@ -18,7 +18,8 @@ Tools exposed:
   3. get_sts_activities
   4. get_illegal_anchoring
   5. get_dark_vessels
-  6. get_sanctions_list
+  6. get_identity_conflicts
+  7. get_sanctions_list
 """
 
 from __future__ import annotations
@@ -98,6 +99,20 @@ def get_dark_vessels(include_coverage_exit: bool = True) -> dict[str, Any]:
     (excludes possible_coverage_exit).
     """
     return client.get_dark_vessels(include_coverage_exit=include_coverage_exit)
+
+
+@mcp.tool()
+def get_identity_conflicts(max_distance_m: float | None = None) -> dict[str, Any]:
+    """
+    Return re-flag / dual-MMSI identity-conflict groups
+    from GET /mantis/identity-conflict.
+
+    detectedAt is the latest AIS timestamp in the group (not wall clock).
+    OFAC sanctionsMatch is a label only (IMO confirmed / MMSI possible).
+    Optional max_distance_m keeps only groups whose last positions are
+    still that close (metres).
+    """
+    return client.get_identity_conflicts(max_distance_m=max_distance_m)
 
 
 @mcp.tool()

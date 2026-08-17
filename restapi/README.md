@@ -49,9 +49,10 @@ Frontend                separate repo / separate developer
 - `GET /mantis/polygons` — all named polygons + restricted limit
 - `GET /mantis/sts-activities` — STS proximity pairs inside parent polygons (Excl holes excluded; OFAC labels on each vessel)
 - `GET /mantis/illegal-anchoring` — heuristic illegal-anchoring candidates (v3; OFAC labels)
+- `GET /mantis/identity-conflict` — re-flag / dual-MMSI identity groups (AIS timestamp; OFAC labels)
 - `GET /mantis/sanctions` — OFAC vessel list (search by `imo` or `mmsi`; full list otherwise)
 - `GET /mantis/vessel-timeline` — derived activity/events for one vessel
-- `GET /mantis/vessel-track` — AIS position track for map replay
+- `GET /mantis/vessel-track` — AIS position track for map replay (NDJSON stream; max 3 days)
 - `POST /authentication/token` — issue a JWT access token
 - `GET /` — health check (Bearer required)
 - Swagger UI at `/swagger`
@@ -66,6 +67,7 @@ restapi/
 ├── sts_detection.py        # STS proximity inside parent polygons
 ├── illegal_anchoring.py    # Illegal-anchoring detection (v3, Excl holes excluded)
 ├── dark_vessels.py         # Dark / AIS-off detection (polygon label only)
+├── identity_conflict.py    # Re-flag / dual-MMSI identity groups (AIS timestamp)
 ├── sanctions.py            # OFAC identity labels (IMO / MMSI join; not a detector)
 ├── vessel_size.py          # AIS Class A/B dimensions (to_bow / to_stern / to_port / to_starboard)
 ├── swagger_sample.py       # 20-row cap when Try it out is run from /swagger
@@ -217,11 +219,13 @@ Try it out from `/swagger` is detected via the `Referer` header. If a list in th
 | `returnedCount` / `returnedCounts` | Rows actually in the payload |
 | `message` | Explains that curl / frontend / MCP get the full result |
 
-Applies to: polygons (Swagger gets a wrapped object), STS `pairs` / `pairedVessels`, illegal-anchoring `vessels`, dark `vessels`, sanctions `vessels`, timeline `events`, track `track`.
+Applies to: polygons (Swagger gets a wrapped object), STS `pairs` / `pairedVessels`, illegal-anchoring `vessels`, dark `vessels`, identity-conflict `groups` / `identities`, sanctions `vessels`, timeline `events`, track `track`.
 
 **Not sampled:** `POST /authentication/token` and `GET /` (health).
 
 curl, the operations frontend, and MCP always receive the **full** payload. `/mantis/polygons` stays a **bare JSON array** for those clients; only Swagger gets `{ "polygons": [ ...20 ], "sample": true, ... }`.
+
+`GET /mantis/vessel-track` is different for real clients: they receive an **NDJSON stream** of 20-minute chunks (not one JSON object). Swagger Try it out still gets a 20-point JSON sample.
 
 ## Detection rules (maintainer source of truth)
 
@@ -291,8 +295,9 @@ Singapore East Anchorage, Singapore Western OPL and Singapore South Anchorage ar
 | STS | `sts_detection.py` | Centroid in a **parent**; drop if centroid is also in any Excl | `anchorageName` from the parent match |
 | Illegal anchoring | `illegal_anchoring.py` (`rule_version` `v3.1-…-ofac-label`) | Stopped Class-A 70–89; keep if in Restricted Limit **or** a parent; **drop if in any Excl** | `watchPolygonName`; `inPortLimit` / `portLimitName` / `portLimitPolygonCount` are **compat keys for Excl holes** |
 | Dark vessels | `dark_vessels.py` (`rule_version` `v1.2-slowmove-dark-polygon-ofac-label`) | **Never drop** because of a polygon | `polygonName` (Excl preferred if in a hole); `inExclPolygon` |
+| Identity conflict | `identity_conflict.py` (`rule_version` `v1.0-identity-conflict-ais-ts-ofac`) | Same-hull groups of 2+ MMSIs; optional `maxDistanceM` | none (not a location detector) |
 
-OFAC identity (all three): `imo`, `sanctionsMatch`, `matchConfidence` (`confirmed` \| `possible` \| `none`), `sanctionsList`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+OFAC identity (STS / dark / illegal-anchoring / identity-conflict): `imo`, `sanctionsMatch`, `matchConfidence` (`confirmed` \| `possible` \| `none`), `sanctionsList`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 MCP (`PySTS/mcp`) is a pass-through to this API. It does not re-implement polygon or OFAC rules.
 
@@ -302,7 +307,7 @@ This is the **product contract** for sanctions fields on the API. Detection knob
 
 Code: `sanctions.py` (`match_vessel`, `attach_sanctions`, `attach_sanctions_pair_sides`).
 
-OFAC data is already in Postgres `pnav` (loaded by `backend/ofac_sdn_ingest.py` and `backend/ofac_cons_ingest.py`). This API **only joins** those tables onto candidates that already passed STS / dark / illegal-anchoring rules.
+OFAC data is already in Postgres `pnav` (loaded by `backend/ofac_sdn_ingest.py` and `backend/ofac_cons_ingest.py`). This API **only joins** those tables onto candidates that already passed STS / dark / illegal-anchoring / identity-conflict rules.
 
 | What | Detail |
 | --- | --- |
@@ -346,6 +351,7 @@ If the same IMO exists on both lists, **SDN wins**. `sanctionsList` is then `SDN
 | `toStarboard` | number or `null` | Metres from AIS GPS antenna to starboard |
 | `lengthM` | number or `null` | Overall length: `toBow + toStern`. `null` if either offset is missing |
 | `beamM` | number or `null` | Beam (width): `toPort + toStarboard`. `null` if either offset is missing |
+| `lastSeenAt` | string (ISO 8601 UTC) or `null` | **Last AIS position time** (`tscurrent`). Use this — not `pairedAt` / `detectedAt` — as the anchor for `GET /mantis/vessel-track` |
 | `sanctionsMatch` | boolean | `true` if this ship matched OFAC |
 | `matchConfidence` | `confirmed` \| `possible` \| `none` | How sure the **identity** match is — not how sure the AIS behaviour is |
 | `sanctionsList` | `SDN` \| `CONS` \| `null` | Which OFAC file matched. `null` when `sanctionsMatch` is false |
@@ -382,7 +388,7 @@ Unmatched example:
 
 ### Sort (priority, not score)
 
-On STS, dark, and illegal-anchoring payloads, rows are ordered:
+On STS, dark, illegal-anchoring, and identity-conflict payloads, rows are ordered:
 
 1. `confirmed`
 2. `possible`
@@ -399,10 +405,11 @@ That is so a listed ship that is also dark or in an STS pair is seen first. It i
 | `/mantis/darkvessels` | `sanctionsMatchCount` |
 | `/mantis/illegal-anchoring` | `sanctionsMatchCount` |
 | `/mantis/sts-activities` | `sanctionsMatchPairCount`, `sanctionsMatchVesselCount` |
+| `/mantis/identity-conflict` | `sanctionsMatchGroupCount`, `sanctionsMatchIdentityCount` |
 
 ### Frontend
 
-New fields on all three list endpoints (`sanctionsMatch` and AIS size). Brief the frontend developer before painting them on the map. Do not treat `sanctionsMatch: true` as an auto-verdict in the UI.
+New fields on the list endpoints (`sanctionsMatch` and AIS size). Brief the frontend developer before painting them on the map. Do not treat `sanctionsMatch: true` as an auto-verdict in the UI.
 
 ### Lookup endpoint (`GET /mantis/sanctions`)
 
@@ -436,9 +443,10 @@ curl "http://localhost:8080/mantis/sanctions?imo=9187631" \
 | `GET` | `/mantis/sts-activities` | Bearer | STS pairs inside parent polygons (Excl excluded); OFAC labels |
 | `GET` | `/mantis/illegal-anchoring` | Bearer | Illegal-anchoring candidates (v3); OFAC labels |
 | `GET` | `/mantis/darkvessels` | Bearer | Dark / AIS-off candidates (polygon + OFAC label only) |
+| `GET` | `/mantis/identity-conflict` | Bearer | Re-flag / dual-MMSI identity groups (AIS time; OFAC labels) |
 | `GET` | `/mantis/sanctions` | Bearer | OFAC vessel list (`imo` / `mmsi` search) |
 | `GET` | `/mantis/vessel-timeline` | Bearer | Derived events for one MMSI (`mmsi`, `from`, `to`) |
-| `GET` | `/mantis/vessel-track` | Bearer | AIS track replay (`mmsi`, `from`, `to`; optional `includeClassB`) |
+| `GET` | `/mantis/vessel-track` | Bearer | AIS track replay (`mmsi` required; `from` / `to` optional, default last 3 days, max 3 days; NDJSON stream) |
 | `GET` | `/` | Bearer | Health check (`polygonCount` = `len(all_polygons)`) |
 
 ### Polygon response shape
@@ -472,12 +480,13 @@ Pairs are recomputed at **≤ 35 m**. Only **paired vessels** are included.
 
 Each pair payload includes:
 
-- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`, `imo`, `toBow`, `toStern`, `toPort`, `toStarboard`, `lengthM`, `beamM`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`
+- `vesselA` / `vesselB`: `mmsi`, `shipName`, `latitude`, `longitude`, `sog`, `cog`, `lastSeenAt`, `imo`, `toBow`, `toStern`, `toPort`, `toStarboard`, `lengthM`, `beamM`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`
 - pair-level `sanctionsMatch` / `matchConfidence` (best of the two vessels)
 - `distanceM`
 - `durationSeconds` / `durationHours` / `durationLabel` (how long the cluster has been open)
-- `pairedAt` (`last_detected_at` — when the pairing was last determined)
-- `firstDetectedAt`
+- `pairedAt` — pipeline **wall clock** (`last_detected_at` on the observation). Do **not** use for vessel-track.
+- `firstDetectedAt` — same (wall clock)
+- `lastSeenAt` on each vessel — **AIS time** of the fix used for that member (`tscurrent`, else `ais_position.ts`)
 - `anchorageName` — the **parent** polygon (never an Excl name)
 
 Optional query param: `minSuspicionScore` (float, default `4.5`). OFAC does **not** let a pair through if the score is below this cut. See [OFAC labels](#ofac-labels-identity-not-a-detector).
@@ -517,7 +526,7 @@ curl http://localhost:8080/mantis/illegal-anchoring \
   -H "Authorization: Bearer <jwt-token>"
 ```
 
-Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`) and AIS size (`toBow`, `toStern`, `toPort`, `toStarboard`, `lengthM`, `beamM`). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`), AIS size (`toBow`, …), and **`lastSeenAt`** (same as `tsCurrent` — last AIS fix on the movement activity). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 ### Dark vessels (v1.2 heuristic)
 
@@ -535,7 +544,7 @@ Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `s
 | `possible_coverage_exit` | Likely left SEA AIS footprint (competing explanation) |
 | `low_evidence_ais_gap` | Silence without strong slow-down evidence |
 
-Research notes and improvement roadmap: `../backend/mantis-detection.md`. OFAC fields are the same as on STS / illegal-anchoring; dark `confidence` is unchanged. Size fields are the same AIS static join. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+Research notes and improvement roadmap: `../backend/mantis-detection.md`. OFAC fields are the same as on STS / illegal-anchoring; dark `confidence` is unchanged. Size fields are the same AIS static join. Each vessel has **`lastSeenAt`** (same as `tsCurrent`). See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
 ```bash
 # All candidates (including possible coverage exit)
@@ -544,6 +553,32 @@ curl "http://localhost:8080/mantis/darkvessels" \
 
 # Ops-tight list (exclude possible_coverage_exit)
 curl "http://localhost:8080/mantis/darkvessels?includeCoverageExit=false" \
+  -H "Authorization: Bearer <jwt-token>"
+```
+
+### Identity conflict
+
+`GET /mantis/identity-conflict` groups Class-A cargo/tanker MMSIs (`shipType` **70–89**) that resolve to **one hull** — a re-flagged vessel still broadcasting a retired MMSI, or two identities with the same name plus callsign/dimensions.
+
+Match rule (same as the backend STS same-hull suppression):
+
+- **IMO plus** name, callsign, or dimensions, **or**
+- **name plus** callsign or dimensions
+
+Placeholder IMOs (`1234567`, `7654321`, `9999999`, repdigits) and names shorter than 3 characters are ignored, so a shared junk IMO does not collapse unrelated ships.
+
+`detectedAt` is the **latest AIS timestamp** in the group (`ais_position.ts`, falling back to `ais_static.ts`). It is not the API wall clock. Each identity also has `lastAisAt` (position) and `identityAt` (static Type 5).
+
+OFAC labels are attached per identity and rolled up on the group (`sanctionsMatch` is true if **any** identity matches). Unmatched groups stay in the list. Groups are sorted listed-first, then newest AIS time.
+
+Optional query param: `maxDistanceM` (float). When set, only groups whose last-known positions are closer than that many metres are returned (groups without two positions are dropped).
+
+```bash
+curl "http://localhost:8080/mantis/identity-conflict" \
+  -H "Authorization: Bearer <jwt-token>"
+
+# Only identities still sitting near each other (e.g. false STS pairs)
+curl "http://localhost:8080/mantis/identity-conflict?maxDistanceM=50" \
   -H "Authorization: Bearer <jwt-token>"
 ```
 
@@ -556,7 +591,113 @@ Zone-visit rows (`ais_vesselinzone`, `ais_vesselinrestrictzone`) are **not** wri
 | Endpoint | Query | Source |
 | --- | --- | --- |
 | `GET /mantis/vessel-timeline` | `mmsi`, `from`, `to` (required) | PostgreSQL: zone visits, restricted zones, stop/slow-move, static identity changes |
-| `GET /mantis/vessel-track` | `mmsi`, `from`, `to` (required); `includeClassB` (optional, default false) | ClickHouse AIS positions for map replay |
+| `GET /mantis/vessel-track` | `mmsi` (required); `from` / `to` optional (default last 3 days); `includeClassB` optional (default false) | ClickHouse AIS positions, **NDJSON stream** of 20-minute chunks |
+
+**Linking from STS / dark / illegal-anchoring:** use each vessel's **`lastSeenAt`** (AIS time), not `pairedAt` or `detectedAt` (pipeline wall clock). Typical pattern: pass `to=<lastSeenAt>` and omit `from` to get the default 3-day window ending at that fix, or set both bounds around the event you care about (max 3 days).
+
+```bash
+# STS pair member — replay track ending at the AIS fix shown on the map
+curl -N "http://localhost:8080/mantis/vessel-track?mmsi=352006140&to=2026-06-28T04%3A15%3A10Z" \
+  -H "Authorization: Bearer <jwt-token>" \
+  -H "accept: application/x-ndjson"
+```
+
+#### Track range (3-day cap)
+
+Only `mmsi` is required. Both dates are optional and the window is never wider
+than 3 days.
+
+| `from` | `to` | Effective range |
+| --- | --- | --- |
+| omitted | omitted | last 3 days, ending now (UTC) |
+| given | omitted | `from` → now, or `from` + 3 days when that is earlier (`rangeCapped: true`) |
+| omitted | given | `to` - 3 days → `to` |
+| given | given | as requested; `to` clamped to `from` + 3 days when the span is longer (`rangeCapped: true`) |
+
+- Blank values (`from=`) count as omitted.
+- `from` after `to` is still `400`.
+- A `from` in the future is paired with `from` + 3 days — no data, but not an error.
+- Meta reports `fromOmitted`, `toOmitted`, `rangeCapped`, `requestedDateFrom`, `requestedDateTo`.
+
+```bash
+# last 3 days, no dates at all
+curl -N "http://localhost:8080/mantis/vessel-track?mmsi=533000123" \
+  -H "Authorization: Bearer <jwt-token>"
+```
+
+#### Track position validity
+
+Raw AIS encodes "position not available" as **latitude 91 / longitude 181**, and
+those rows are stored in ClickHouse verbatim (~1.3% of `ais_position`). They
+cannot be plotted, so both track queries filter them out in SQL:
+
+```sql
+AND latitude BETWEEN -90 AND 90
+AND longitude BETWEEN -180 AND 180
+```
+
+The range test also drops `NaN` and `±Inf`, which ClickHouse treats as outside
+any `BETWEEN`. It applies to Class A (`ais_position`) and Class B
+(`ais_type18`), so every point in the stream has a usable fix. A vessel that
+never reported a position now streams `meta` + `done` with `pointCount: 0`
+instead of thousands of unplottable points. See `VALID_POSITION_SQL` in
+`timelineplayback.py`.
+
+`(0, 0)` is **not** filtered — it is a real location and appears in only a
+handful of rows. `sog` 102.3, `cog` 360 and `trueHeading` 511 are the AIS
+"unavailable" markers for those fields and are still passed through as-is.
+
+#### Track stream (curl / frontend / Dash)
+
+Content-Type: `application/x-ndjson`. One JSON object per line:
+
+1. `{"type":"meta", ...}` — effective `dateFrom` / `dateTo`, cap flags
+2. `{"type":"chunk", "chunkIndex":0, "points":[...]}` — one line per 20-minute ClickHouse window that has positions (empty windows are skipped)
+3. `{"type":"done", "pointCount":N, "chunkCount":M}` — end
+4. `{"type":"error", "message":"..."}` — only if ClickHouse fails after the stream has started
+
+ClickHouse is queried **one 20-minute window at a time**. The first chunk is flushed as soon as that window returns, so the map can start drawing without waiting for the rest of the range. The API process does not keep the full track in memory.
+
+```bash
+# to omitted → from + 3 days
+curl -N "http://localhost:8080/mantis/vessel-track?mmsi=533000123&from=2026-06-10T00:00:00Z" \
+  -H "Authorization: Bearer <jwt-token>"
+
+# requested 10 days is clamped to 3
+curl -N "http://localhost:8080/mantis/vessel-track?mmsi=533000123&from=2026-06-10T00:00:00Z&to=2026-06-20T00:00:00Z" \
+  -H "Authorization: Bearer <jwt-token>"
+```
+
+Python Dash (and any Python client) can read the stream:
+
+```python
+import json
+import requests
+
+def iter_track_chunks(base_url, token, mmsi, date_from, date_to=None):
+    params = {"mmsi": mmsi, "from": date_from}
+    if date_to:
+        params["to"] = date_to
+    with requests.get(
+        f"{base_url}/mantis/vessel-track",
+        headers={"Authorization": f"Bearer {token}"},
+        params=params,
+        stream=True,
+        timeout=300,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines(decode_unicode=True):
+            if line:
+                yield json.loads(line)
+
+# Dash: extend a figure as each chunk arrives (callback or background thread + Interval).
+points = []
+for msg in iter_track_chunks("http://localhost:8080", token, 533000123, "2026-06-10T00:00:00Z"):
+    if msg.get("type") == "chunk":
+        points.extend(msg["points"])
+```
+
+**This Swagger page:** still JSON, first 20 points only, so Try it out does not hang on a stream.
 
 ## Related packages (boundaries)
 

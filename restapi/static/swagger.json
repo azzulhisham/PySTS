@@ -124,6 +124,12 @@
             "format": "double",
             "description": "Course over ground (degrees)."
           },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last AIS position timestamp for this vessel (`tscurrent` / `ais_position.ts`). Use as the anchor for GET /mantis/vessel-track — not pairedAt, which is pipeline wall clock on STS."
+          },
           "imo": {
             "type": "string",
             "nullable": true,
@@ -215,7 +221,7 @@
           },
           "pairedAt": {
             "type": "string",
-            "description": "Timestamp when the pairing was last determined (last_detected_at)."
+            "description": "Pipeline wall clock when the cluster was last updated (`last_detected_at`). Not AIS time — use vessel lastSeenAt for /mantis/vessel-track."
           },
           "firstDetectedAt": {
             "type": "string",
@@ -329,7 +335,14 @@
             "type": "string"
           },
           "tsCurrent": {
-            "type": "string"
+            "type": "string",
+            "description": "Last AIS fix on the movement activity (`tscurrent`). Same instant as lastSeenAt."
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last AIS position timestamp (`tscurrent`). Use as the anchor for GET /mantis/vessel-track — not detectedAt, which is API wall clock."
           },
           "durationSeconds": {
             "type": "number",
@@ -531,7 +544,14 @@
           },
           "tsCurrent": {
             "type": "string",
-            "nullable": true
+            "nullable": true,
+            "description": "Last AIS fix on the slow-move activity (`tscurrent`). Same instant as lastSeenAt."
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Last AIS position timestamp (`tscurrent`). Use as the anchor for GET /mantis/vessel-track."
           },
           "silenceSeconds": {
             "type": "number",
@@ -668,6 +688,227 @@
             "items": {
               "$ref": "#/components/schemas/DarkVessel"
             }
+          }
+        }
+      },
+      "IdentityConflictVessel": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipName": {
+            "type": "string",
+            "nullable": true
+          },
+          "callsign": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipType": {
+            "type": "integer",
+            "nullable": true
+          },
+          "shipTypeDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "sog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "cog": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "navStatus": {
+            "type": "integer",
+            "nullable": true
+          },
+          "lastAisAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Last AIS position timestamp (`ais_position.ts`). AIS time, not wall clock."
+          },
+          "identityAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "Latest Class-A static (Type 5) timestamp (`ais_static.ts`)."
+          },
+          "detectedAt": {
+            "type": "string",
+            "nullable": true,
+            "description": "AIS event time for this identity: `lastAisAt` if present, else `identityAt`."
+          },
+          "aisTimestampSource": {
+            "type": "string",
+            "enum": ["position", "static"]
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this identity matches OFAC. Label only \u2014 groups are not dropped."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
+          }
+        }
+      },
+      "IdentityConflictGroup": {
+        "type": "object",
+        "properties": {
+          "clusterSignature": {
+            "type": "string",
+            "example": "352006140_525108038"
+          },
+          "detectedAt": {
+            "type": "string",
+            "description": "Latest AIS timestamp among the identities (position.ts, else static.ts). Not the API wall clock."
+          },
+          "firstAisAt": {
+            "type": "string",
+            "description": "Earliest AIS timestamp among the identities."
+          },
+          "aisTimestampSource": {
+            "type": "string",
+            "enum": ["position", "static"]
+          },
+          "identityCount": {
+            "type": "integer"
+          },
+          "maxInternalDistanceM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Greatest pairwise distance of last known positions. Null if fewer than two positions."
+          },
+          "matchReasons": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": ["imo", "name", "callsign", "dims"]
+            }
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if any identity in the group matches OFAC."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"],
+            "description": "Best OFAC confidence among the identities."
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityConflictVessel"
+            }
+          }
+        }
+      },
+      "IdentityConflictResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": {
+            "type": "string",
+            "example": "v1.0-identity-conflict-ais-ts-ofac"
+          },
+          "shipTypeFilter": {
+            "type": "string"
+          },
+          "matchRule": {
+            "type": "string"
+          },
+          "maxDistanceM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "candidateCount": {
+            "type": "integer"
+          },
+          "groupCount": {
+            "type": "integer"
+          },
+          "identityCount": {
+            "type": "integer"
+          },
+          "sanctionsMatchGroupCount": {
+            "type": "integer",
+            "description": "Groups where any identity matches OFAC. Unmatched groups are still returned."
+          },
+          "sanctionsMatchIdentityCount": {
+            "type": "integer"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityConflictGroup"
+            }
+          },
+          "identities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IdentityConflictVessel"
+            },
+            "description": "Flat list of identities for map markers (same objects as nested under groups)."
           }
         }
       },
@@ -947,6 +1188,27 @@
             "nullable": true,
             "description": "Elapsed time between first and last track point."
           },
+          "toOmitted": {
+            "type": "boolean",
+            "description": "True when the client did not send `to`; range is from + 3 days."
+          },
+          "rangeCapped": {
+            "type": "boolean",
+            "description": "True when the requested span was longer than 3 days and `to` was clamped."
+          },
+          "maxRangeDays": {
+            "type": "integer",
+            "example": 3
+          },
+          "chunkMinutes": {
+            "type": "integer",
+            "example": 20
+          },
+          "requestedDateTo": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
           "track": {
             "type": "array",
             "items": {
@@ -1182,7 +1444,7 @@
           "mantis"
         ],
         "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each pair includes mmsi, shipName, lat/lon, sog, cog, AIS size (toBow/toStern/toPort/toStarboard, lengthM, beamM), distanceM, duration, and pairedAt. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each vessel includes **`lastSeenAt`** (AIS time of the fix used for that member). **`pairedAt`** is pipeline wall clock only — use `lastSeenAt` with GET /mantis/vessel-track. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {
@@ -1242,6 +1504,51 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/IllegalAnchoringResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/identity-conflict": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get re-flag / dual-MMSI identity conflicts.",
+        "description": "Groups of Class-A cargo/tanker MMSIs (`shipType` 70\u201389) that resolve to **one hull** (re-flag, dual identity). Match rule: IMO plus name/callsign/dimensions, or name plus callsign/dimensions. Placeholder IMOs such as 1234567 are ignored. `detectedAt` is the **latest AIS timestamp** in the group (`ais_position.ts`, else `ais_static.ts`) \u2014 not the API wall clock. OFAC labels (`sanctionsMatch`) are attached per identity and rolled up on the group; unmatched groups are kept. Listed groups are sorted first.\n\nOptional `maxDistanceM` keeps only groups whose last positions are still that close.\n\n**This Swagger page:** `groups` and `identities` are each capped at 20 samples.",
+        "operationId": "getIdentityConflicts",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "maxDistanceM",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "number",
+              "format": "double"
+            },
+            "description": "If set, keep only groups whose last-known positions are closer than this (metres). Groups without two positions are dropped."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity-conflict groups (same hull, multiple MMSIs).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IdentityConflictResponse"
                 }
               }
             }
@@ -1338,8 +1645,8 @@
         "tags": [
           "mantis"
         ],
-        "summary": "Get full AIS track for map replay.",
-        "description": "Returns ordered AIS position reports for one vessel between two datetimes from ClickHouse (`pnav.ais_position`, optionally `pnav.ais_type18` for Class B). Use for map playback and route visualization.\n\n**This Swagger page:** `track` is capped at 20 sample points.",
+        "summary": "Get AIS track for map replay (streamed).",
+        "description": "Returns ordered AIS position reports for one vessel from ClickHouse (`pnav.ais_position`, optionally `pnav.ais_type18` for Class B).\n\n**Only `mmsi` is required.** `to` defaults to the current UTC datetime; `from` defaults to 3 days before the effective `to`, so passing neither returns the **last 3 days**. If `from` is given without `to`, `to` is the current datetime unless `from` + 3 days is earlier, in which case the window ends there and `rangeCapped` is true. A requested span longer than 3 days is clamped to `from` + 3 days.\n\n**Only plottable fixes are returned.** Raw AIS encodes \"position not available\" as latitude 91 / longitude 181; those rows are filtered in ClickHouse (`latitude BETWEEN -90 AND 90 AND longitude BETWEEN -180 AND 180`, which also drops NaN / \u00b1Inf). A vessel that never reported a position returns `pointCount: 0`. Note that `sog` 102.3, `cog` 360 and `trueHeading` 511 are the equivalent \"unavailable\" markers for those fields and are passed through unchanged.\n\n**curl / frontend / Dash:** NDJSON stream. ClickHouse is read in **20-minute** windows; each window is flushed as a `chunk` line as soon as it returns so the map can start drawing. Empty windows are skipped.\n\n**This Swagger page:** JSON sample of the first 20 points (not a live stream).",
         "operationId": "getVesselTrack",
         "security": [
           {
@@ -1361,23 +1668,23 @@
           {
             "name": "from",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date-time"
             },
-            "description": "Range start (ISO 8601, UTC recommended).",
+            "description": "Range start (ISO 8601, UTC recommended). Optional. Defaults to 3 days before the effective `to`, so omitting both gives the last 3 days.",
             "example": "2026-06-10T00:00:00Z"
           },
           {
             "name": "to",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
               "type": "string",
               "format": "date-time"
             },
-            "description": "Range end (ISO 8601, UTC recommended).",
+            "description": "Range end (ISO 8601, UTC recommended). Optional. Defaults to the current UTC datetime, or `from` + 3 days when that is earlier. Spans longer than 3 days are clamped to 3 days.",
             "example": "2026-06-12T00:00:00Z"
           },
           {
@@ -1393,8 +1700,15 @@
         ],
         "responses": {
           "200": {
-            "description": "Ordered AIS position track points.",
+            "description": "NDJSON stream for real clients (meta, then 20-minute chunks, then done). Swagger Try it out returns a JSON sample of the first 20 points.",
             "content": {
+              "application/x-ndjson": {
+                "schema": {
+                  "type": "string",
+                  "description": "One JSON object per line. Types: meta, chunk, done, error."
+                },
+                "example": "{\"type\":\"meta\",\"mmsi\":533000123,\"dateFrom\":\"2026-06-10T00:00:00+00:00\",\"dateTo\":\"2026-06-13T00:00:00+00:00\",\"chunkMinutes\":20}\n{\"type\":\"chunk\",\"chunkIndex\":0,\"pointCount\":2,\"points\":[{\"ts\":\"2026-06-10T00:01:00+00:00\",\"mmsi\":533000123,\"latitude\":1.26,\"longitude\":103.85}]}\n{\"type\":\"done\",\"pointCount\":2,\"chunkCount\":1}\n"
+              },
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/VesselTrackResponse"

@@ -125,7 +125,9 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Dark: ship type | `70–89` | `dark_vessels.py` |
 | Dark: polygons | **label only, never drop**; Excl name preferred if in a hole | `dark_vessels.py` |
 | Dark: Restricted Limit | **not** used for `polygonName` | `dark_vessels.py` |
-| Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring; `onBunkerRegister` later |
+| Identity conflict | same-hull groups of 2+ MMSIs; `detectedAt` = latest AIS `ts` | `identity_conflict.py` |
+| Identity match | IMO + (name\|callsign\|dims) **or** name + (callsign\|dims) | same file |
+| Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring / identity-conflict; `onBunkerRegister` later |
 
 ### Identity ingest (`ofac_sdn_ingest.py` / `ofac_cons_ingest.py` — not a detector loop)
 
@@ -267,14 +269,41 @@ Polygons: **label only**. `polygonName` from `restapi/polygons.py` named areas; 
 
 ### Flow
 
-1. Load stopped/stale **cargo+tanker** from `ais_vesselmovementactivities` (1 h after `tsstop` **or** 30 min stale `tscurrent`).
+1. Load stopped/stale **cargo+tanker** from `ais_vesselmovementactivities` (1 h after `tsstop` **or** 30 min stale `tscurrent`), joined to the **latest** `ais_static` row per MMSI.
 2. All unordered pairs with `ST_Distance_Sphere < 30` m (`mmsi_a < mmsi_b`).
-3. Union-find connected components → one cluster (2, 3, 4+ vessels = **one** observation, not pair rows).
-4. Upsert by `cluster_signature`. Update duration, `run_count`, `suspicion_score`.
-5. If not seen for **60 s**, close (`close_reason = 'not_seen'`).
-6. Sleep 30 s.
+3. Drop pairs that are the **same hull** — see [Same-hull suppression](#same-hull-suppression).
+4. Union-find connected components → one cluster (2, 3, 4+ vessels = **one** observation, not pair rows).
+5. Upsert by `cluster_signature`. Update duration, `run_count`, `suspicion_score`.
+6. If not seen for **60 s**, close (`close_reason = 'not_seen'`). An open cluster whose whole MMSI set is one hull closes immediately (`close_reason = 'same_vessel'`).
+7. Sleep 30 s.
 
 If the MMSI set changes (pair → trio), the old signature closes after grace; a new observation opens.
+
+### Same-hull suppression
+
+A re-flagged vessel keeps broadcasting its retired MMSI, so two identities of one ship sit metres apart and score as an STS. `is_same_vessel()` compares the latest `ais_static` row of each MMSI:
+
+| Evidence | Normalisation |
+| --- | --- |
+| `imo` | must be 7 digits; `0`, repdigits and `PLACEHOLDER_IMOS` (`1234567`, `7654321`, `9999999`) rejected |
+| `shipName`, `callsign` | `'@'` padding stripped, upper-cased, whitespace collapsed; unusable below `MIN_IDENTITY_TEXT_CHARS = 3` |
+| dimensions | `(to_bow, to_stern, to_port, to_starboard)`; unusable when any part is null or all are zero |
+
+Match rule: **IMO plus one** other agreeing attribute, **or** name plus callsign or dimensions. One shared field is never enough — IMO `1234567` alone is shared by 39 unrelated MMSIs in `ais_static`, so suppressing on a bare IMO match would hide real encounters. Same IMO with a different name, callsign *and* dimensions is left alone as ambiguous.
+
+Only the pair **edge** is dropped. In a trio where two members are one hull but both sit near a genuine third vessel, the cluster survives with the retired identity still counted, so `vessel_count` stays inflated by one.
+
+### Cleanup of unresolvable detections
+
+`backend/cleanup_stale_detections.py` is a manual, dry-run-by-default script (`--apply` to write, `--stale-days`, default **7**):
+
+| Step | Action |
+| --- | --- |
+| Open activities in both activity tables with `tscurrent` older than the cutoff | `tsout = tscurrent` |
+| Open observations whose newest member `tscurrent` is older than the cutoff | close, `close_reason = 'stale_source'` |
+| Open observations whose members are one hull | close, `close_reason = 'same_vessel'` (takes precedence) |
+
+Needed because neither detector can close an activity on its own: `tsout` is only set when a **fresh** high-speed fix arrives, and each detector reads only the last 2–3 days of `ais_position`, so a vessel that stops transmitting drops out of its own input and stays open forever. Note this also removes those MMSIs from the dark-vessel feed, which requires `tsout IS NULL`.
 
 ### Suspicion score formula
 
@@ -480,6 +509,11 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-08-18 | New API `GET /mantis/identity-conflict`. Live scan of latest `ais_static` + `ais_position` for cargo/tanker MMSIs that are one hull (same corroboration rule as STS same-hull suppression). `detectedAt` is the latest AIS timestamp in the group, not wall clock. OFAC labels on each identity and rolled up on the group. Optional `maxDistanceM`. |
+| 2026-08-18 | STS same-hull suppression (`DETECTION_VERSION` **2.1**). Pairs that are one re-flagged vessel are dropped before clustering, and open clusters that collapse to one hull close as `same_vessel`. `load_candidate_vessels` now joins the **latest** `ais_static` row and pulls `imo` / `callsign` / dimensions. Caught 9 of 93 live pairs, incl. `352006140_525108038` (PIS MENTAWAI, IMO 1050973 on both MMSIs) which had been open 23.6 days on fixes from 28 June. Added `cleanup_stale_detections.py` for activities and observations that can never close themselves; distance, grace, and score formula unchanged. |
+| 2026-08-18 | Investigation note: `detected_at` / `first_detected_at` / `last_detected_at` on `ais_vesselproximityobservation` are **job wall-clock** (`datetime.now(timezone.utc)`), not AIS time, and `duration_seconds` is wall-clock too. No AIS timestamp is stored on the observation — only `ais_vesselproximitymember.tscurrent`. A stale cluster therefore inflates its own duration and suspicion score. Not changed. |
+| 2026-08-17 | `/mantis/vessel-track` date params: only `mmsi` required. `to` defaults to now (UTC), `from` to 3 days before the effective `to`, so no dates = last 3 days. `from` without `to` ends at now unless `from` + 3 days is earlier (`rangeCapped`). 3-day cap unchanged; `from` > `to` still 400. Meta adds `fromOmitted` / `requestedDateFrom`. |
+| 2026-08-17 | `/mantis/vessel-track` now returns only plottable fixes: `VALID_POSITION_SQL` filters AIS "not available" positions (lat 91 / lon 181, plus NaN / ±Inf) in ClickHouse for Class A and Class B. ~1.3% of `ais_position`. `(0,0)` kept; `sog` 102.3 / `cog` 360 / `trueHeading` 511 still passed through. Detectors unchanged. |
 | 2026-08-14 | API vessel size: `toBow` / `toStern` / `toPort` / `toStarboard` plus `lengthM` / `beamM` on STS, dark, and illegal-anchoring. Class A `ais_static` first, Class B `ais_staticb` fallback. Detectors unchanged. |
 | 2026-08-13 | API OFAC labels: `restapi/sanctions.py` on STS / dark / illegal-anchoring. IMO = confirmed, MMSI-only = possible, no name match, unmatched kept, listed sorted first. `suspicion_score` / dark `confidence` unchanged. |
 | 2026-08-13 | Bunker / barge register **skipped** until a source exists. |

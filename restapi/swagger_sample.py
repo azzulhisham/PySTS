@@ -2,6 +2,8 @@
 Cap large JSON lists when Try it out is run from Swagger UI.
 
 Real clients (curl, frontend, MCP) always receive the full payload.
+`GET /mantis/vessel-track` streams NDJSON to those clients; Swagger still
+gets a 20-point JSON sample.
 """
 
 from __future__ import annotations

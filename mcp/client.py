@@ -133,6 +133,13 @@ class MantisClient:
             params={"includeCoverageExit": str(include_coverage_exit).lower()},
         )
 
+    def get_identity_conflicts(self, max_distance_m: float | None = None) -> dict[str, Any]:
+        """GET /mantis/identity-conflict"""
+        params: dict[str, Any] = {}
+        if max_distance_m is not None:
+            params["maxDistanceM"] = max_distance_m
+        return self._get("/mantis/identity-conflict", params=params or None)
+
     def get_sanctions_list(
         self,
         imo: str | None = None,

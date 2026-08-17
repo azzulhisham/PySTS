@@ -28,6 +28,7 @@ from sqlalchemy.engine import Engine
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from api_timestamps import format_last_seen_at
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -305,6 +306,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "navStatusDesc": v.get("navstatusdesc") if pd.notna(v.get("navstatusdesc")) else None,
             "tsStop": _fmt_ts(v.get("tsstop")),
             "tsCurrent": _fmt_ts(v.get("tscurrent")),
+            "lastSeenAt": format_last_seen_at(v.get("tscurrent")),
             "durationSeconds": duration["durationSeconds"],
             "durationHours": duration["durationHours"],
             "durationLabel": duration["durationLabel"],

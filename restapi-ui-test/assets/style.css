@@ -1,0 +1,145 @@
+/* Dark maritime test player — aligned with PyMANTIS / PyATON-Summary */
+
+:root {
+  --bg-app: #070d18;
+  --bg-card: #111b2e;
+  --bg-inset: #0c1526;
+  --border: #1e2d45;
+  --text: #e8eef7;
+  --muted: #94a3b8;
+  --accent-blue: #3b82f6;
+  --accent-green: #4ade80;
+  --accent-cyan: #22d3ee;
+  --radius: 12px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: "Inter", system-ui, -apple-system, sans-serif;
+  background: var(--bg-app);
+  color: var(--text);
+}
+
+.app {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  padding: 1rem 1.25rem 1.25rem;
+  gap: 0.85rem;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.header h1 {
+  margin: 0;
+  font-size: 1.15rem;
+  letter-spacing: 0.04em;
+}
+
+.header .sub {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.status {
+  color: var(--accent-cyan);
+  font-size: 0.85rem;
+}
+
+.map-wrap {
+  height: 620px;
+  min-height: 620px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+
+.map-wrap .dash-graph,
+.map-wrap .js-plotly-plot,
+.map-wrap .plot-container,
+.map-wrap .svg-container,
+.map-wrap .maplibregl-map {
+  width: 100% !important;
+  height: 620px !important;
+}
+
+.player {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.9rem 1rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+}
+
+.player-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex-wrap: wrap;
+}
+
+button {
+  background: #152238;
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.45rem 0.85rem;
+  cursor: pointer;
+  font-size: 0.9rem;
+}
+
+button:hover { border-color: var(--accent-blue); }
+
+button.primary {
+  background: #1d4ed8;
+  border-color: #1d4ed8;
+}
+
+.clock {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.slider .rc-slider-track { background-color: var(--accent-blue); }
+.slider .rc-slider-handle { border-color: var(--accent-blue); }
+.slider .rc-slider-rail { background-color: #1e2d45; }
+
+label { color: var(--muted); font-size: 0.85rem; }
+
+.Select-control, .dash-dropdown .Select-control {
+  background: var(--bg-inset) !important;
+  border-color: var(--border) !important;
+}
+
+.Select-value-label,
+.Select-placeholder,
+.Select--single > .Select-control .Select-value .Select-value-label {
+  color: var(--text) !important;
+}
+
+.Select-menu-outer, .Select-option {
+  background: var(--bg-inset) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+}
+
+.Select-option.is-focused, .Select-option.is-selected {
+  background: #152238 !important;
+}
+
+.Select-arrow { border-top-color: var(--muted) !important; }
+
+.dash-dropdown input { color: var(--text) !important; }
