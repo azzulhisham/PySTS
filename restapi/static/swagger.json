@@ -912,6 +912,216 @@
           }
         }
       },
+      "SpoofingAnomaly": {
+        "type": "object",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipName": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipType": {
+            "type": "integer",
+            "nullable": true
+          },
+          "shipTypeDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "type": "string",
+            "enum": ["teleport", "high_speed"],
+            "description": "teleport = long impossible jump; high_speed = implied speed > 80 kn on a shorter gap."
+          },
+          "phase": {
+            "type": "integer",
+            "example": 1
+          },
+          "detector": {
+            "type": "string",
+            "example": "teleport"
+          },
+          "eventDay": {
+            "type": "string",
+            "format": "date",
+            "description": "UTC calendar day of the anomaly fix (dedupe key)."
+          },
+          "detectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "description": "AIS timestamp of the anomaly fix — not API wall clock."
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Same as detectedAt; anchor for GET /mantis/vessel-track."
+          },
+          "prevTs": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "prevLatitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "prevLongitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "distanceM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "deltaSeconds": {
+            "type": "integer",
+            "nullable": true
+          },
+          "impliedSpeedKn": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean"
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": ["confirmed", "possible", "none"]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": ["SDN", "CONS"]
+          }
+        }
+      },
+      "SpoofingResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": {
+            "type": "string",
+            "example": "v1.0-teleport-cargo-tanker-daily-dedupe-ofac"
+          },
+          "shipTypeFilter": {
+            "type": "string",
+            "example": "70-89 (cargo/tanker/container Class-A large vessels)"
+          },
+          "dedupeRule": {
+            "type": "string"
+          },
+          "phase": {
+            "type": "integer",
+            "example": 1
+          },
+          "detector": {
+            "type": "string",
+            "example": "teleport"
+          },
+          "dateFrom": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "dateTo": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "fromOmitted": {
+            "type": "boolean"
+          },
+          "toOmitted": {
+            "type": "boolean"
+          },
+          "rangeCapped": {
+            "type": "boolean"
+          },
+          "maxRangeDays": {
+            "type": "integer",
+            "example": 3
+          },
+          "thresholds": {
+            "type": "object"
+          },
+          "rawHitCount": {
+            "type": "integer",
+            "description": "Consecutive fix pairs flagged before ship-type filter."
+          },
+          "filteredHitCount": {
+            "type": "integer",
+            "description": "Pairs after cargo/tanker filter, before dedupe."
+          },
+          "anomalyCount": {
+            "type": "integer",
+            "description": "Rows after dedupe (one per MMSI per UTC day)."
+          },
+          "byReason": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            }
+          },
+          "sanctionsMatchCount": {
+            "type": "integer"
+          },
+          "anomalies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpoofingAnomaly"
+            }
+          }
+        }
+      },
       "OfacVessel": {
         "type": "object",
         "properties": {
@@ -1555,6 +1765,64 @@
           },
           "401": {
             "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/spoofing": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Get position anomalies (spoofing) — Phase 1 teleport.",
+        "description": "Also referred to as **GET /mantis/position-anomaly** in product docs — that path is **not** served; use **`/mantis/spoofing`**.\n\nPhase 1 scans ClickHouse `ais_position` for impossible movement between consecutive AIS fixes on the same MMSI (teleport / high implied speed). **Class-A cargo/tanker only** (`shipType` 70–89 from latest `ais_static`). Results are **deduped to one row per MMSI per UTC day** (worst implied speed that day). `detectedAt` / `lastSeenAt` are the AIS time of the anomaly fix.\n\nOptional `from` / `to` (ISO 8601 UTC) — same **3-day max** window as GET /mantis/vessel-track. OFAC labels attached; listed vessels sorted first.\n\n**This Swagger page:** `anomalies` is capped at 20 samples.",
+        "operationId": "getSpoofing",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window start (UTC). Default: 3 days before effective `to`."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "Window end (UTC). Default: now."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Position anomalies (teleport detector, Phase 1).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoofingResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid date range (e.g. from after to)."
+          },
+          "401": {
+            "description": "Unauthorized — missing or invalid Bearer token."
           },
           "500": {
             "description": "Internal server error."

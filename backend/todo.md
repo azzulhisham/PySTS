@@ -61,6 +61,23 @@ Behaviour first. Do these without waiting for perfect lists.
 
 ---
 
+## Position anomalies — `GET /mantis/spoofing` (Phase 1 done)
+
+Swagger alias **`/mantis/position-anomaly`** (docs only). Full spec: [`mantis-detection.md` §4](mantis-detection.md#4-position-anomalies-spoofing--api-phase-1).
+
+- [x] **Phase 1 (2026-08-18).** Live ClickHouse teleport scan in `restapi/spoofing.py`. Cargo/tanker 70–89; dedupe one row per MMSI per UTC day; OFAC labels; optional `from`/`to` (3-day cap). Probe ~63 deduped anomalies / 3 days.
+- [ ] **Phase 2 — persist.** Nightly (or hourly) backend job → Postgres table (e.g. `ais_positionanomaly`); API reads table instead of full CH scan (~30 s per request today).
+- [ ] **Phase 2 — MCP.** `get_spoofing` tool in `mcp/client.py` + `mcp/server.py`.
+- [ ] **Phase 3 — more detectors** on the same route: SOG vs implied-speed mismatch, circle spoof, nav-status vs movement inconsistency.
+- [ ] **Phase 3 — cross-signals.** Rank boost when teleport overlaps open STS cluster or listed identity.
+- [ ] **Phase 4 — ops tuning.** Labelled export loop; threshold review; optional polygon filter; pagination / caching.
+- [ ] Brief frontend on `/mantis/spoofing` JSON (`phase`, `detector`, `reason`, `lastSeenAt` for vessel-track anchor).
+- [ ] **Do not rename** the route to `/mantis/position-anomaly` (frontend binds `/mantis/spoofing`).
+
+Identity / re-flag stays on **`/mantis/identity-conflict`** — not part of spoofing phases.
+
+---
+
 ## Then — watch-floor quality
 
 - [ ] Label loop: export candidates, mark dark vs coverage-exit vs gap vs benign STS vs true tasking; retune knobs in `mantis-detection.md`.

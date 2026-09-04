@@ -50,6 +50,7 @@ Frontend                separate repo / separate developer
 - `GET /mantis/sts-activities` — STS proximity pairs inside parent polygons (Excl holes excluded; OFAC labels on each vessel)
 - `GET /mantis/illegal-anchoring` — heuristic illegal-anchoring candidates (v3; OFAC labels)
 - `GET /mantis/identity-conflict` — re-flag / dual-MMSI identity groups (AIS timestamp; OFAC labels)
+- `GET /mantis/spoofing` — position anomalies Phase 1: teleport (cargo/tanker; dedupe per MMSI/day). Swagger alias: `/mantis/position-anomaly`
 - `GET /mantis/sanctions` — OFAC vessel list (search by `imo` or `mmsi`; full list otherwise)
 - `GET /mantis/vessel-timeline` — derived activity/events for one vessel
 - `GET /mantis/vessel-track` — AIS position track for map replay (NDJSON stream; max 3 days)
@@ -219,7 +220,7 @@ Try it out from `/swagger` is detected via the `Referer` header. If a list in th
 | `returnedCount` / `returnedCounts` | Rows actually in the payload |
 | `message` | Explains that curl / frontend / MCP get the full result |
 
-Applies to: polygons (Swagger gets a wrapped object), STS `pairs` / `pairedVessels`, illegal-anchoring `vessels`, dark `vessels`, identity-conflict `groups` / `identities`, sanctions `vessels`, timeline `events`, track `track`.
+Applies to: polygons (Swagger gets a wrapped object), STS `pairs` / `pairedVessels`, illegal-anchoring `vessels`, dark `vessels`, identity-conflict `groups` / `identities`, spoofing `anomalies`, sanctions `vessels`, timeline `events`, track `track`.
 
 **Not sampled:** `POST /authentication/token` and `GET /` (health).
 
@@ -296,6 +297,7 @@ Singapore East Anchorage, Singapore Western OPL and Singapore South Anchorage ar
 | Illegal anchoring | `illegal_anchoring.py` (`rule_version` `v3.1-…-ofac-label`) | Stopped Class-A 70–89; keep if in Restricted Limit **or** a parent; **drop if in any Excl** | `watchPolygonName`; `inPortLimit` / `portLimitName` / `portLimitPolygonCount` are **compat keys for Excl holes** |
 | Dark vessels | `dark_vessels.py` (`rule_version` `v1.2-slowmove-dark-polygon-ofac-label`) | **Never drop** because of a polygon | `polygonName` (Excl preferred if in a hole); `inExclPolygon` |
 | Identity conflict | `identity_conflict.py` (`rule_version` `v1.0-identity-conflict-ais-ts-ofac`) | Same-hull groups of 2+ MMSIs; optional `maxDistanceM` | none (not a location detector) |
+| Position anomalies (spoofing) | `spoofing.py` (`rule_version` `v1.0-teleport-cargo-tanker-daily-dedupe-ofac`) | Phase 1 teleport; cargo/tanker 70–89; dedupe 1/MMSI/UTC day; live ClickHouse | none. Future phases: [`backend/todo.md`](../backend/todo.md#position-anomalies--get-mantisspoofing-phase-1-done) |
 
 OFAC identity (STS / dark / illegal-anchoring / identity-conflict): `imo`, `sanctionsMatch`, `matchConfidence` (`confirmed` \| `possible` \| `none`), `sanctionsList`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
@@ -444,6 +446,7 @@ curl "http://localhost:8080/mantis/sanctions?imo=9187631" \
 | `GET` | `/mantis/illegal-anchoring` | Bearer | Illegal-anchoring candidates (v3); OFAC labels |
 | `GET` | `/mantis/darkvessels` | Bearer | Dark / AIS-off candidates (polygon + OFAC label only) |
 | `GET` | `/mantis/identity-conflict` | Bearer | Re-flag / dual-MMSI identity groups (AIS time; OFAC labels) |
+| `GET` | `/mantis/spoofing` | Bearer | Position anomalies Phase 1 (teleport; cargo/tanker 70–89; dedupe per MMSI/day; optional `from`/`to`, max 3 days) |
 | `GET` | `/mantis/sanctions` | Bearer | OFAC vessel list (`imo` / `mmsi` search) |
 | `GET` | `/mantis/vessel-timeline` | Bearer | Derived events for one MMSI (`mmsi`, `from`, `to`) |
 | `GET` | `/mantis/vessel-track` | Bearer | AIS track replay (`mmsi` required; `from` / `to` optional, default last 3 days, max 3 days; NDJSON stream) |

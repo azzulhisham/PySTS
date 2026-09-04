@@ -15,6 +15,7 @@ from sts_detection import (
 from illegal_anchoring import detect_illegal_anchoring
 from dark_vessels import detect_dark_vessels
 from identity_conflict import detect_identity_conflicts
+from spoofing import detect_spoofing
 from timelineplayback import (
     get_vessel_activity_timeline,
     get_vessel_track_replay,
@@ -272,6 +273,52 @@ def get_identity_conflict():
         return jsonify(json_for_client(payload, ["groups", "identities"])), 200
     except Exception as e:
         logging.error(f"[get_identity_conflict] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/spoofing", methods=["GET"])
+@cross_origin()
+def get_spoofing():
+    """
+    Position anomalies (Phase 1: teleport / impossible AIS jumps).
+
+    Product docs may refer to this as GET /mantis/position-anomaly; the served
+    path is /mantis/spoofing. Class-A cargo/tanker only; one row per MMSI per
+    UTC day (worst implied speed). Optional from/to — same 3-day cap as vessel-track.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        result = detect_spoofing(
+            date_from=request.args.get("from"),
+            date_to=request.args.get("to"),
+        )
+        payload = {
+            "ruleVersion": result["rule_version"],
+            "shipTypeFilter": result["ship_type_filter"],
+            "dedupeRule": result["dedupe_rule"],
+            "phase": result["phase"],
+            "detector": result["detector"],
+            "dateFrom": result["date_from"],
+            "dateTo": result["date_to"],
+            "fromOmitted": result["range_meta"]["fromOmitted"],
+            "toOmitted": result["range_meta"]["toOmitted"],
+            "rangeCapped": result["range_meta"]["rangeCapped"],
+            "maxRangeDays": result["range_meta"]["maxRangeDays"],
+            "thresholds": result["thresholds"],
+            "rawHitCount": result["raw_hit_count"],
+            "filteredHitCount": result["filtered_hit_count"],
+            "anomalyCount": result["anomaly_count"],
+            "byReason": result["by_reason"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
+            "anomalies": result["anomalies_payload"],
+        }
+        return jsonify(json_for_client(payload, ["anomalies"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_spoofing] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 

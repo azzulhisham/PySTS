@@ -1,18 +1,20 @@
 # MANTIS detection — maintenance spec
 
-Living document for **detection factors, formulas, and thresholds** across STS, dark vessels, and illegal anchoring.  
+Living document for **detection factors, formulas, and thresholds** across STS, dark vessels, illegal anchoring, and **position anomalies (spoofing)**.  
 Formerly `vesselslowspeeddetection.md`. The pipeline script `vesselslowspeeddetection.py` is unchanged.  
 Update this file whenever a constant or formula in the three pipeline scripts (or the matching `restapi` filters) changes. Accuracy work is expected to be continuous.
 
 Work still open vs done: [`todo.md`](todo.md). Keep both files in step — if you finish an ingest, join key, or label, mark `todo.md` **and** record the current behaviour here.
 
-**Last verified against code:** 2026-08-13
+**Last verified against code:** 2026-08-18
 
 | MANTIS job | Pipeline | Writes | API |
 | --- | --- | --- | --- |
 | STS | `backend/vesselproximitydetection.py` | `ais_vesselproximityobservation` / `member` / `edge` | `restapi/sts_detection.py` |
 | Dark vessels | `backend/vesselslowspeeddetection.py` | `ais_vesselslowmoveactivities` | `restapi/dark_vessels.py` |
 | Illegal anchoring | `backend/vesselstrajectorydetection.py` | `ais_vesselmovementactivities` | `restapi/illegal_anchoring.py` |
+| Position anomalies (Phase 1) | *(none yet — live ClickHouse scan)* | — | `restapi/spoofing.py` |
+| Identity conflict | *(none — live Postgres scan)* | — | `restapi/identity_conflict.py` |
 
 Identity ingest (not a detector): `backend/ofac_sdn_ingest.py` (SDN) and `backend/ofac_cons_ingest.py` (non-SDN). See [Identity enrichment](#identity-enrichment-not-a-fourth-detector).
 
@@ -127,7 +129,8 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Dark: Restricted Limit | **not** used for `polygonName` | `dark_vessels.py` |
 | Identity conflict | same-hull groups of 2+ MMSIs; `detectedAt` = latest AIS `ts` | `identity_conflict.py` |
 | Identity match | IMO + (name\|callsign\|dims) **or** name + (callsign\|dims) | same file |
-| Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring / identity-conflict; `onBunkerRegister` later |
+| Spoofing Phase 1 | teleport implied speed; dedupe 1/MMSI/UTC day; `from`/`to` max 3 d | `spoofing.py` |
+| Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring / identity-conflict / spoofing; `onBunkerRegister` later |
 
 ### Identity ingest (`ofac_sdn_ingest.py` / `ofac_cons_ingest.py` — not a detector loop)
 
@@ -359,6 +362,75 @@ tanker = count of members with 80 <= shipType < 90
 
 ---
 
+## 4. Position anomalies (spoofing) — API Phase 1
+
+**File:** `restapi/spoofing.py`  
+**API:** `GET /mantis/spoofing`  
+**Product alias (docs only):** `GET /mantis/position-anomaly` — **not served**; keep `/mantis/spoofing` stable for frontend / MCP across phases.
+
+There is **no backend pipeline job yet**. Each request scans ClickHouse `pnav.ais_position` live (same host as `restapi/timelineplayback.py`).
+
+### Scope vs other endpoints
+
+| Concern | Endpoint | Notes |
+| --- | --- | --- |
+| Impossible movement between fixes | **`/mantis/spoofing`** Phase 1 `teleport` | position layer |
+| Same hull, two MMSIs (re-flag) | **`/mantis/identity-conflict`** | identity layer — do not merge into spoofing |
+| AIS off after slow-down | **`/mantis/darkvessels`** | silence, not position jump |
+
+Tug / patrol / fast-manoeuvring types (e.g. MMSIs that showed thousands of raw teleport pairs) are **not blocklisted**. They drop out naturally when the API restricts to **Class-A cargo/tanker** (`shipType` 70–89 from latest `ais_static`).
+
+### Phase 1 — implemented (2026-08-18)
+
+**Rule version:** `v1.0-teleport-cargo-tanker-daily-dedupe-ofac`
+
+1. Load latest `ais_static` per MMSI with `70 <= shipType < 90`.
+2. ClickHouse: consecutive valid fixes on the same MMSI (`VALID_POSITION_SQL` — same as `/mantis/vessel-track`).
+3. Flag a **fix pair** when all of:
+   - `deltaSeconds` between **10** and **900** (avoid divide-by-tiny-Δt noise)
+   - `distanceM >= 1000`
+   - **(`distanceM >= 20_000` AND implied speed > 50 kn)** OR **implied speed > 80 kn**
+   - Implied speed (kn) = `geoDistance(prev, curr) / deltaSeconds × 1.94384`
+4. Inner join flagged pairs to cargo/tanker static only.
+5. **Dedupe:** one row per `(mmsi, UTC calendar day of anomaly fix)` — keep the hit with **highest** `impliedSpeedKn`.
+6. Attach OFAC labels (`sanctions.py`); listed vessels sorted first.
+7. `detectedAt` / `lastSeenAt` = AIS time of the **anomaly fix** (second point) — not API wall clock.
+
+Optional query params `from` / `to` (ISO 8601 UTC); same **3-day max** window as `GET /mantis/vessel-track` (`resolve_track_range`).
+
+Response fields include `reason` (`teleport` | `high_speed`), `phase` (1), `detector` (`teleport`), `rawHitCount`, `filteredHitCount`, `anomalyCount`.
+
+### Live probe (2026-09-03, last 3 days)
+
+| Stage | Count |
+| --- | ---: |
+| Raw teleport pairs (all vessel types) | ~4,200 |
+| After cargo/tanker filter | ~360 |
+| After dedupe (1 / MMSI / UTC day) | **~63** |
+
+Typical real hits: longitude sign errors (e.g. Singapore ↔ Atlantic on the same latitude band). Re-run: `python3 restapi/spoofing.py` from `PySTS/restapi` (needs network + DB deps).
+
+### Performance note
+
+Full 3-day window scan over ~33M valid fixes takes **~20–40 s** on current ClickHouse. Acceptable for occasional API use; **not** ideal for high-frequency polling without caching or a pre-computed table.
+
+### Future phases (not implemented — see [`todo.md`](todo.md))
+
+Keep the **same URL** (`/mantis/spoofing`). Extend response (`phase`, `detector`, `reason`) only.
+
+| Phase | Goal | Likely work |
+| --- | --- | --- |
+| **2** | Pre-compute + persist | Background job (e.g. nightly) writing `ais_positionanomaly` or similar in Postgres; API reads table instead of full CH scan every call |
+| **2** | MCP | `get_spoofing` in `mcp/client.py` + `mcp/server.py` |
+| **3** | More detectors | Same endpoint: circle/spoof patterns, SOG vs implied speed mismatch, “anchored” nav status with large jumps |
+| **3** | Cross-signals | Boost rank when teleport coincides with open STS cluster or OFAC-listed identity |
+| **4** | Ops tuning | Threshold review from labelled exports; optional polygon filter; pagination |
+| **—** | Out of scope for spoofing | Duplicate-MMSI / re-flag → stays on **`/mantis/identity-conflict`** |
+
+**Not planned:** renaming the route to `/mantis/position-anomaly` (frontend already binds `/mantis/spoofing`).
+
+---
+
 ## Identity enrichment (not a fourth detector)
 
 AIS behaviour stays first. Sanctions lists are **labels on existing STS / dark / anchoring candidates**. They do not create a new MANTIS job and they are **not** a legal finding. Bunker / barge register is **skipped for now** (no source yet).
@@ -509,6 +581,7 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-08-18 | Phase 1 `GET /mantis/spoofing` (Swagger alias `/mantis/position-anomaly`): ClickHouse teleport scan on consecutive AIS fixes; cargo/tanker 70–89; dedupe one row per MMSI per UTC day; OFAC labels. |
 | 2026-08-18 | New API `GET /mantis/identity-conflict`. Live scan of latest `ais_static` + `ais_position` for cargo/tanker MMSIs that are one hull (same corroboration rule as STS same-hull suppression). `detectedAt` is the latest AIS timestamp in the group, not wall clock. OFAC labels on each identity and rolled up on the group. Optional `maxDistanceM`. |
 | 2026-08-18 | STS same-hull suppression (`DETECTION_VERSION` **2.1**). Pairs that are one re-flagged vessel are dropped before clustering, and open clusters that collapse to one hull close as `same_vessel`. `load_candidate_vessels` now joins the **latest** `ais_static` row and pulls `imo` / `callsign` / dimensions. Caught 9 of 93 live pairs, incl. `352006140_525108038` (PIS MENTAWAI, IMO 1050973 on both MMSIs) which had been open 23.6 days on fixes from 28 June. Added `cleanup_stale_detections.py` for activities and observations that can never close themselves; distance, grace, and score formula unchanged. |
 | 2026-08-18 | Investigation note: `detected_at` / `first_detected_at` / `last_detected_at` on `ais_vesselproximityobservation` are **job wall-clock** (`datetime.now(timezone.utc)`), not AIS time, and `duration_seconds` is wall-clock too. No AIS timestamp is stored on the observation — only `ais_vesselproximitymember.tscurrent`. A stale cluster therefore inflates its own duration and suspicion score. Not changed. |
