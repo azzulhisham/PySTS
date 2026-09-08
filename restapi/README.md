@@ -591,6 +591,8 @@ These endpoints are independent of the parent/Excl keep/drop rules above.
 
 Zone-visit rows (`ais_vesselinzone`, `ais_vesselinrestrictzone`) are **not** written by the three MANTIS-critical pipeline jobs. `backend/vesselzone.py` is out of MANTIS scope at this time.
 
+`GET /mantis/vessel-timeline` includes **`ais_vesselinzone` zones 21–26 only** (sector101–106 in the zone ingest). Title is `sector N visit` (`N = zone − 20`, lowercase); `details.zone` keeps the raw id (21–26). Other zone ids are omitted. Restricted-zone visits are unchanged.
+
 | Endpoint | Query | Source |
 | --- | --- | --- |
 | `GET /mantis/vessel-timeline` | `mmsi`, `from`, `to` (required) | PostgreSQL: zone visits, restricted zones, stop/slow-move, static identity changes |

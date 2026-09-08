@@ -61,7 +61,7 @@ zone_events AS (
         'ZONE_VISIT' AS event_type,
         'ais_vesselinzone' AS event_source,
         vz.mmsi,
-        format('Zone %s visit', vz.zone) AS title,
+        format('sector %s visit', vz.zone - 20) AS title,
         vz.latitude,
         vz.longitude,
         jsonb_build_object(
@@ -77,6 +77,7 @@ zone_events AS (
     FROM public.ais_vesselinzone vz
     CROSS JOIN params p
     WHERE vz.mmsi = p.mmsi
+      AND vz.zone BETWEEN 21 AND 26
       AND vz."tsDetected" <= p.date_to
       AND COALESCE(vz."tsOut", vz."tsCurrent", NOW()) >= p.date_from
 ),

@@ -1262,7 +1262,7 @@
           },
           "title": {
             "type": "string",
-            "example": "Zone 10 visit"
+            "example": "sector 5 visit"
           },
           "latitude": {
             "type": "number",
@@ -1836,7 +1836,7 @@
           "mantis"
         ],
         "summary": "Get derived activity timeline for one vessel.",
-        "description": "Returns discrete activity/events for a vessel between two datetimes from PostgreSQL derived tables: zone visits (`ais_vesselinzone`), restricted zone visits (`ais_vesselinrestrictzone`), stop/low-speed activities (`ais_vesselmovementactivities`), slow-move activities (`ais_vesselslowmoveactivities`), and static identity changes (`ais_static_evt`). Does not include raw AIS position points \u2014 use **GET /mantis/vessel-track** for full track replay.\n\n**This Swagger page:** `events` is capped at 20 samples.",
+        "description": "Returns discrete activity/events for a vessel between two datetimes from PostgreSQL derived tables: zone visits (`ais_vesselinzone` **zones 21\u201326 only** \u2014 titled `sector N visit` where N = zone \u2212 20; `details.zone` keeps the raw id), restricted zone visits (`ais_vesselinrestrictzone`), stop/low-speed activities (`ais_vesselmovementactivities`), slow-move activities (`ais_vesselslowmoveactivities`), and static identity changes (`ais_static_evt`). Does not include raw AIS position points \u2014 use **GET /mantis/vessel-track** for full track replay.\n\n**This Swagger page:** `events` is capped at 20 samples.",
         "operationId": "getVesselTimeline",
         "security": [
           {
