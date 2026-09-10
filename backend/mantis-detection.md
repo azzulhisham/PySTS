@@ -179,6 +179,16 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 5. High-speed path: if now moving (`sog > 0.5`) and distance from stored position `>= 30` m, may set `tsout` (after `rowcount2` hysteresis).
 6. Sleep 20 s.
 
+### Performance (2026-09-09)
+
+Same detection rules; cycle cost reduced only:
+
+- **TXN1:** in-memory open-activity map (one load per cycle) instead of a SELECT per low-speed fix; dict updated on insert for same-cycle MMSI.
+- **TXN2:** only open rows whose MMSI has `sog > 0.5` in the current AIS batch; no per-row `duckdb.register` (first high-speed fix per MMSI via groupby).
+- **Logging:** per-row INFO → DEBUG; cycle summary at INFO (`seen/updated/inserted`, `open_rows/skipped_no_high_speed_fix/updates`).
+
+**Not changed:** trajectory still applies nav/`tscurrent` updates even when `ts <= tscurrent` (only `rowcount` increment is gated on newer ts). No stale bulk UPDATE (trajectory never had one).
+
 ### Interpret fields
 
 | Fields | Meaning |
@@ -210,6 +220,15 @@ Keep Class-A 70–89 whose last position is in Restricted Limit **or** a parent 
 5. Stale mark: open row, `tsstop IS NULL`, `tscurrent` older than **30 minutes**, `rowcount >= 1` → `tsstop = tscurrent` (suspected dark).
 6. High-speed exit: `sog > 3` and distance **`>= 100` m** may set `tsout`.
 7. Sleep 20 s.
+
+### Performance (2026-08-18)
+
+Same detection rules; cycle cost reduced only:
+
+- **TXN1:** in-memory open-activity map (one load per cycle) instead of a SELECT per low-speed fix; skip fixes with `ts <= tscurrent`; dict updated on insert for same-cycle MMSI.
+- **TXN2 (stale):** bulk `UPDATE` marking suspected dark — unchanged.
+- **TXN3:** only open rows whose MMSI has `sog > 3` in the current AIS batch; no per-row `duckdb.register` (first high-speed fix per MMSI via groupby).
+- **Logging:** per-row INFO → DEBUG; cycle summary at INFO (`seen/skipped_not_newer/updated/inserted`, `open_rows/skipped_no_high_speed_fix/updates`).
 
 ### Interpret `tsstop` (two meanings)
 
@@ -581,6 +600,8 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-09-09 | `vesselstrajectorydetection.py` performance (same detection rules): TXN1 in-memory open-activity map; TXN2 only open rows whose MMSI has `sog > 0.5` in the current AIS batch (no per-row `duckdb.register`). Trajectory update semantics unchanged (no skip on `ts <= tscurrent`). Cycle summary logs added. |
+| 2026-08-18 | `vesselslowspeeddetection.py` performance (same detection rules): TXN1 uses in-memory open-activity map + skips fixes with `ts <= tscurrent`; TXN2 only processes open rows whose MMSI has `sog > 3` in the current AIS batch (no per-row `duckdb.register`). Cycle logs summarize seen/skipped/updated counts. |
 | 2026-08-18 | Phase 1 `GET /mantis/spoofing` (Swagger alias `/mantis/position-anomaly`): ClickHouse teleport scan on consecutive AIS fixes; cargo/tanker 70–89; dedupe one row per MMSI per UTC day; OFAC labels. |
 | 2026-08-18 | New API `GET /mantis/identity-conflict`. Live scan of latest `ais_static` + `ais_position` for cargo/tanker MMSIs that are one hull (same corroboration rule as STS same-hull suppression). `detectedAt` is the latest AIS timestamp in the group, not wall clock. OFAC labels on each identity and rolled up on the group. Optional `maxDistanceM`. |
 | 2026-08-18 | STS same-hull suppression (`DETECTION_VERSION` **2.1**). Pairs that are one re-flagged vessel are dropped before clustering, and open clusters that collapse to one hull close as `same_vessel`. `load_candidate_vessels` now joins the **latest** `ais_static` row and pulls `imo` / `callsign` / dimensions. Caught 9 of 93 live pairs, incl. `352006140_525108038` (PIS MENTAWAI, IMO 1050973 on both MMSIs) which had been open 23.6 days on fixes from 28 June. Added `cleanup_stale_detections.py` for activities and observations that can never close themselves; distance, grace, and score formula unchanged. |

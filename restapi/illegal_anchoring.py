@@ -41,6 +41,8 @@ DATABASE_URL = (
     f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 )
 
+# Latest activity per MMSI (same as row_number()…=1), then stopped/stale filters.
+# DISTINCT ON avoids windowing the entire movement-history table on every HTTP call.
 STOPPED_VESSEL_SQL = f"""
 SELECT
     a.id AS activity_id,
@@ -61,9 +63,9 @@ SELECT
     s."imo" AS imo,
 {DIM_SELECT}
 FROM (
-    SELECT *,
-           row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
+    SELECT DISTINCT ON (mmsi) *
     FROM public.ais_vesselmovementactivities
+    ORDER BY mmsi, ts DESC
 ) a
 INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
 {class_b_join("a.mmsi")}
@@ -72,7 +74,6 @@ WHERE a.tsout IS NULL
         (a.tsstop IS NOT NULL AND a.tsstop <= now() - interval '1 HOURS')
         OR a.tscurrent <= now() - interval '30 MINUTES'
       )
-  AND a.rowcount_mmsi = 1
   AND a.curlongitude IS NOT NULL
   AND a.curlatitude IS NOT NULL
   -- Class-A large commercial vessels: cargo (70-79), tanker (80-89)
@@ -83,9 +84,12 @@ WHERE a.tsout IS NULL
 def get_pg_engine() -> Engine:
     return create_engine(
         DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=2,
+        max_overflow=0,
         pool_timeout=30,
+        pool_pre_ping=True,
+        # Cap on-demand API reads so a slow plan cannot pin shared RDS for hours.
+        connect_args={"options": "-c statement_timeout=60000"},
     )
 
 

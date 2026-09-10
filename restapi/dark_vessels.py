@@ -42,8 +42,8 @@ DATABASE_URL = (
     f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 )
 
-# Thresholds are inlined (safe module constants) so pandas/sqlalchemy
-# do not need bind params inside interval expressions.
+# Latest activity per MMSI (same as row_number()…=1), then dark filters.
+# DISTINCT ON avoids windowing the entire history table on every HTTP call.
 DARK_VESSEL_SQL = f"""
 SELECT
     a.id AS activity_id,
@@ -91,14 +91,13 @@ SELECT
         ELSE 'medium'
     END AS confidence
 FROM (
-    SELECT *,
-           row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
+    SELECT DISTINCT ON (mmsi) *
     FROM public.ais_vesselslowmoveactivities
+    ORDER BY mmsi, ts DESC
 ) a
 INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
 {class_b_join("a.mmsi")}
-WHERE a.rowcount_mmsi = 1
-  AND a.tsout IS NULL
+WHERE a.tsout IS NULL
   AND a.tsstop IS NOT NULL
   AND a.rowcount < {CONFIRMED_STOP_ROWCOUNT}
   AND a.tscurrent IS NOT NULL
@@ -111,9 +110,12 @@ ORDER BY a.tscurrent ASC
 def get_pg_engine() -> Engine:
     return create_engine(
         DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
+        pool_size=2,
+        max_overflow=0,
         pool_timeout=30,
+        pool_pre_ping=True,
+        # Cap on-demand API reads so a slow plan cannot pin shared RDS for hours.
+        connect_args={"options": "-c statement_timeout=60000"},
     )
 
 

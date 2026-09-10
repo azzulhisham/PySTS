@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import and_, or_, desc, text, Column, BigInteger
+from sqlalchemy import text, Column, BigInteger
 from sqlalchemy.engine import Engine
 
 import gc
@@ -121,6 +121,40 @@ def get_cur_activities_data(engine: Engine) -> pd.DataFrame:
     return df
 
 
+def _sphere_distance_m(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
+    df_dist = duckdb.sql(f"""
+        SELECT ST_Distance_Sphere(
+            ST_Point({lon1}, {lat1}),
+            ST_Point({lon2}, {lat2})
+        ) AS distance_m
+    """).fetchdf()
+    return float(df_dist["distance_m"][0])
+
+
+def _load_open_activities(session: Session) -> dict[int, Ais_VesselMovementActivities]:
+    """One open row per MMSI (earliest ts first if duplicates exist in data)."""
+    open_by_mmsi: dict[int, Ais_VesselMovementActivities] = {}
+    rows = session.execute(
+        select(Ais_VesselMovementActivities)
+        .where(Ais_VesselMovementActivities.tsout == None)
+        .order_by(Ais_VesselMovementActivities.ts)
+    ).scalars()
+    for activity in rows:
+        if activity.mmsi not in open_by_mmsi:
+            open_by_mmsi[activity.mmsi] = activity
+    return open_by_mmsi
+
+
+def _first_high_speed_row_by_mmsi(high_speed_df: pd.DataFrame) -> dict[int, pd.Series]:
+    """First high-speed fix per MMSI (dataframe already ordered by ts)."""
+    if high_speed_df.empty:
+        return {}
+    grouped: dict[int, pd.Series] = {}
+    for mmsi, group in high_speed_df.groupby("mmsi", sort=False):
+        grouped[int(mmsi)] = group.iloc[0]
+    return grouped
+
+
 def upsert_vessel_activities(engine: Engine):
     df = get_ais_position_data(engine)
     df["navStatusDesc"] = df["navStatusDesc"].astype("object")
@@ -143,35 +177,27 @@ def upsert_vessel_activities(engine: Engine):
         FROM ais_position
         WHERE sog > 0.5
         ORDER BY "ts"
-    """).to_df()    
+    """).to_df()
 
+    high_speed_by_mmsi = _first_high_speed_row_by_mmsi(vessel_in_high_speed_df)
+    low_speed_seen = 0
+    low_speed_updated = 0
+    low_speed_inserted = 0
 
     # Upsert into PostgreSQL for low speed vessels
     with Session(engine) as session:
+        open_by_mmsi = _load_open_activities(session)
+
         for _, row in vessel_in_low_speed_df.iterrows():
-            logging.info(f"Processing vessel with MMSI: {row['mmsi']} at timestamp: {row['ts']}")
+            low_speed_seen += 1
+            mmsi = int(row["mmsi"])
+            logging.debug("Processing vessel with MMSI: %s at timestamp: %s", mmsi, row["ts"])
 
-            existing_activity = session.execute(
-                select(Ais_VesselMovementActivities)
-                    .where(
-                        and_(
-                            Ais_VesselMovementActivities.mmsi == int(row["mmsi"]),
-                            Ais_VesselMovementActivities.tsout == None
-                        )                        
-                    )
-            ).scalar_one_or_none()
+            existing_activity = open_by_mmsi.get(mmsi)
 
-            # # find the distance between 2 points
-            df_dist = duckdb.sql(f"""
-                    SELECT
-                    ST_Distance_Sphere(
-                        ST_Point({row["longitude"]}, {row["latitude"]}),
-                        ST_Point({row["longitude"] if existing_activity is None else existing_activity.curlongitude}, {row["latitude"] if existing_activity is None else existing_activity.curlatitude})
-                    ) AS distance_m
-            """).fetchdf()            
-
-            # distance
-            distance = df_dist['distance_m'][0]
+            compare_lon = row["longitude"] if existing_activity is None else existing_activity.curlongitude
+            compare_lat = row["latitude"] if existing_activity is None else existing_activity.curlatitude
+            distance = _sphere_distance_m(row["longitude"], row["latitude"], compare_lon, compare_lat)
 
             if existing_activity:
                 if existing_activity.tsout is None:
@@ -186,12 +212,13 @@ def upsert_vessel_activities(engine: Engine):
                     existing_activity.cursog = row["sog"]
                     existing_activity.curcog = row["cog"]
                     existing_activity.distance = float(distance)
-          
+                    low_speed_updated += 1
+
             else:
                 # insert new row, id will be auto-generated
                 new_activity = Ais_VesselMovementActivities(
                     ts=row["ts"],
-                    mmsi=int(row["mmsi"]),
+                    mmsi=mmsi,
                     navstatus=row["navStatus"],
                     navstatusdesc=row["navStatusDesc"],
                     longitude=row["longitude"],
@@ -207,62 +234,74 @@ def upsert_vessel_activities(engine: Engine):
                     curlatitude=row["latitude"],
                     cursog=row["sog"],
                     curcog=row["cog"],
-                    distance=float(distance)                   
+                    distance=float(distance),
                 )
                 session.add(new_activity)
+                open_by_mmsi[mmsi] = new_activity
+                low_speed_inserted += 1
 
         session.commit()
+
+    logging.info(
+        "Low-speed pass: seen=%s updated=%s inserted=%s",
+        low_speed_seen,
+        low_speed_updated,
+        low_speed_inserted,
+    )
 
     # Upsert into PostgreSQL for high speed vessels
     current_activities_df = get_cur_activities_data(engine)
     current_activities_df["navstatusdesc"] = current_activities_df["navstatusdesc"].astype("object")
-    cnt = 0 
+    open_count = len(current_activities_df)
+    high_speed_candidate_count = len(high_speed_by_mmsi)
+    cnt = 0
+    high_speed_skipped_no_fix = 0
 
     with Session(engine) as session:
-        for _, row in current_activities_df.iterrows():  
-            logging.info(f"Checking high speed activity for vessel with MMSI: {row['mmsi']} at timestamp: {row['ts']}")
-            
-            vessel_in_high_speed_df["navStatusDesc"] = vessel_in_high_speed_df["navStatusDesc"].astype("object")
-            duckdb.register("vessel_in_high_speed_df", vessel_in_high_speed_df)
+        for _, row in current_activities_df.iterrows():
+            if row["tsout"] is not None:
+                continue
 
-            vessel_in_high_speed = duckdb.query(f"""
-                SELECT *
-                FROM vessel_in_high_speed_df
-                WHERE mmsi = {row['mmsi']}
-            """).to_df()         
+            mmsi = int(row["mmsi"])
+            high_speed_fix = high_speed_by_mmsi.get(mmsi)
+            if high_speed_fix is None:
+                high_speed_skipped_no_fix += 1
+                continue
 
-            if row["tsout"] is None and not vessel_in_high_speed.empty:
-            # # find the distance between 2 points
-                df_dist = duckdb.sql(f"""
-                    SELECT
-                        ST_Distance_Sphere(
-                            ST_Point({row["longitude"]}, {row["latitude"]}),
-                            ST_Point({row["longitude"] if vessel_in_high_speed is None else vessel_in_high_speed["longitude"].iloc[0]}, {row["latitude"] if vessel_in_high_speed is None else vessel_in_high_speed["latitude"].iloc[0]})
-                        ) AS distance_m
-                """).fetchdf()            
+            logging.debug("Checking high speed activity for vessel with MMSI: %s at timestamp: %s", mmsi, row["ts"])
 
-                # distance
-                distance = df_dist['distance_m'][0]    
+            distance = _sphere_distance_m(
+                row["longitude"],
+                row["latitude"],
+                high_speed_fix["longitude"],
+                high_speed_fix["latitude"],
+            )
 
-                stmt = text("""
-                    UPDATE ais_vesselmovementactivities
-                    SET tsout = :tsout, rowcount = :rowcount, rowcount2 = :rowcount2, distance = :distance
-                    WHERE id = :id
-                """)
+            stmt = text("""
+                UPDATE ais_vesselmovementactivities
+                SET tsout = :tsout, rowcount = :rowcount, rowcount2 = :rowcount2, distance = :distance
+                WHERE id = :id
+            """)
 
-                session.execute(stmt, {
-                    "tsout": None if row['rowcount2'] >= -10 else (vessel_in_high_speed["ts"].iloc[0] if not vessel_in_high_speed.empty and float(distance) >= 30 else None),
-                    "rowcount": row["rowcount"] if row["tsstop"] is not None else (1 if row["rowcount"] <= 1 else row["rowcount"] - 1),
-                    "rowcount2": -1 if row["rowcount2"] is None or row["rowcount2"] >= 1 else row["rowcount2"] - 1,
-                    "distance": float(distance),
-                    "id": row["id"]
-                })
+            session.execute(stmt, {
+                "tsout": None if row["rowcount2"] >= -10 else (high_speed_fix["ts"] if float(distance) >= 30 else None),
+                "rowcount": row["rowcount"] if row["tsstop"] is not None else (1 if row["rowcount"] <= 1 else row["rowcount"] - 1),
+                "rowcount2": -1 if row["rowcount2"] is None or row["rowcount2"] >= 1 else row["rowcount2"] - 1,
+                "distance": float(distance),
+                "id": row["id"],
+            })
 
-                cnt += 1
+            cnt += 1
 
-        session.commit() 
+        session.commit()
 
-
+    logging.info(
+        "High-speed pass: open_rows=%s skipped_no_high_speed_fix=%s candidates=%s updates=%s",
+        open_count,
+        high_speed_skipped_no_fix,
+        high_speed_candidate_count,
+        cnt,
+    )
     logging.info(f"Upserted {len(vessel_in_low_speed_df)} vessel low speed activity records.")
     logging.info(f"Upserted {cnt} vessel high speed activity records.")
 
@@ -294,4 +333,3 @@ if __name__ == "__main__":
 
         logging.info(f'System sleep....')
         time.sleep(20)  
-

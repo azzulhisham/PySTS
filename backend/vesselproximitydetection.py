@@ -154,9 +154,12 @@ def get_pgEngine() -> Engine:
     """Create and return a pooled SQLAlchemy engine for PostgreSQL."""
     return create_engine(
         DATABASE_URL,
-        pool_size=10,
-        max_overflow=20,
+        pool_size=2,
+        max_overflow=0,
         pool_timeout=30,
+        pool_pre_ping=True,
+        # Cap any single statement so a slow cycle cannot pin the shared RDS for hours.
+        connect_args={"options": "-c statement_timeout=60000"},
     )
 
 
@@ -812,14 +815,15 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
 
 def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
     """Load stopped/stale cargo and tanker vessels eligible for proximity detection."""
+    # Latest static row per MMSI (same as row_number()…=1).
     static_query = """
         SELECT mmsi, "shipType", "shipTypeDesc", "shipName", callsign, imo,
                to_bow, to_stern, to_port, to_starboard
         FROM (
-            SELECT *, row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_static
+            SELECT DISTINCT ON (mmsi) *
             FROM public.ais_static
+            ORDER BY mmsi, ts DESC
         ) sub
-        WHERE rowcount_static = 1
     """
     df_static = pd.read_sql(static_query, con=engine)
     df_static = df_static.drop_duplicates(subset="mmsi", keep="first")
@@ -827,18 +831,20 @@ def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
     for col in ("shipTypeDesc", "shipName", "callsign"):
         df_static[col] = df_static[col].astype("object")
 
+    # Latest movement activity per MMSI, then stopped/stale filters
+    # (same semantics as the old row_number()…=1 wrapper).
     activity_query = """
         SELECT *
         FROM (
-            SELECT *, row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_mmsi
+            SELECT DISTINCT ON (mmsi) *
             FROM public.ais_vesselmovementactivities
+            ORDER BY mmsi, ts DESC
         ) sub
         WHERE tsout IS NULL
           AND (
                 (tsstop IS NOT NULL AND tsstop <= now() - interval '1 HOURS')
                 OR tscurrent <= now() - interval '30 MINUTES'
               )
-          AND rowcount_mmsi = 1
     """
     df = pd.read_sql(activity_query, con=engine)
     df["navstatusdesc"] = df["navstatusdesc"].astype("object")

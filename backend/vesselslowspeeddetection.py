@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import and_, or_, desc, text, Column, BigInteger
+from sqlalchemy import text, Column, BigInteger
 from sqlalchemy.engine import Engine
 
 import gc
@@ -17,6 +17,7 @@ import math
 import json
 import platform
 import logging
+from psycopg2.extras import execute_values
 
 
 
@@ -85,12 +86,14 @@ class Ais_VesselSlowMoveActivities(SQLModel, table=True):
 
 def get_pgEngine():
     engine = create_engine(
-        DATABASE_URL, 
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=30,  # seconds    
-        # echo=True
-    )  # echo=True for logging SQL
+        DATABASE_URL,
+        pool_size=2,
+        max_overflow=0,
+        pool_timeout=30,
+        pool_pre_ping=True,
+        # Cap any single statement so a slow cycle cannot pin the shared RDS for hours.
+        connect_args={"options": "-c statement_timeout=60000"},
+    )
 
     return engine
 
@@ -100,16 +103,21 @@ def create_db_and_tables(engine: Engine):
 
 
 def get_ais_position_data(engine: Engine) -> pd.DataFrame:
+    """Latest AIS fixes used by this detector.
+
+    ais_position is one row per MMSI; the 3-day ts filter is a freshness gate
+    (same predicate as before). Only columns the detector reads are selected.
+    """
     query = text("""
-        SELECT *
+        SELECT ts, mmsi, "navStatus", "navStatusDesc",
+               longitude, latitude, cog, sog
         FROM public.ais_position
         WHERE latitude >= :lat_min AND latitude <= :lat_max AND ts >= :ts_min
         ORDER BY "ts"
     """)
 
-    # Define parameters
     params = {"lat_min": -90, "lat_max": 90, "ts_min": datetime.now(timezone.utc) - timedelta(days=3)}
-    df = pd.read_sql(query, con=engine, params=params)  
+    df = pd.read_sql(query, con=engine, params=params)
 
     return df
 
@@ -125,6 +133,108 @@ def get_cur_activities_data(engine: Engine) -> pd.DataFrame:
     df = pd.read_sql(query, con=engine)  
 
     return df
+
+
+def _sphere_distances_duckdb(pairs: pd.DataFrame) -> list[float]:
+    """Vectorized ST_Distance_Sphere — same function the old per-row DuckDB calls used."""
+    if pairs.empty:
+        return []
+    duckdb.register("_slowmove_dist_pairs", pairs)
+    out = duckdb.sql("""
+        SELECT ST_Distance_Sphere(
+            ST_Point(lon1, lat1),
+            ST_Point(lon2, lat2)
+        ) AS distance_m
+        FROM _slowmove_dist_pairs
+    """).fetchdf()
+    return [0.0 if (x is None or (isinstance(x, float) and math.isnan(x))) else float(x) for x in out["distance_m"].tolist()]
+
+
+def _load_all_open_activities(session: Session) -> list[Ais_VesselSlowMoveActivities]:
+    """All open rows ordered by ts (same set get_cur_activities_data would return)."""
+    return list(
+        session.execute(
+            select(Ais_VesselSlowMoveActivities)
+            .where(Ais_VesselSlowMoveActivities.tsout == None)
+            .order_by(Ais_VesselSlowMoveActivities.ts)
+        ).scalars()
+    )
+
+
+def _open_by_mmsi_earliest(
+    open_rows: list[Ais_VesselSlowMoveActivities],
+) -> dict[int, Ais_VesselSlowMoveActivities]:
+    """One open row per MMSI (earliest ts first if duplicates exist in data)."""
+    open_by_mmsi: dict[int, Ais_VesselSlowMoveActivities] = {}
+    for activity in open_rows:
+        if activity.mmsi not in open_by_mmsi:
+            open_by_mmsi[activity.mmsi] = activity
+    return open_by_mmsi
+
+
+def _apply_stale_tsstop_in_memory(
+    open_rows: list[Ais_VesselSlowMoveActivities],
+    stale_cutoff: datetime,
+    min_rowcount: int,
+) -> None:
+    """Mirror the bulk stale UPDATE onto already-loaded objects (no second table read)."""
+    for activity in open_rows:
+        if activity.tsout is not None:
+            continue
+        if activity.tsstop is not None:
+            continue
+        if activity.tscurrent is None:
+            continue
+        if activity.rowcount is None or activity.rowcount < min_rowcount:
+            continue
+        ts_cur = activity.tscurrent
+        if getattr(ts_cur, "tzinfo", None) is None and stale_cutoff.tzinfo is not None:
+            # Compare naive DB timestamps to aware cutoff in UTC terms.
+            ts_cmp = ts_cur.replace(tzinfo=timezone.utc) if hasattr(ts_cur, "replace") else ts_cur
+        else:
+            ts_cmp = ts_cur
+        try:
+            is_stale = ts_cmp < stale_cutoff
+        except TypeError:
+            # Fallback: strip tz from cutoff
+            is_stale = ts_cur < stale_cutoff.replace(tzinfo=None)
+        if is_stale:
+            activity.tsstop = activity.tscurrent
+
+
+def _first_high_speed_row_by_mmsi(high_speed_df: pd.DataFrame) -> dict[int, pd.Series]:
+    """First high-speed fix per MMSI (dataframe already ordered by ts)."""
+    if high_speed_df.empty:
+        return {}
+    grouped: dict[int, pd.Series] = {}
+    for mmsi, group in high_speed_df.groupby("mmsi", sort=False):
+        grouped[int(mmsi)] = group.iloc[0]
+    return grouped
+
+
+def _batch_high_speed_updates(engine: Engine, rows: list[tuple]) -> None:
+    """Apply high-speed exit updates in one statement (same assignments as before)."""
+    if not rows:
+        return
+    sql = """
+        UPDATE public.ais_vesselslowmoveactivities AS t SET
+            tsout = v.tsout::timestamp,
+            rowcount = v.rowcount::bigint,
+            rowcount2 = v.rowcount2::bigint,
+            distance = v.distance::double precision
+        FROM (VALUES %s) AS v(id, tsout, rowcount, rowcount2, distance)
+        WHERE t.id = v.id::bigint
+    """
+    connection = engine.raw_connection()
+    try:
+        with connection.cursor() as cursor:
+            execute_values(cursor, sql, rows, page_size=len(rows))
+        connection.commit()
+    except Exception:
+        connection.rollback()
+        raise
+    finally:
+        connection.close()
 
 
 def estimate_latlng(init_lat, init_lng, cog):
@@ -187,85 +297,112 @@ def upsert_vessel_activities(engine: Engine):
         FROM ais_position
         WHERE sog > 3.0
         ORDER BY "ts"
-    """).to_df()    
+    """).to_df()
 
+    high_speed_by_mmsi = _first_high_speed_row_by_mmsi(vessel_in_high_speed_df)
+    low_speed_seen = 0
+    low_speed_skipped_not_newer = 0
+    low_speed_updated = 0
+    low_speed_inserted = 0
 
-    # Upsert into PostgreSQL for low speed vessels
-    with Session(engine) as session:
+    # Upsert into PostgreSQL for low speed vessels.
+    # expire_on_commit=False: open_rows are reused after commit for the high-speed
+    # pass (same data get_cur_activities_data would reload, without a second scan).
+    with Session(engine, expire_on_commit=False) as session:
+        open_rows = _load_all_open_activities(session)
+        open_by_mmsi = _open_by_mmsi_earliest(open_rows)
+
+        # ais_position is one row per MMSI, so compare points are fixed for this cycle
+        # and distances can be computed once with the same ST_Distance_Sphere as before.
+        dist_pairs = []
         for _, row in vessel_in_low_speed_df.iterrows():
-            logging.info(f"Processing vessel with MMSI: {row['mmsi']} at timestamp: {row['ts']}")
+            existing_activity = open_by_mmsi.get(int(row["mmsi"]))
+            compare_lon = row["longitude"] if existing_activity is None else existing_activity.curlongitude
+            compare_lat = row["latitude"] if existing_activity is None else existing_activity.curlatitude
+            dist_pairs.append(
+                {
+                    "lon1": row["longitude"],
+                    "lat1": row["latitude"],
+                    "lon2": compare_lon,
+                    "lat2": compare_lat,
+                }
+            )
+        low_speed_distances = _sphere_distances_duckdb(pd.DataFrame(dist_pairs))
 
-            existing_activity = session.execute(
-                select(Ais_VesselSlowMoveActivities)
-                    .where(
-                        and_(
-                            Ais_VesselSlowMoveActivities.mmsi == int(row["mmsi"]),
-                            Ais_VesselSlowMoveActivities.tsout == None
-                        )                        
-                    )
-            ).scalar_one_or_none()
+        for row_idx, (_, row) in enumerate(vessel_in_low_speed_df.iterrows()):
+            low_speed_seen += 1
+            mmsi = int(row["mmsi"])
+            logging.debug("Processing low-speed MMSI %s at %s", mmsi, row["ts"])
 
-            # # find the distance between 2 points
-            df_dist = duckdb.sql(f"""
-                SELECT
-                    ST_Distance_Sphere(
-                        ST_Point({row["longitude"]}, {row["latitude"]}),
-                        ST_Point({row["longitude"] if existing_activity is None else existing_activity.curlongitude}, {row["latitude"] if existing_activity is None else existing_activity.curlatitude})
-                    ) AS distance_m
-            """).fetchdf()            
-
-            # distance
-            distance = df_dist['distance_m'][0]
+            existing_activity = open_by_mmsi.get(mmsi)
+            distance = low_speed_distances[row_idx] if row_idx < len(low_speed_distances) else 0.0
 
             if existing_activity:
                 if existing_activity.tsout is None:
-                    # update existing row
-                    is_newer_position = existing_activity.tscurrent is None or row["ts"] > existing_activity.tscurrent
+                    # Same predicate as before: tscurrent is None or row ts is strictly newer.
+                    is_newer_position = (
+                        existing_activity.tscurrent is None
+                        or row["ts"] > existing_activity.tscurrent
+                    )
 
-                    if is_newer_position:
-                        has_position_changed = (
-                            float(distance) > 0
-                            and existing_activity.tsstop is None
-                            and row["longitude"] != existing_activity.curlongitude
-                            and row["latitude"] != existing_activity.curlatitude
-                        )
+                    if not is_newer_position:
+                        low_speed_skipped_not_newer += 1
+                        continue
 
-                        existing_activity.navstatus = row["navStatus"]
-                        existing_activity.navstatusdesc = row["navStatusDesc"]
-                        existing_activity.rowcount += 1 if has_position_changed else 0
-                        existing_activity.tsstop = row["ts"] if existing_activity.rowcount >= 30 and float(distance) < 30 and existing_activity.tsstop is None else (None if existing_activity.tsstop is None else existing_activity.tsstop)
-                        existing_activity.tscurrent = row["ts"]
-                        existing_activity.curlongitude = row["longitude"]
-                        existing_activity.curlatitude = row["latitude"]
-                        existing_activity.cursog = row["sog"]
-                        existing_activity.curcog = row["cog"]
-                        existing_activity.distance = float(distance)
-          
+                    has_position_changed = (
+                        float(distance) > 0
+                        and existing_activity.tsstop is None
+                        and row["longitude"] != existing_activity.curlongitude
+                        and row["latitude"] != existing_activity.curlatitude
+                    )
+
+                    existing_activity.navstatus = row["navStatus"]
+                    existing_activity.navstatusdesc = row["navStatusDesc"]
+                    existing_activity.rowcount += 1 if has_position_changed else 0
+                    existing_activity.tsstop = row["ts"] if existing_activity.rowcount >= 30 and float(distance) < 30 and existing_activity.tsstop is None else (None if existing_activity.tsstop is None else existing_activity.tsstop)
+                    existing_activity.tscurrent = row["ts"]
+                    existing_activity.curlongitude = row["longitude"]
+                    existing_activity.curlatitude = row["latitude"]
+                    existing_activity.cursog = row["sog"]
+                    existing_activity.curcog = row["cog"]
+                    existing_activity.distance = float(distance)
+                    low_speed_updated += 1
+
             else:
-                # insert new row, id will be auto-generated
                 new_activity = Ais_VesselSlowMoveActivities(
                     ts=row["ts"],
-                    mmsi=int(row["mmsi"]),
+                    mmsi=mmsi,
                     navstatus=row["navStatus"],
                     navstatusdesc=row["navStatusDesc"],
                     longitude=row["longitude"],
                     latitude=row["latitude"],
                     sog=row["sog"],
                     cog=row["cog"],
-                    rowcount=1 if existing_activity is None else existing_activity.rowcount + 1,
-                    rowcount2=0 if existing_activity is None else existing_activity.rowcount2,
-                    tsstop=None if existing_activity is None else (row["ts"] if existing_activity.rowcount >= 30 and float(distance) < 30 else None),
+                    rowcount=1,
+                    rowcount2=0,
+                    tsstop=None,
                     tsout=None,
                     tscurrent=row["ts"],
                     curlongitude=row["longitude"],
                     curlatitude=row["latitude"],
                     cursog=row["sog"],
                     curcog=row["cog"],
-                    distance=float(distance)                   
+                    distance=float(distance),
                 )
                 session.add(new_activity)
+                open_by_mmsi[mmsi] = new_activity
+                open_rows.append(new_activity)
+                low_speed_inserted += 1
 
         session.commit()
+
+    logging.info(
+        "Low-speed pass: seen=%s skipped_not_newer=%s updated=%s inserted=%s",
+        low_speed_seen,
+        low_speed_skipped_not_newer,
+        low_speed_updated,
+        low_speed_inserted,
+    )
 
     stale_cutoff = datetime.now(timezone.utc) - timedelta(minutes=STALE_TRANSPONDER_MINUTES)
 
@@ -287,58 +424,83 @@ def upsert_vessel_activities(engine: Engine):
 
     logging.info(f"Marked {stale_result.rowcount} stale slow-speed activities as suspected stopped/dark.")
 
-    # Upsert into PostgreSQL for high speed vessels
-    current_activities_df = get_cur_activities_data(engine)
-    current_activities_df["navstatusdesc"] = current_activities_df["navstatusdesc"].astype("object")
-    cnt = 0 
+    # Keep in-memory open rows aligned with the stale UPDATE (avoids a second full read).
+    _apply_stale_tsstop_in_memory(open_rows, stale_cutoff, STALE_TRANSPONDER_MIN_ROWCOUNT)
 
-    with Session(engine) as session:
-        for _, row in current_activities_df.iterrows():  
-            logging.info(f"Checking high speed activity for vessel with MMSI: {row['mmsi']} at timestamp: {row['ts']}")
-            
-            vessel_in_high_speed_df["navStatusDesc"] = vessel_in_high_speed_df["navStatusDesc"].astype("object")
-            duckdb.register("vessel_in_high_speed_df", vessel_in_high_speed_df)
+    # High-speed exit pass — only MMSIs with sog > 3 in this cycle's AIS batch
+    open_count = len(open_rows)
+    high_speed_candidate_count = len(high_speed_by_mmsi)
+    cnt = 0
+    high_speed_skipped_no_fix = 0
+    high_speed_updates: list[tuple] = []
 
-            vessel_in_high_speed = duckdb.query(f"""
-                SELECT *
-                FROM vessel_in_high_speed_df
-                WHERE mmsi = {row['mmsi']}
-            """).to_df()         
+    candidates: list[tuple] = []  # (activity, high_speed_fix)
+    for activity in open_rows:
+        if activity.tsout is not None:
+            continue
+        mmsi = int(activity.mmsi)
+        high_speed_fix = high_speed_by_mmsi.get(mmsi)
+        if high_speed_fix is None:
+            high_speed_skipped_no_fix += 1
+            continue
+        candidates.append((activity, high_speed_fix))
 
-            if row["tsout"] is None and not vessel_in_high_speed.empty:
-            # # find the distance between 2 points
-                df_dist = duckdb.sql(f"""
-                    SELECT
-                        ST_Distance_Sphere(
-                            ST_Point({row["longitude"]}, {row["latitude"]}),
-                            ST_Point({row["longitude"] if vessel_in_high_speed is None else vessel_in_high_speed["longitude"].iloc[0]}, {row["latitude"] if vessel_in_high_speed is None else vessel_in_high_speed["latitude"].iloc[0]})
-                        ) AS distance_m
-                """).fetchdf()            
+    if candidates:
+        pair_rows = []
+        for activity, high_speed_fix in candidates:
+            pair_rows.append(
+                {
+                    "lon1": activity.longitude,
+                    "lat1": activity.latitude,
+                    "lon2": high_speed_fix["longitude"],
+                    "lat2": high_speed_fix["latitude"],
+                }
+            )
+        distances = _sphere_distances_duckdb(pd.DataFrame(pair_rows))
 
-                # distance
-                distance = df_dist['distance_m'][0]    
+        for (activity, high_speed_fix), distance in zip(candidates, distances):
+            mmsi = int(activity.mmsi)
+            logging.debug("Checking high-speed exit for MMSI %s", mmsi)
 
-                stmt = text("""
-                    UPDATE ais_vesselslowmoveactivities
-                    SET tsout = :tsout, rowcount = :rowcount, rowcount2 = :rowcount2, distance = :distance
-                    WHERE id = :id
-                """)
+            rowcount = activity.rowcount
+            rowcount2 = activity.rowcount2
+            tsstop = activity.tsstop
 
-                session.execute(stmt, {
-                    "tsout": None if row['rowcount2'] >= -10 else (vessel_in_high_speed["ts"].iloc[0] if not vessel_in_high_speed.empty and float(distance) >= 100 else None),
-                    "rowcount": row["rowcount"] if row["tsstop"] is not None else (1 if row["rowcount"] <= 1 else row["rowcount"] - 1),
-                    "rowcount2": -1 if row["rowcount2"] is None or row["rowcount2"] >= 1 else row["rowcount2"] - 1,
-                    "distance": float(distance),
-                    "id": row["id"]
-                })
+            # Identical to the previous pandas/SQLAlchemy parameter expression.
+            tsout = (
+                None
+                if rowcount2 >= -10
+                else (high_speed_fix["ts"] if float(distance) >= 100 else None)
+            )
+            new_rowcount = rowcount if tsstop is not None else (1 if rowcount <= 1 else rowcount - 1)
+            new_rowcount2 = -1 if rowcount2 is None or rowcount2 >= 1 else rowcount2 - 1
 
-                cnt += 1
+            tsout_param = None
+            if tsout is not None:
+                tsout_param = pd.Timestamp(tsout).to_pydatetime()
 
-        session.commit() 
+            if activity.id is None:
+                logging.warning(
+                    "Skipping high-speed update for MMSI %s: missing activity id after commit",
+                    mmsi,
+                )
+                continue
 
+            high_speed_updates.append(
+                (activity.id, tsout_param, new_rowcount, new_rowcount2, float(distance))
+            )
+            cnt += 1
 
-    logging.info(f"Upserted {len(vessel_in_low_speed_df)} vessel low speed activity records.")
-    logging.info(f"Upserted {cnt} vessel high speed activity records.")
+    _batch_high_speed_updates(engine, high_speed_updates)
+
+    logging.info(
+        "High-speed pass: open_rows=%s skipped_no_high_speed_fix=%s candidates=%s updates=%s",
+        open_count,
+        high_speed_skipped_no_fix,
+        high_speed_candidate_count,
+        cnt,
+    )
+    logging.info(f"Processed {len(vessel_in_low_speed_df)} low-speed AIS rows; {cnt} high-speed exit updates.")
 
     return len(vessel_in_low_speed_df)
 
@@ -368,4 +530,3 @@ if __name__ == "__main__":
 
         logging.info(f'System sleep....')
         time.sleep(20)  
-
