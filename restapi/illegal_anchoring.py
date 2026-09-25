@@ -18,28 +18,20 @@ import json
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
-
-import duckdb
 import pandas as pd
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
+from duckdb_spatial import spatial_df
+from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
-from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 # Restricted limit ring (lon/lat) — single source in polygons.py
 RESTRICTED_LIMIT_LONLAT = restricted_limit["polygon"]
-
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
 
 # Latest activity per MMSI (same as row_number()…=1), then stopped/stale filters.
 # DISTINCT ON avoids windowing the entire movement-history table on every HTTP call.
@@ -67,7 +59,7 @@ FROM (
     FROM public.ais_vesselmovementactivities
     ORDER BY mmsi, ts DESC
 ) a
-INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
+{class_a_join("a.mmsi")}
 {class_b_join("a.mmsi")}
 WHERE a.tsout IS NULL
   AND (
@@ -79,23 +71,6 @@ WHERE a.tsout IS NULL
   -- Class-A large commercial vessels: cargo (70-79), tanker (80-89)
   AND s."shipType" >= 70 AND s."shipType" < 90
 """
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=2,
-        max_overflow=0,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        # Cap on-demand API reads so a slow plan cannot pin shared RDS for hours.
-        connect_args={"options": "-c statement_timeout=60000"},
-    )
-
-
-def _ensure_duckdb_spatial() -> None:
-    duckdb.sql("INSTALL spatial")
-    duckdb.sql("LOAD spatial")
 
 
 def polygon_to_geojson(coords_lonlat: list[list[float]]) -> dict:
@@ -200,19 +175,10 @@ def classify_illegal_anchoring(stopped: pd.DataFrame) -> pd.DataFrame:
     if stopped.empty:
         return stopped.assign(**empty_cols)
 
-    _ensure_duckdb_spatial()
     watch_df, port_df = split_anchorage_polygons()
     restricted = json.dumps(polygon_to_geojson(RESTRICTED_LIMIT_LONLAT))
 
-    duckdb.register("stopped_vessels", stopped)
-    duckdb.register("watch_polygons", watch_df if not watch_df.empty else pd.DataFrame(
-        columns=["anchorage_name", "is_excl", "geojson"]
-    ))
-    duckdb.register("port_limit_polygons", port_df if not port_df.empty else pd.DataFrame(
-        columns=["anchorage_name", "is_excl", "geojson"]
-    ))
-
-    located = duckdb.sql(
+    located = spatial_df(
         f"""
         WITH base AS (
             SELECT
@@ -256,8 +222,17 @@ def classify_illegal_anchoring(stopped: pd.DataFrame) -> pd.DataFrame:
         FROM base b
         LEFT JOIN watch_hit wh ON wh.mmsi = b.mmsi
         LEFT JOIN port_hit ph ON ph.mmsi = b.mmsi
-        """
-    ).df()
+        """,
+        {
+            "stopped_vessels": stopped,
+            "watch_polygons": watch_df if not watch_df.empty else pd.DataFrame(
+                columns=["anchorage_name", "is_excl", "geojson"]
+            ),
+            "port_limit_polygons": port_df if not port_df.empty else pd.DataFrame(
+                columns=["anchorage_name", "is_excl", "geojson"]
+            ),
+        },
+    )
 
     reasons = []
     keep = []
@@ -327,12 +302,17 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
-def detect_illegal_anchoring(engine: Engine | None = None) -> dict[str, Any]:
+def detect_illegal_anchoring(
+    engine: Engine | None = None,
+    *,
+    summary_only: bool = False,
+) -> dict[str, Any]:
     engine = engine or get_pg_engine()
     stopped = load_stopped_vessels(engine)
     illegal = classify_illegal_anchoring(stopped)
     illegal = attach_sanctions(illegal, engine)
-    illegal = sort_listed_first(illegal)
+    if not summary_only:
+        illegal = sort_listed_first(illegal)
 
     by_reason: dict[str, int] = {}
     sanctions_match_count = 0
@@ -352,7 +332,7 @@ def detect_illegal_anchoring(engine: Engine | None = None) -> dict[str, Any]:
         "watch_polygon_count": len(watch),
         "port_limit_polygon_count": len(port),
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
-        "vessels": illegal,
-        "vessels_payload": vessels_to_payload(illegal),
+        "vessels": illegal if not summary_only else illegal.iloc[0:0],
+        "vessels_payload": [] if summary_only else vessels_to_payload(illegal),
         "rule_version": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label",
     }

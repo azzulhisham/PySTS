@@ -101,9 +101,8 @@ def get_ais_position_data(engine: Engine) -> pd.DataFrame:
         ORDER BY "ts"
     """)
 
-    # Define parameters
     params = {"lat_min": -90, "lat_max": 90, "ts_min": datetime.now(timezone.utc) - timedelta(days=2)}
-    df = pd.read_sql(query, con=engine, params=params)  
+    df = pd.read_sql(query, con=engine, params=params)
 
     return df
 

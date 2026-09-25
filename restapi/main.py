@@ -13,9 +13,12 @@ from sts_detection import (
     detect_sts_in_anchorages,
 )
 from illegal_anchoring import detect_illegal_anchoring
+from loitering import detect_loitering
 from dark_vessels import detect_dark_vessels
 from identity_conflict import detect_identity_conflicts
 from spoofing import detect_spoofing
+from spoofing_vessel_analysis import detect_vessel_spoofing_analysis
+from mantis_overview import detect_mantis_overview
 from timelineplayback import (
     get_vessel_activity_timeline,
     get_vessel_track_replay,
@@ -133,6 +136,45 @@ def get_all_polygons():
         return jsonify({"message": "Internal server error"}), 500
 
 
+@app.route("/mantis/overview", methods=["GET"])
+@cross_origin()
+def get_mantis_overview():
+    """
+    Dashboard summary for Dark Vessels, STS, Illegal Anchoring, and Spoofing.
+
+    One request, one Postgres pool checkout sequence — use this instead of
+    calling the four module endpoints in parallel on the overview page.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        min_score = request.args.get("minSuspicionScore", type=float)
+        include_exit = request.args.get("includeCoverageExit", "true").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        include_spoofing = request.args.get("includeSpoofing", "true").lower() not in (
+            "0",
+            "false",
+            "no",
+        )
+        payload = detect_mantis_overview(
+            min_suspicion_score=min_score if min_score is not None else 4.5,
+            include_coverage_exit=include_exit,
+            spoofing_from=request.args.get("from"),
+            spoofing_to=request.args.get("to"),
+            include_spoofing=include_spoofing,
+        )
+        return jsonify(payload), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_mantis_overview] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
 @app.route("/mantis/sts-activities", methods=["GET"])
 @cross_origin()
 def get_sts_activities():
@@ -169,6 +211,63 @@ def get_sts_activities():
     
     except Exception as e:
         logging.error(f"[get_sts_activities] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/loitering", methods=["GET"])
+@cross_origin()
+def get_loitering():
+    """
+    Open loiter events from ais_vesselloiteractivity (written by the backend job).
+
+    Default: outside an anchorage, near the restricted limit, or just before an STS.
+    pattern=loitering or pattern=anchorSwing applies the geometry preset.
+    minPathM, maxPathM, maxNetM, maxNetOverPath, minRadiusM, and maxRadiusM
+    override that preset. A number for radius replaces the hull-relative cut.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    def _flag(name: str):
+        raw = request.args.get(name)
+        if raw is None:
+            return None
+        return raw.lower() in ("1", "true", "yes")
+
+    def _num(name: str):
+        return request.args.get(name, type=float)
+
+    pattern = request.args.get("pattern")
+    if pattern == "":
+        pattern = None
+
+    try:
+        result = detect_loitering(
+            pattern=pattern,
+            outside_anchorage=_flag("outsideAnchorage"),
+            near_restricted=_flag("nearRestricted"),
+            before_sts=_flag("beforeSts"),
+            min_path_m=_num("minPathM"),
+            max_path_m=_num("maxPathM"),
+            max_net_m=_num("maxNetM"),
+            max_net_over_path=_num("maxNetOverPath"),
+            min_radius_m=_num("minRadiusM"),
+            max_radius_m=_num("maxRadiusM"),
+        )
+        payload = {
+            "ruleVersion": result["rule_version"],
+            "shipTypeFilter": result["ship_type_filter"],
+            "filters": result["filters"],
+            "eventCount": result["event_count"],
+            "byFlag": result["by_flag"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
+            "events": result["events_payload"],
+        }
+        return jsonify(json_for_client(payload, ["events"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_loitering] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 
@@ -322,6 +421,63 @@ def get_spoofing():
         return jsonify({"message": "Internal server error"}), 500
 
 
+@app.route("/mantis/spoofing/vessel-analysis", methods=["GET"])
+@cross_origin()
+def get_spoofing_vessel_analysis():
+    """
+    Per-vessel spoofing drill-down from the fleet /mantis/spoofing dashboard.
+
+    All teleport hits for one MMSI in the window (no daily dedupe). Flag from
+    public.ais_flagname via MID derived from MMSI. Optional track and speed series.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    mmsi = request.args.get("mmsi", type=int)
+    if not mmsi:
+        return jsonify({"message": "Query parameter mmsi is required"}), 400
+
+    include_track = request.args.get("includeTrack", "true").lower() not in ("0", "false", "no")
+    include_speed_series = request.args.get("includeSpeedSeries", "true").lower() not in (
+        "0",
+        "false",
+        "no",
+    )
+
+    try:
+        result = detect_vessel_spoofing_analysis(
+            mmsi,
+            date_from=request.args.get("from"),
+            date_to=request.args.get("to"),
+            include_track=include_track,
+            include_speed_series=include_speed_series,
+        )
+        payload = {
+            "ruleVersion": result["rule_version"],
+            "analysisRule": result["analysis_rule"],
+            "phase": result["phase"],
+            "detector": result["detector"],
+            "dateFrom": result["date_from"],
+            "dateTo": result["date_to"],
+            "fromOmitted": result["range_meta"]["fromOmitted"],
+            "toOmitted": result["range_meta"]["toOmitted"],
+            "rangeCapped": result["range_meta"]["rangeCapped"],
+            "maxRangeDays": result["range_meta"]["maxRangeDays"],
+            "thresholds": result["thresholds"],
+            "vessel": result["vessel"],
+            "summary": result["summary"],
+            "events": result["events_payload"],
+            "track": result["track_payload"],
+            "speedSeries": result["speed_series_payload"],
+        }
+        return jsonify(json_for_client(payload, ["events", "track", "speedSeries"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_spoofing_vessel_analysis] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
 @app.route("/mantis/sanctions", methods=["GET"])
 @cross_origin()
 def get_sanctions_list():
@@ -466,5 +622,5 @@ if __name__ == "__main__":
     # Prefer gunicorn for deployment:
     #   gunicorn -c gunicorn_config.py main:app
     # Flask development server (local debugging only):
-    port = int(os.environ.get("py_flask_port", 8080))
+    port = int(os.environ.get("py_flask_port", 8085))
     app.run(debug=False, host="0.0.0.0", port=port)

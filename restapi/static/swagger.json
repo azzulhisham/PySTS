@@ -691,6 +691,31 @@
           }
         }
       },
+      "MantisOverviewDarkVessels": {
+        "type": "object",
+        "properties": {
+          "candidateCount": { "type": "integer" },
+          "suspectedDarkCount": { "type": "integer", "description": "dark_reason = suspected_dark_after_slowdown" },
+          "coverageExitCount": { "type": "integer", "description": "dark_reason = possible_coverage_exit" },
+          "highConfidenceCount": { "type": "integer" },
+          "sanctionsMatchCount": { "type": "integer" },
+          "byReason": { "type": "object", "additionalProperties": { "type": "integer" } },
+          "byConfidence": { "type": "object", "additionalProperties": { "type": "integer" } }
+        }
+      },
+      "MantisOverviewResponse": {
+        "type": "object",
+        "properties": {
+          "generatedAt": { "type": "string", "format": "date-time" },
+          "partial": { "type": "boolean", "description": "True if one or more modules failed; see errors." },
+          "darkVessels": { "$ref": "#/components/schemas/MantisOverviewDarkVessels" },
+          "stsActivities": { "type": "object" },
+          "illegalAnchoring": { "type": "object" },
+          "spoofing": { "type": "object" },
+          "timingMs": { "type": "object", "additionalProperties": { "type": "number" } },
+          "errors": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      },
       "IdentityConflictVessel": {
         "type": "object",
         "properties": {
@@ -1119,6 +1144,73 @@
             "items": {
               "$ref": "#/components/schemas/SpoofingAnomaly"
             }
+          }
+        }
+      },
+      "SpoofingVesselEvent": {
+        "type": "object",
+        "description": "One teleport / high-speed hit between consecutive AIS fixes (no daily dedupe).",
+        "properties": {
+          "eventIndex": { "type": "integer" },
+          "mmsi": { "type": "integer", "format": "int64" },
+          "reason": { "type": "string", "enum": ["teleport", "high_speed"] },
+          "riskLevel": { "type": "string", "enum": ["critical", "high", "medium"] },
+          "assessment": { "type": "string" },
+          "startAt": { "type": "string", "format": "date-time" },
+          "endAt": { "type": "string", "format": "date-time" },
+          "impliedSpeedKn": { "type": "number" },
+          "aisSogKn": { "type": "number", "nullable": true },
+          "prevAisSogKn": { "type": "number", "nullable": true },
+          "deviationKn": { "type": "number", "nullable": true },
+          "deviationPct": { "type": "number", "nullable": true },
+          "distanceM": { "type": "number" },
+          "distanceNm": { "type": "number" },
+          "deltaSeconds": { "type": "integer" }
+        }
+      },
+      "SpoofingVesselAnalysisResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": { "type": "string" },
+          "analysisRule": { "type": "string" },
+          "phase": { "type": "integer" },
+          "detector": { "type": "string" },
+          "dateFrom": { "type": "string", "format": "date-time" },
+          "dateTo": { "type": "string", "format": "date-time" },
+          "vessel": {
+            "type": "object",
+            "properties": {
+              "mmsi": { "type": "integer", "format": "int64" },
+              "mid": { "type": "integer", "nullable": true, "description": "Maritime identification digits from MMSI." },
+              "flagName": { "type": "string", "nullable": true, "description": "From public.ais_flagname." },
+              "shipName": { "type": "string", "nullable": true },
+              "shipType": { "type": "integer", "nullable": true },
+              "cargoTankerEligible": { "type": "boolean", "description": "True when latest static shipType is 70–89 (fleet spoofing scope)." }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "totalAisPositions": { "type": "integer" },
+              "eventCount": { "type": "integer" },
+              "maxImpliedSpeedKn": { "type": "number", "nullable": true },
+              "maxDeviationKn": { "type": "number", "nullable": true },
+              "referenceMaxSogKn": { "type": "number", "nullable": true, "description": "Max reported SOG in window (usable fixes only)." }
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SpoofingVesselEvent" }
+          },
+          "track": {
+            "type": "array",
+            "description": "Plottable AIS fixes (same rules as GET /mantis/vessel-track). Omitted when includeTrack=false.",
+            "items": { "type": "object" }
+          },
+          "speedSeries": {
+            "type": "array",
+            "description": "Per-fix SOG and implied speed from previous fix. Omitted when includeSpeedSeries=false.",
+            "items": { "type": "object" }
           }
         }
       },
@@ -1648,6 +1740,71 @@
         }
       }
     },
+    "/mantis/overview": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Dashboard overview — summary counts for all detector modules.",
+        "description": "Summary metrics only (no vessel lists). Runs modules sequentially on one Postgres pool per worker. Use on the overview page instead of parallel calls to /darkvessels, /sts-activities, /illegal-anchoring, and /spoofing.",
+        "operationId": "getMantisOverview",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "minSuspicionScore",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number", "format": "double", "default": 4.5 }
+          },
+          {
+            "name": "includeCoverageExit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean", "default": true }
+          },
+          {
+            "name": "includeSpoofing",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean", "default": true }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Overview summaries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MantisOverviewResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
     "/mantis/sts-activities": {
       "get": {
         "tags": [
@@ -1691,6 +1848,92 @@
           "500": {
             "description": "Internal server error."
           }
+        }
+      }
+    },
+    "/mantis/loitering": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "Get open loitering events.",
+        "description": "Reads Postgres `ais_vesselloiteractivity`. The job stores circles from 100 m to 6 NM with net/path under 0.20. No pattern: open rows outside an anchorage, near the restricted limit, or just before an STS. pattern=loitering: long path, net/path <= 0.10, radius at least max(length, 300 m). pattern=anchorSwing: short path inside a hull-sized circle. Numeric path, net, and radius parameters override the preset.",
+        "operationId": "getLoitering",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "pattern",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["loitering", "anchorSwing"] },
+            "description": "loitering: path >= 2 NM, net <= 0.5 NM, net/path <= 0.10, radius >= max(length, 300 m) and <= 6 NM. anchorSwing: radius 100 m to max(length, 300 m), path <= 1 NM, net/path <= 0.20."
+          },
+          {
+            "name": "minPathM",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Minimum path length in metres. Overrides the preset."
+          },
+          {
+            "name": "maxPathM",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Maximum path length in metres. Overrides the preset."
+          },
+          {
+            "name": "maxNetM",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Maximum net displacement in metres. Overrides the preset."
+          },
+          {
+            "name": "maxNetOverPath",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Maximum net/path fraction, for example 0.10. Overrides the preset."
+          },
+          {
+            "name": "minRadiusM",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Minimum circle radius in metres. Replaces the hull-relative floor when set."
+          },
+          {
+            "name": "maxRadiusM",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Maximum circle radius in metres. Replaces the hull-relative cap when set."
+          },
+          {
+            "name": "outsideAnchorage",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" },
+            "description": "If true, keep only events outside a parent anchorage."
+          },
+          {
+            "name": "nearRestricted",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" },
+            "description": "If true, keep only events inside or within 5 NM of the restricted limit."
+          },
+          {
+            "name": "beforeSts",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean" },
+            "description": "If true, keep only events linked to a following STS observation."
+          }
+        ],
+        "responses": {
+          "200": { "description": "Open loiter events." },
+          "401": { "description": "Unauthorized." },
+          "500": { "description": "Internal server error. The loiter table is created when the backend job runs." }
         }
       }
     },
@@ -1823,6 +2066,89 @@
           },
           "401": {
             "description": "Unauthorized — missing or invalid Bearer token."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/mantis/spoofing/vessel-analysis": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "Spoofing drill-down for one vessel.",
+        "description": "Companion to **GET /mantis/spoofing** (fleet dashboard). Returns **all** teleport / high-speed hits for one MMSI in the window (**no daily dedupe**), vessel header (static + **flagName** from `public.ais_flagname` via MID from MMSI), summary KPIs, optional **track** and **speedSeries** (implied vs SOG) for map/chart analysis. Same **3-day max** window and Phase 1 thresholds as fleet spoofing. Query **`mmsi`** required; optional `from` / `to`; `includeTrack` / `includeSpeedSeries` (default true).\n\n**This Swagger page:** `events`, `track`, and `speedSeries` are each capped at 20 samples.",
+        "operationId": "getSpoofingVesselAnalysis",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "includeTrack",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          },
+          {
+            "name": "includeSpeedSeries",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-vessel spoofing analysis payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpoofingVesselAnalysisResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing mmsi or invalid date range."
+          },
+          "401": {
+            "description": "Unauthorized."
           },
           "500": {
             "description": "Internal server error."

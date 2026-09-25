@@ -17,6 +17,8 @@ import time
 import pandas as pd
 import duckdb
 
+from ais_static_sql import CURRENT_STATIC_ROW_ORDER
+
 """
 Detect cargo/tanker vessels within MAX_DISTANCE_M, group them into proximity clusters,
 track open/close lifecycle with duration and suspicion scoring, and persist to PostgreSQL.
@@ -815,14 +817,14 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
 
 def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
     """Load stopped/stale cargo and tanker vessels eligible for proximity detection."""
-    # Latest static row per MMSI (same as row_number()…=1).
-    static_query = """
+    # One current static row per MMSI, populated row preferred over an empty shell.
+    static_query = f"""
         SELECT mmsi, "shipType", "shipTypeDesc", "shipName", callsign, imo,
                to_bow, to_stern, to_port, to_starboard
         FROM (
             SELECT DISTINCT ON (mmsi) *
             FROM public.ais_static
-            ORDER BY mmsi, ts DESC
+            ORDER BY mmsi, {CURRENT_STATIC_ROW_ORDER}
         ) sub
     """
     df_static = pd.read_sql(static_query, con=engine)

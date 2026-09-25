@@ -17,16 +17,14 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from urllib.parse import quote
-
-import duckdb
 import pandas as pd
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
+from duckdb_spatial import spatial_df
+from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
-from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -35,12 +33,6 @@ MIN_SILENCE_MINUTES = 30
 COVERAGE_EXIT_DAYS = 3
 CONFIRMED_STOP_ROWCOUNT = 30
 MIN_SLOWDOWN_ROWCOUNT = 5
-
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
 
 # Latest activity per MMSI (same as row_number()…=1), then dark filters.
 # DISTINCT ON avoids windowing the entire history table on every HTTP call.
@@ -95,7 +87,7 @@ FROM (
     FROM public.ais_vesselslowmoveactivities
     ORDER BY mmsi, ts DESC
 ) a
-INNER JOIN public.ais_static s ON s.mmsi = a.mmsi
+{class_a_join("a.mmsi")}
 {class_b_join("a.mmsi")}
 WHERE a.tsout IS NULL
   AND a.tsstop IS NOT NULL
@@ -105,23 +97,6 @@ WHERE a.tsout IS NULL
   AND s."shipType" >= 70 AND s."shipType" < 90
 ORDER BY a.tscurrent ASC
 """
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=2,
-        max_overflow=0,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        # Cap on-demand API reads so a slow plan cannot pin shared RDS for hours.
-        connect_args={"options": "-c statement_timeout=60000"},
-    )
-
-
-def _ensure_duckdb_spatial() -> None:
-    duckdb.sql("INSTALL spatial")
-    duckdb.sql("LOAD spatial")
 
 
 def polygon_to_geojson(coords_lonlat: list[list[float]]) -> dict:
@@ -157,7 +132,6 @@ def attach_polygon_names(
     work["_lon"] = lon
     work["_lat"] = lat
 
-    _ensure_duckdb_spatial()
     df_poly = pd.DataFrame([
         {
             "anchorage_name": area["name"],
@@ -167,10 +141,7 @@ def attach_polygon_names(
         for area in areas
     ])
 
-    duckdb.register("dark_vessels", work)
-    duckdb.register("anchorage_polys", df_poly)
-
-    located = duckdb.sql(
+    located = spatial_df(
         """
         WITH hits AS (
             SELECT
@@ -203,8 +174,9 @@ def attach_polygon_names(
             COALESCE(p.in_excl_polygon, FALSE) AS in_excl_polygon
         FROM dark_vessels v
         LEFT JOIN picked p ON p.mmsi = v.mmsi
-        """
-    ).df()
+        """,
+        {"dark_vessels": work, "anchorage_polys": df_poly},
+    )
 
     return located
 
@@ -281,6 +253,8 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
 def detect_dark_vessels(
     engine: Engine | None = None,
     include_coverage_exit: bool = True,
+    *,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """
     Return suspected dark vessels from slow-move activities.
@@ -294,10 +268,12 @@ def detect_dark_vessels(
     if not include_coverage_exit and not df.empty:
         df = df[df["dark_reason"] != "possible_coverage_exit"].reset_index(drop=True)
 
-    df = attach_polygon_names(df)
+    if not summary_only:
+        df = attach_polygon_names(df)
     df = attach_sanctions(df, engine)
-    extra = ["tscurrent"] if "tscurrent" in df.columns else []
-    df = sort_listed_first(df, extra_sort=extra)
+    if not summary_only:
+        extra = ["tscurrent"] if "tscurrent" in df.columns else []
+        df = sort_listed_first(df, extra_sort=extra)
 
     by_reason: dict[str, int] = {}
     by_confidence: dict[str, int] = {}
@@ -319,7 +295,7 @@ def detect_dark_vessels(
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "include_coverage_exit": include_coverage_exit,
         "rule_version": "v1.2-slowmove-dark-polygon-ofac-label",
-        "vessels": df,
-        "vessels_payload": vessels_to_payload(df),
+        "vessels": df if not summary_only else df.iloc[0:0],
+        "vessels_payload": [] if summary_only else vessels_to_payload(df),
         "sql": DARK_VESSEL_SQL,
     }

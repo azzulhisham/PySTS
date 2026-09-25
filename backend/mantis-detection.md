@@ -6,7 +6,7 @@ Update this file whenever a constant or formula in the three pipeline scripts (o
 
 Work still open vs done: [`todo.md`](todo.md). Keep both files in step — if you finish an ingest, join key, or label, mark `todo.md` **and** record the current behaviour here.
 
-**Last verified against code:** 2026-08-18
+**Last verified against code:** 2026-09-24
 
 | MANTIS job | Pipeline | Writes | API |
 | --- | --- | --- | --- |
@@ -14,6 +14,7 @@ Work still open vs done: [`todo.md`](todo.md). Keep both files in step — if yo
 | Dark vessels | `backend/vesselslowspeeddetection.py` | `ais_vesselslowmoveactivities` | `restapi/dark_vessels.py` |
 | Illegal anchoring | `backend/vesselstrajectorydetection.py` | `ais_vesselmovementactivities` | `restapi/illegal_anchoring.py` |
 | Position anomalies (Phase 1) | *(none yet — live ClickHouse scan)* | — | `restapi/spoofing.py` |
+| Loitering | `backend/vesselloiteringdetection.py` | `ais_vesselloiteractivity` | `restapi/loitering.py` |
 | Identity conflict | *(none — live Postgres scan)* | — | `restapi/identity_conflict.py` |
 
 Identity ingest (not a detector): `backend/ofac_sdn_ingest.py` (SDN) and `backend/ofac_cons_ingest.py` (non-SDN). See [Identity enrichment](#identity-enrichment-not-a-fourth-detector).
@@ -381,6 +382,35 @@ tanker = count of members with 80 <= shipType < 90
 
 ---
 
+## 3b. Loitering — `vesselloiteringdetection.py`
+
+**File:** `backend/vesselloiteringdetection.py`  
+**Table:** `public.ais_vesselloiteractivity`  
+**API:** `GET /mantis/loitering` (Postgres only; does not scan ClickHouse)
+
+Track source is ClickHouse `pnav.ais_position`, cargo/tanker MMSIs from latest `ais_static` (ship type 70–89), one sample per MMSI per 5 minutes over the last **2 hours**. Loop default **15 minutes** (`loiter_loop_seconds`).
+
+A vessel is loitering when, over that window:
+
+| Factor | Value |
+| --- | --- |
+| Span | first sample to last ≥ **2 hours** |
+| Samples | ≥ **8** |
+| Radius from centre | **> 100 m** and ≤ **6 NM** (11,112 m) |
+| Net progress | < **0.5 NM** and < **20%** of path length |
+
+The 6 NM cap is the storage ceiling so both anchor swing and a wider wander are kept. The API narrows them. Tighter than 100 m stays a stop (trajectory job). One open row per MMSI (`tsout IS NULL`). The row closes when the ship leaves the pattern, or when the centre moves more than **2 NM**.
+
+| Flag | Rule |
+| --- | --- |
+| `outside_anchorage` | Centre is not inside a parent anchorage (`restapi/polygons.py`; Excl holes ignored) |
+| `near_restricted` | Distance from centre to the restricted-limit ring ≤ **5 NM** (0 if inside) |
+| `before_sts` | An STS observation for this MMSI has `first_detected_at` between loiter start and **6 hours** after loiter end, and the STS centroid is within **5 NM** of the loiter centre |
+
+With no `pattern`, the API returns open rows where at least one flag is true. `pattern=loitering` keeps a long track in a wide circle: path ≥ **2 NM**, net ≤ **0.5 NM**, net/path ≤ **0.10**, radius ≥ **max(length, 300 m)** and ≤ **6 NM**. `pattern=anchorSwing` keeps a short track in a hull-sized circle: radius **100 m** to **max(length, 300 m)**, path ≤ **1 NM**, net/path ≤ **0.20**. A pattern does not apply the flag filter unless `outsideAnchorage`, `nearRestricted`, or `beforeSts` is also set. `minPathM`, `maxPathM`, `maxNetM`, `maxNetOverPath`, `minRadiusM`, and `maxRadiusM` override the preset. An explicit radius replaces the hull-relative cut.
+
+---
+
 ## 4. Position anomalies (spoofing) — API Phase 1
 
 **File:** `restapi/spoofing.py`  
@@ -600,6 +630,8 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 | Date | Note |
 | --- | --- |
+| 2026-09-24 | Loitering storage ceiling widened. `MAX_RADIUS_M` is **6 NM** (11,112 m); `detection_version` **1.1-loiter-circle-6nm**. Net still &lt; **0.5 NM** and net/path still &lt; **0.20**. ClickHouse read unchanged (2 h, 5-minute samples, cargo/tanker 70–89). API `GET /mantis/loitering`: no `pattern` still returns open rows with a flag. `pattern=loitering` keeps path ≥ **2 NM**, net ≤ **0.5 NM**, net/path ≤ **0.10**, radius ≥ **max(length, 300 m)** and ≤ **6 NM**. `pattern=anchorSwing` keeps radius **100 m** to **max(length, 300 m)**, path ≤ **1 NM**, net/path ≤ **0.20**. `minPathM`, `maxPathM`, `maxNetM`, `maxNetOverPath`, `minRadiusM`, `maxRadiusM` override the preset. Response adds `netOverPath` and `filters`. |
+| 2026-09-23 | New loitering job `backend/vesselloiteringdetection.py` → `ais_vesselloiteractivity`, API `GET /mantis/loitering` (Postgres read only). Circle test: span ≥ 2 h, ≥ 8 samples, radius &gt; 100 m and ≤ 1 NM, net &lt; 0.5 NM and &lt; 20% of path. Flags `outside_anchorage`, `near_restricted` (5 NM), `before_sts` (6 h, 5 NM). One open row per MMSI. Loop 15 minutes. |
 | 2026-09-09 | `vesselstrajectorydetection.py` performance (same detection rules): TXN1 in-memory open-activity map; TXN2 only open rows whose MMSI has `sog > 0.5` in the current AIS batch (no per-row `duckdb.register`). Trajectory update semantics unchanged (no skip on `ts <= tscurrent`). Cycle summary logs added. |
 | 2026-08-18 | `vesselslowspeeddetection.py` performance (same detection rules): TXN1 uses in-memory open-activity map + skips fixes with `ts <= tscurrent`; TXN2 only processes open rows whose MMSI has `sog > 3` in the current AIS batch (no per-row `duckdb.register`). Cycle logs summarize seen/skipped/updated counts. |
 | 2026-08-18 | Phase 1 `GET /mantis/spoofing` (Swagger alias `/mantis/position-anomaly`): ClickHouse teleport scan on consecutive AIS fixes; cargo/tanker 70–89; dedupe one row per MMSI per UTC day; OFAC labels. |

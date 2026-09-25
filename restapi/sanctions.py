@@ -9,13 +9,16 @@ Name matching is not used. Unmatched vessels are kept.
 from __future__ import annotations
 
 import logging
+import os
 import re
+import threading
+import time
 from typing import Any
-from urllib.parse import quote
-
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from pg_engine import get_pg_engine
 
 logger = logging.getLogger(__name__)
 
@@ -35,12 +38,6 @@ SWAGGER_SAMPLE_MESSAGE = (
     "Swagger UI returns 20 sample rows so the page does not lag. "
     "Call this endpoint outside Swagger (curl, frontend, MCP) for the full list, "
     "or pass imo / mmsi to look up a vessel."
-)
-
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 )
 
 OFAC_VESSEL_TABLES = (
@@ -138,7 +135,13 @@ def _load_view(engine: Engine, view_name: str) -> pd.DataFrame:
     return df
 
 
-def load_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+_ofac_index_cache: tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]] | None = None
+_ofac_index_cache_at: float = 0.0
+_ofac_index_cache_lock = threading.Lock()
+OFAC_INDEX_CACHE_TTL_S = int(os.environ.get("mantis_ofac_cache_ttl_s", "300"))
+
+
+def _build_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """SDN overwrites CONS on the same IMO/MMSI so SDN wins."""
     frames = [
         _load_view(engine, "ofac_cons_vessel"),
@@ -162,6 +165,22 @@ def load_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[s
             if mmsi_key:
                 by_mmsi[mmsi_key] = rec
     logger.info("OFAC lookup: %s IMO keys, %s MMSI keys", len(by_imo), len(by_mmsi))
+    return by_imo, by_mmsi
+
+
+def load_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
+    """In-process cache so STS/dark/etc. do not re-scan OFAC views on every attach call."""
+    global _ofac_index_cache, _ofac_index_cache_at
+    now = time.monotonic()
+    with _ofac_index_cache_lock:
+        if _ofac_index_cache is not None and (now - _ofac_index_cache_at) < OFAC_INDEX_CACHE_TTL_S:
+            return _ofac_index_cache
+
+    by_imo, by_mmsi = _build_ofac_indexes(engine)
+
+    with _ofac_index_cache_lock:
+        _ofac_index_cache = (by_imo, by_mmsi)
+        _ofac_index_cache_at = now
     return by_imo, by_mmsi
 
 
@@ -292,15 +311,6 @@ def payload_fields(row: Any, *, imo_col: str = "imo", side: str | None = None) -
         "matchConfidence": str(conf),
         "sanctionsList": slist if match else None,
     }
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-    )
 
 
 def _table_exists(engine: Engine, table_name: str) -> bool:

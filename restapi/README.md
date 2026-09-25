@@ -18,6 +18,7 @@ PySTS/backend/          MANTIS pipeline only:
                           vesselproximitydetection.py
                           vesselslowspeeddetection.py
                           vesselstrajectorydetection.py
+                          vesselloiteringdetection.py
         │
         ▼
 Postgres `pnav`         (ClickHouse for track replay)
@@ -34,6 +35,7 @@ Frontend                separate repo / separate developer
 | Pipeline | `backend/vesselproximitydetection.py` | STS clusters → `ais_vesselproximityobservation` / `member` |
 | Pipeline | `backend/vesselslowspeeddetection.py` | Slow-move / silence → `ais_vesselslowmoveactivities` |
 | Pipeline | `backend/vesselstrajectorydetection.py` | Stops / movement → `ais_vesselmovementactivities` |
+| Pipeline | `backend/vesselloiteringdetection.py` | Loiter circles → `ais_vesselloiteractivity` (own 15-minute loop) |
 | API | `PySTS/restapi/` (here) | Read those tables, apply polygon / Excl rules, attach OFAC labels and AIS size, return JSON |
 | MCP | `PySTS/mcp/` | Optional tools that **call this API** |
 | Whole-repo map | [`../readme.md`](../readme.md) | What is MANTIS vs what is not |
@@ -42,15 +44,20 @@ Frontend                separate repo / separate developer
 
 **Do not** re-implement the AIS pipeline here. If STS / dark / illegal-anchoring look stale, fix the three pipeline scripts.
 
+**Postgres (API reads, shared RDS):** One `get_pg_engine()` pool **per Gunicorn worker** (not per HTTP request). Default **1 connection × workers** (`mantis_pg_pool_size`, `gunicorn_workers`). Session limits: `statement_timeout` 60s, `lock_timeout` 15s (fail fast instead of queuing behind locks), `idle_in_transaction_session_timeout` 60s, `default_transaction_read_only=on`. OFAC label indexes are cached in-process (`mantis_ofac_cache_ttl_s`, default 300s). No writes from this API. Polygon geometry uses in-memory `duckdb_spatial.py` only.
+
 **Not MANTIS** (do not treat as this product): `st_app/` (analysis Streamlit), `backend/polygons.py`, `backend/vesselzone.py` (imports `backend/polygons.py`). Those serve other purposes. The MANTIS API catalogue is only `restapi/polygons.py`.
 
 ## Features
 
+- `GET /mantis/overview` — **dashboard summary only** (Dark Vessels, STS, Illegal Anchoring, Spoofing counts). Postgres modules and spoofing (ClickHouse) run **in parallel**; spoofing scan is limited to cargo/tanker MMSIs. Responses are cached in-process (`mantis_overview_cache_ttl_s`, default **120s**). Use instead of fan-out on the overview page.
 - `GET /mantis/polygons` — all named polygons + restricted limit
 - `GET /mantis/sts-activities` — STS proximity pairs inside parent polygons (Excl holes excluded; OFAC labels on each vessel)
 - `GET /mantis/illegal-anchoring` — heuristic illegal-anchoring candidates (v3; OFAC labels)
+- `GET /mantis/loitering` — open loiter events from Postgres (`ais_vesselloiteractivity`). Written by `backend/vesselloiteringdetection.py` from ClickHouse tracks. Flags: outside anchorage, near restricted limit, just before an STS.
 - `GET /mantis/identity-conflict` — re-flag / dual-MMSI identity groups (AIS timestamp; OFAC labels)
 - `GET /mantis/spoofing` — position anomalies Phase 1: teleport (cargo/tanker; dedupe per MMSI/day). Swagger alias: `/mantis/position-anomaly`
+- `GET /mantis/spoofing/vessel-analysis` — per-vessel drill-down (all hits, no daily dedupe; `flagName` from `ais_flagname`; track + implied vs SOG series)
 - `GET /mantis/sanctions` — OFAC vessel list (search by `imo` or `mmsi`; full list otherwise)
 - `GET /mantis/vessel-timeline` — derived activity/events for one vessel
 - `GET /mantis/vessel-track` — AIS position track for map replay (NDJSON stream; max 3 days)
@@ -67,6 +74,7 @@ restapi/
 ├── polygons.py             # Named polygons, Excl holes, Restricted Limit
 ├── sts_detection.py        # STS proximity inside parent polygons
 ├── illegal_anchoring.py    # Illegal-anchoring detection (v3, Excl holes excluded)
+├── loitering.py            # Open loiter events (reads ais_vesselloiteractivity)
 ├── dark_vessels.py         # Dark / AIS-off detection (polygon label only)
 ├── identity_conflict.py    # Re-flag / dual-MMSI identity groups (AIS timestamp)
 ├── sanctions.py            # OFAC identity labels (IMO / MMSI join; not a detector)
@@ -116,6 +124,11 @@ The API listens on `http://0.0.0.0:8080` by default.
 | `gunicorn_workers` | `2` | Number of worker processes |
 | `gunicorn_timeout` | `120` | Worker timeout (seconds) |
 | `gunicorn_loglevel` | `info` | Log level |
+| `mantis_pg_pool_size` | `1` | Postgres pool size **per worker** (use `2` for threaded Flask dev) |
+| `mantis_pg_statement_timeout_ms` | `60000` | Cancel long SELECTs |
+| `mantis_pg_lock_timeout_ms` | `15000` | Do not wait indefinitely on row locks |
+| `mantis_ofac_cache_ttl_s` | `300` | Reuse OFAC IMO/MMSI indexes in-process |
+| `mantis_overview_cache_ttl_s` | `120` | Overview JSON cache per worker (`0` = off) |
 
 Example:
 
@@ -298,6 +311,7 @@ Singapore East Anchorage, Singapore Western OPL and Singapore South Anchorage ar
 | Dark vessels | `dark_vessels.py` (`rule_version` `v1.2-slowmove-dark-polygon-ofac-label`) | **Never drop** because of a polygon | `polygonName` (Excl preferred if in a hole); `inExclPolygon` |
 | Identity conflict | `identity_conflict.py` (`rule_version` `v1.0-identity-conflict-ais-ts-ofac`) | Same-hull groups of 2+ MMSIs; optional `maxDistanceM` | none (not a location detector) |
 | Position anomalies (spoofing) | `spoofing.py` (`rule_version` `v1.0-teleport-cargo-tanker-daily-dedupe-ofac`) | Phase 1 teleport; cargo/tanker 70–89; dedupe 1/MMSI/UTC day; live ClickHouse | none. Future phases: [`backend/todo.md`](../backend/todo.md#position-anomalies--get-mantisspoofing-phase-1-done) |
+| Loitering | `loitering.py` reads rows written by `backend/vesselloiteringdetection.py` (`detection_version` `1.1-loiter-circle-6nm`) | Cargo/tanker 70–89 inside a circle of 100 m to 6 NM for ≥ 2 h, net under 0.5 NM and under 20% of path. API default is still the three flags. `pattern=loitering` or `pattern=anchorSwing` narrows path, net, and radius | `anchorageName` (parent only); `outsideAnchorage`, `nearRestricted`, `beforeSts`; `pathM`, `netM`, `radiusM`, `netOverPath` |
 
 OFAC identity (STS / dark / illegal-anchoring / identity-conflict): `imo`, `sanctionsMatch`, `matchConfidence` (`confirmed` \| `possible` \| `none`), `sanctionsList`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
 
@@ -444,6 +458,7 @@ curl "http://localhost:8080/mantis/sanctions?imo=9187631" \
 | `GET` | `/mantis/polygons` | Bearer | All named polygons + Restricted Limit |
 | `GET` | `/mantis/sts-activities` | Bearer | STS pairs inside parent polygons (Excl excluded); OFAC labels |
 | `GET` | `/mantis/illegal-anchoring` | Bearer | Illegal-anchoring candidates (v3); OFAC labels |
+| `GET` | `/mantis/loitering` | Bearer | Open loiter events (`ais_vesselloiteractivity`); flags outside anchorage / near restricted / before STS |
 | `GET` | `/mantis/darkvessels` | Bearer | Dark / AIS-off candidates (polygon + OFAC label only) |
 | `GET` | `/mantis/identity-conflict` | Bearer | Re-flag / dual-MMSI identity groups (AIS time; OFAC labels) |
 | `GET` | `/mantis/spoofing` | Bearer | Position anomalies Phase 1 (teleport; cargo/tanker 70–89; dedupe per MMSI/day; optional `from`/`to`, max 3 days) |
@@ -530,6 +545,63 @@ curl http://localhost:8080/mantis/illegal-anchoring \
 ```
 
 Each vessel also has OFAC fields (`imo`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`), AIS size (`toBow`, …), and **`lastSeenAt`** (same as `tsCurrent` — last AIS fix on the movement activity). Keep/drop above is unchanged. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+
+### Loitering (v1 circle)
+
+`GET /mantis/loitering` does **not** scan AIS. It reads open rows from `ais_vesselloiteractivity`. Those rows are written by `backend/vesselloiteringdetection.py`, which loops on its own every **15 minutes** (`loiter_loop_seconds`, default `900`). No systemd timer is required for that cycle.
+
+Rule version on the API is `v1.1-loiter-circle-6nm`. The pipeline stamps `detection_version` `1.1-loiter-circle-6nm`. Rows already stored keep the version they were written with until the next update.
+
+**Who is scanned**
+
+- Latest `ais_static` row per MMSI, `mmsi > 0`, AIS `shipType` **70–89** (cargo / container / tanker).
+- Track comes from ClickHouse `pnav.ais_position` for the last **2 hours**.
+- Positions with latitude outside −90…90, longitude outside −180…180, latitude `91`, or longitude `181` are dropped.
+- Remaining fixes are collapsed to **one point per MMSI per 5-minute bucket** (the latest fix in that bucket).
+
+**A vessel is a loiter only when every cut below is true.** The centre is the mean latitude/longitude of those 5-minute points. Radius is the farthest point from that centre. Path is the sum of steps between consecutive points. Net is the straight-line distance from the first point to the last.
+
+| Cut | Value | Meaning |
+| --- | --- | --- |
+| Time span | ≥ 2 hours | `ended_at − started_at` |
+| Samples | ≥ 8 | Count of 5-minute points in the 2-hour window |
+| Radius | > 100 m and ≤ 6 NM (11,112 m) | Storage ceiling. The API narrows this for loitering vs anchor swing |
+| Net displacement | < 0.5 NM (926 m) | First fix to last fix. A passage fails this |
+| Net vs path | net < 20% of path, or path is 0 | The track wanders inside the circle instead of transiting |
+
+**Flags (labels, not extra geometry drops).** Excl holes are not tested. A centre inside a parent counts as inside that anchorage even if it is also inside an Excl hole.
+
+| Flag | Set when |
+| --- | --- |
+| `outsideAnchorage` | Centre is **not** inside any parent polygon in `anchorage_areas`. `anchorageName` is the parent name when it is inside one |
+| `nearRestricted` | Centre is inside the Restricted Limit polygon, or within **5 NM** (9,260 m) of its boundary. Distance `0` means inside. Stored as `restrictedDistanceM` |
+| `beforeSts` | An STS observation for this MMSI starts during the loiter or within **6 hours** after `ended_at`, and the STS centroid is within **5 NM** of the loiter centre. The closest such observation is kept (`stsObservationId`). The job looks at loiters that ended in the last 6 hours and STS rows from the last 12 hours |
+
+**How a row stays open**
+
+- At most one open row per MMSI (`tsout` is null).
+- Same MMSI still loitering, and the new centre is within **2 NM** of the open centre: update that row (times, circle, flags). `beforeSts` is filled on a later pass, not cleared by the circle update.
+- New centre is more than **2 NM** from the open centre: close the old row (`tsout` = now) and insert a new one.
+- MMSI is no longer a loiter this cycle: close its open row.
+
+**What the API returns**
+
+With no query params, only open rows (`tsout` is null) that match:
+
+`outsideAnchorage OR nearRestricted OR beforeSts`
+
+`pattern=loitering` drops that flag requirement and keeps path ≥ 2 NM, net ≤ 0.5 NM, net/path ≤ 0.10, radius ≥ max(ship length, 300 m) and ≤ 6 NM. `pattern=anchorSwing` keeps radius from 100 m to max(ship length, 300 m), path ≤ 1 NM, and net/path ≤ 0.20. Pass `outsideAnchorage`, `nearRestricted`, or `beforeSts` as well to AND those flags on top. `minPathM`, `maxPathM`, `maxNetM`, `maxNetOverPath`, `minRadiusM`, and `maxRadiusM` override the preset. Each event includes `pathM`, `netM`, `radiusM`, `netOverPath`, AIS size, OFAC fields, and `lastSeenAt`. See [OFAC labels](#ofac-labels-identity-not-a-detector).
+
+```bash
+curl "http://localhost:8080/mantis/loitering" \
+  -H "Authorization: Bearer <jwt-token>"
+
+curl "http://localhost:8080/mantis/loitering?pattern=loitering" \
+  -H "Authorization: Bearer <jwt-token>"
+
+curl "http://localhost:8080/mantis/loitering?pattern=anchorSwing" \
+  -H "Authorization: Bearer <jwt-token>"
+```
 
 ### Dark vessels (v1.2 heuristic)
 

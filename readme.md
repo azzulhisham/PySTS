@@ -48,6 +48,7 @@ API contract (polygons, Excl holes, keep/drop/label): **[restapi/README.md](rest
 | `vesselproximitydetection.py` | `ais_vesselproximityobservation`, `ais_vesselproximitymember` | `GET /mantis/sts-activities` |
 | `vesselslowspeeddetection.py` | `ais_vesselslowmoveactivities` | `GET /mantis/darkvessels` |
 | `vesselstrajectorydetection.py` | `ais_vesselmovementactivities` | `GET /mantis/illegal-anchoring` (also enriches STS members with sog/cog) |
+| `vesselloiteringdetection.py` | `ais_vesselloiteractivity` | `GET /mantis/loitering` |
 
 **Detection factors and formulas (living maintenance spec):** [`backend/mantis-detection.md`](backend/mantis-detection.md) — thresholds, ship types, durations, and scoring for all three MANTIS pipeline jobs plus the API filters. Update that file whenever a knob changes.
 

@@ -31,6 +31,7 @@ from sqlalchemy.engine import Engine
 import logging
 import pandas as pd
 
+from ais_static_sql import CURRENT_STATIC_ROW_ORDER
 from vesselproximitydetection import build_identity_map, signature_is_one_vessel
 
 
@@ -130,10 +131,12 @@ def preview_same_vessel_observations(engine: Engine) -> pd.DataFrame:
     if open_obs.empty:
         return open_obs
 
-    identities = build_identity_map(pd.read_sql(text("""
+    identities = build_identity_map(pd.read_sql(text(f"""
         SELECT mmsi, "shipName", callsign, imo, to_bow, to_stern, to_port, to_starboard
         FROM (
-            SELECT *, row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_static
+            SELECT *, row_number() OVER (
+                       PARTITION BY mmsi ORDER BY {CURRENT_STATIC_ROW_ORDER}
+                   ) AS rowcount_static
             FROM public.ais_static
         ) sub
         WHERE rowcount_static = 1

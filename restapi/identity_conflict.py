@@ -15,12 +15,12 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from typing import Any
-from urllib.parse import quote
 
-import duckdb
 import pandas as pd
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
+
+from duckdb_spatial import spatial_fetchone
+from pg_engine import get_pg_engine
 
 from sanctions import (
     CONFIDENCE_RANK,
@@ -28,7 +28,12 @@ from sanctions import (
     payload_fields,
     sort_listed_first,
 )
-from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from vessel_size import (
+    CURRENT_STATIC_ROW_ORDER,
+    DIM_SELECT,
+    class_b_join,
+    dimension_fields,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -39,12 +44,6 @@ SHIP_TYPE_FILTER = "70-89 (cargo/tanker/container Class-A large vessels)"
 MATCH_RULE = (
     "IMO plus name, callsign or dimensions; or name plus callsign or dimensions. "
     "Placeholder / repdigit IMOs and names shorter than 3 characters are ignored."
-)
-
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 )
 
 CANDIDATE_SQL = f"""
@@ -65,7 +64,9 @@ SELECT
     p."navStatus" AS navstatus
 FROM (
     SELECT *,
-           row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_static
+           row_number() OVER (
+               PARTITION BY mmsi ORDER BY {CURRENT_STATIC_ROW_ORDER}
+           ) AS rowcount_static
     FROM public.ais_static
 ) s
 LEFT JOIN public.ais_position p ON p.mmsi = s.mmsi
@@ -92,20 +93,6 @@ class UnionFind:
         px, py = self.find(x), self.find(y)
         if px != py:
             self.parent[px] = py
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-    )
-
-
-def _ensure_duckdb_spatial() -> None:
-    duckdb.sql("INSTALL spatial")
-    duckdb.sql("LOAD spatial")
 
 
 def _clean_optional(value):
@@ -277,9 +264,7 @@ def _max_internal_distance_m(members: pd.DataFrame) -> float | None:
     if len(points) < 2:
         return None
 
-    _ensure_duckdb_spatial()
-    duckdb.register("id_members", points[["mmsi", "longitude", "latitude"]])
-    result = duckdb.sql(
+    result = spatial_fetchone(
         """
         SELECT MAX(
             ST_Distance_Sphere(
@@ -289,8 +274,9 @@ def _max_internal_distance_m(members: pd.DataFrame) -> float | None:
         ) AS max_dist
         FROM id_members a
         INNER JOIN id_members b ON a.mmsi < b.mmsi
-        """
-    ).fetchone()
+        """,
+        {"id_members": points[["mmsi", "longitude", "latitude"]]},
+    )
     if result is None or result[0] is None:
         return None
     return float(result[0])

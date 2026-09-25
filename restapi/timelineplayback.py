@@ -21,24 +21,18 @@ import logging
 import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
-from urllib.parse import quote
-
 import clickhouse_connect
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from pg_engine import get_pg_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-_pswd = os.environ.get("pnav_db_password", "m4r1t1m3")
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(_pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
-
-CLICKHOUSE_HOST = os.environ.get("clickhouse_host", "43.216.85.155")
+CLICKHOUSE_HOST = os.environ.get("clickhouse_host", "56.69.44.39")
 CLICKHOUSE_USER = os.environ.get("clickhouse_user", "default")
-CLICKHOUSE_PASSWORD = os.environ.get("clickhouse_password", "")
+CLICKHOUSE_PASSWORD = os.environ.get("clickhouse_password", "Pinc@200901029426")
 
 MAX_TRACK_RANGE = timedelta(days=3)
 TRACK_CHUNK_MINUTES = 20
@@ -277,15 +271,6 @@ WHERE mmsi = {mmsi}
   {position_filter}
 ORDER BY ts ASC
 """
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-    )
 
 
 def get_clickhouse_client():

@@ -3,8 +3,8 @@ Position anomalies (Phase 1: impossible AIS jumps / teleport).
 
 Scans ClickHouse `ais_position` for consecutive fixes on the same MMSI whose
 implied speed exceeds physical limits. Keeps Class-A cargo/tanker only
-(shipType 70-89 from latest `ais_static`) and dedupes to one row per MMSI
-per UTC day (worst implied speed that day).
+(shipType 70-89 from the current `ais_static` row per MMSI) and dedupes to one
+row per MMSI per UTC day (worst implied speed that day).
 
 Also referred to in product docs as GET /mantis/position-anomaly; the served
 path is GET /mantis/spoofing.
@@ -15,13 +15,12 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import quote
-
 import pandas as pd
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from api_timestamps import format_last_seen_at
+from pg_engine import get_pg_engine  # re-used by spoofing_vessel_analysis
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from timelineplayback import (
     VALID_POSITION_SQL,
@@ -30,7 +29,12 @@ from timelineplayback import (
     parse_datetime,
     resolve_track_range,
 )
-from vessel_size import DIM_SELECT, class_b_join, dimension_fields
+from vessel_size import (
+    CURRENT_STATIC_ROW_ORDER,
+    DIM_SELECT,
+    class_b_join,
+    dimension_fields,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -45,12 +49,6 @@ LONG_JUMP_DIST_M = 20_000
 LONG_JUMP_MIN_KN = 50.0
 HIGH_SPEED_MIN_KN = 80.0
 
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
-
 CARGO_TANKER_STATIC_SQL = f"""
 SELECT
     s.mmsi,
@@ -61,7 +59,9 @@ SELECT
 {DIM_SELECT}
 FROM (
     SELECT *,
-           row_number() OVER (PARTITION BY mmsi ORDER BY ts DESC) AS rowcount_static
+           row_number() OVER (
+               PARTITION BY mmsi ORDER BY {CURRENT_STATIC_ROW_ORDER}
+           ) AS rowcount_static
     FROM public.ais_static
 ) s
 {class_b_join("s.mmsi")}
@@ -117,6 +117,7 @@ FROM (
     WHERE ts >= toDateTime64({{date_from}}, 3)
       AND ts <= toDateTime64({{date_to}}, 3)
       AND mmsi > 0
+      {{mmsi_filter}}
       {VALID_POSITION_SQL.strip()}
     WINDOW w AS (PARTITION BY mmsi ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
 )
@@ -127,29 +128,45 @@ WHERE prev_ts IS NOT NULL
 """
 
 
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-    )
-
-
 def load_cargo_tanker_static(engine: Engine | None = None) -> pd.DataFrame:
     engine = engine or get_pg_engine()
     return pd.read_sql(CARGO_TANKER_STATIC_SQL, con=engine)
+
+
+def _mmsi_in_clause(mmsi_list: list[int] | None) -> str:
+    if not mmsi_list:
+        return ""
+    return "AND mmsi IN (" + ",".join(str(int(m)) for m in mmsi_list) + ")"
 
 
 def load_teleport_hits(
     date_from: datetime,
     date_to: datetime,
     client=None,
+    *,
+    mmsi_list: list[int] | None = None,
 ) -> pd.DataFrame:
+    if mmsi_list is not None and len(mmsi_list) == 0:
+        return pd.DataFrame(
+            columns=[
+                "mmsi",
+                "ts",
+                "prev_ts",
+                "prev_lat",
+                "prev_lon",
+                "latitude",
+                "longitude",
+                "dist_m",
+                "dt_s",
+                "implied_kn",
+                "reason",
+            ]
+        )
     client = client or get_clickhouse_client()
     query = TELEPORT_HIT_SQL.format(
         date_from=f"'{_ch_literal_ts(date_from)}'",
         date_to=f"'{_ch_literal_ts(date_to)}'",
+        mmsi_filter=_mmsi_in_clause(mmsi_list),
     )
     result = client.query(query)
     if not result.result_rows:
@@ -203,6 +220,8 @@ def detect_spoofing(
     date_from: datetime | str | None = None,
     date_to: datetime | str | None = None,
     engine: Engine | None = None,
+    *,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """
     Phase 1 position-anomaly scan: teleport / impossible jumps.
@@ -213,7 +232,8 @@ def detect_spoofing(
     dt_from, dt_to, range_meta = resolve_track_range(date_from, date_to)
 
     static = load_cargo_tanker_static(engine)
-    raw_hits = load_teleport_hits(dt_from, dt_to)
+    cargo_mmsis = static["mmsi"].astype(int).tolist() if not static.empty else []
+    raw_hits = load_teleport_hits(dt_from, dt_to, mmsi_list=cargo_mmsis)
 
     raw_hit_count = int(len(raw_hits))
     if raw_hits.empty or static.empty:
@@ -224,8 +244,9 @@ def detect_spoofing(
     deduped = dedupe_daily(merged)
 
     deduped = attach_sanctions(deduped, engine)
-    extra = ["implied_kn"] if "implied_kn" in deduped.columns else []
-    deduped = sort_listed_first(deduped, extra_sort=extra, extra_ascending=[False])
+    if not summary_only:
+        extra = ["implied_kn"] if "implied_kn" in deduped.columns else []
+        deduped = sort_listed_first(deduped, extra_sort=extra, extra_ascending=[False])
 
     by_reason: dict[str, int] = {}
     sanctions_match_count = 0
@@ -256,7 +277,7 @@ def detect_spoofing(
         "anomaly_count": int(len(deduped)),
         "by_reason": by_reason,
         "sanctions_match_count": sanctions_match_count,
-        "anomalies_payload": anomalies_to_payload(deduped),
+        "anomalies_payload": [] if summary_only else anomalies_to_payload(deduped),
     }
 
 

@@ -1,0 +1,335 @@
+{
+  "dateFrom": "2026-09-18T08:31:22.333696+00:00",
+  "dateTo": "2026-09-21T08:31:22.333696+00:00",
+  "rangeMeta": {
+    "fromOmitted": true,
+    "toOmitted": true,
+    "rangeCapped": false,
+    "maxRangeDays": 3,
+    "chunkMinutes": 20,
+    "requestedDateFrom": null,
+    "requestedDateTo": null
+  },
+  "selectedReason": "Demo pick: implied ~220 kn vs AIS SOG ~8 kn, Singapore Strait, 2 events",
+  "vessel": {
+    "mmsi": 312532000,
+    "mid": 312,
+    "flagName": "Belize",
+    "shipName": "CHUAN HAI",
+    "shipType": 70,
+    "shipTypeDesc": "Cargo all ships of this type",
+    "imo": "8358166",
+    "cargoTankerEligible": true,
+    "toBow": 105.0,
+    "toStern": 25.0,
+    "toPort": 15.0,
+    "toStarboard": 5.0,
+    "lengthM": 130.0,
+    "beamM": 20.0,
+    "sanctionsMatch": false,
+    "matchConfidence": "none",
+    "sanctionsList": null
+  },
+  "summary": {
+    "totalAisPositions": 1762,
+    "eventCount": 2,
+    "maxImpliedSpeedKn": 228.2,
+    "maxDeviationKn": 220.3,
+    "referenceMaxSogKn": 8.6,
+    "byReason": {
+      "high_speed": 2
+    }
+  },
+  "events": [
+    {
+      "eventIndex": 0,
+      "mmsi": 312532000,
+      "reason": "high_speed",
+      "riskLevel": "critical",
+      "assessment": "Unrealistic implied speed between consecutive fixes",
+      "startAt": "2026-09-18T13:21:20.460000+00:00",
+      "endAt": "2026-09-18T13:21:30.204000+00:00",
+      "prevLatitude": 1.332035,
+      "prevLongitude": 104.08108,
+      "latitude": 1.3214166666666667,
+      "longitude": 104.08093666666667,
+      "distanceM": 1174.2,
+      "distanceNm": 0.63,
+      "deltaSeconds": 10,
+      "impliedSpeedKn": 228.2,
+      "aisSogKn": 7.9,
+      "prevAisSogKn": 7.8,
+      "deviationKn": 220.3,
+      "deviationPct": 2789.1
+    },
+    {
+      "eventIndex": 1,
+      "mmsi": 312532000,
+      "reason": "high_speed",
+      "riskLevel": "critical",
+      "assessment": "Unrealistic implied speed between consecutive fixes",
+      "startAt": "2026-09-18T13:21:30.204000+00:00",
+      "endAt": "2026-09-18T13:21:41.187000+00:00",
+      "prevLatitude": 1.3214166666666667,
+      "prevLongitude": 104.08093666666667,
+      "latitude": 1.3324983333333333,
+      "longitude": 104.08051166666667,
+      "distanceM": 1226.2,
+      "distanceNm": 0.66,
+      "deltaSeconds": 11,
+      "impliedSpeedKn": 216.7,
+      "aisSogKn": 7.8,
+      "prevAisSogKn": 7.9,
+      "deviationKn": 208.9,
+      "deviationPct": 2678.0
+    }
+  ],
+  "trackPointCount": 1762,
+  "speedSeriesSample": [
+    {
+      "ts": "2026-09-18T08:34:41.835000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": null
+    },
+    {
+      "ts": "2026-09-18T10:30:51.393000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-18T12:45:16.354000+00:00",
+      "sog": 0.5,
+      "impliedSpeedKn": 0.5
+    },
+    {
+      "ts": "2026-09-18T12:52:15.384000+00:00",
+      "sog": 2.0,
+      "impliedSpeedKn": 1.6
+    },
+    {
+      "ts": "2026-09-18T13:02:08.680000+00:00",
+      "sog": 5.1,
+      "impliedSpeedKn": 5.0
+    },
+    {
+      "ts": "2026-09-18T13:11:58.460000+00:00",
+      "sog": 7.4,
+      "impliedSpeedKn": 5.7
+    },
+    {
+      "ts": "2026-09-18T13:19:00.858000+00:00",
+      "sog": 7.8,
+      "impliedSpeedKn": 7.7
+    },
+    {
+      "ts": "2026-09-18T13:26:20.040000+00:00",
+      "sog": 7.9,
+      "impliedSpeedKn": 8.4
+    },
+    {
+      "ts": "2026-09-18T13:35:12.112000+00:00",
+      "sog": 8.1,
+      "impliedSpeedKn": 8.2
+    },
+    {
+      "ts": "2026-09-18T13:43:32.670000+00:00",
+      "sog": 8.4,
+      "impliedSpeedKn": 8.1
+    },
+    {
+      "ts": "2026-09-18T13:51:54.513000+00:00",
+      "sog": 8.4,
+      "impliedSpeedKn": 8.2
+    },
+    {
+      "ts": "2026-09-18T14:01:34.681000+00:00",
+      "sog": 8.6,
+      "impliedSpeedKn": 8.4
+    },
+    {
+      "ts": "2026-09-18T14:07:35.554000+00:00",
+      "sog": 8.1,
+      "impliedSpeedKn": 8.0
+    },
+    {
+      "ts": "2026-09-18T14:14:56.119000+00:00",
+      "sog": 8.4,
+      "impliedSpeedKn": 8.4
+    },
+    {
+      "ts": "2026-09-18T14:24:23.306000+00:00",
+      "sog": 8.2,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-18T14:32:26.923000+00:00",
+      "sog": 7.1,
+      "impliedSpeedKn": 7.5
+    },
+    {
+      "ts": "2026-09-18T14:42:58.609000+00:00",
+      "sog": 5.3,
+      "impliedSpeedKn": 4.8
+    },
+    {
+      "ts": "2026-09-18T14:51:07.791000+00:00",
+      "sog": 4.0,
+      "impliedSpeedKn": 3.1
+    },
+    {
+      "ts": "2026-09-18T14:58:28.026000+00:00",
+      "sog": 2.5,
+      "impliedSpeedKn": 1.4
+    },
+    {
+      "ts": "2026-09-18T15:07:39.708000+00:00",
+      "sog": 1.7,
+      "impliedSpeedKn": 1.5
+    },
+    {
+      "ts": "2026-09-18T15:14:00.276000+00:00",
+      "sog": 2.0,
+      "impliedSpeedKn": 2.0
+    },
+    {
+      "ts": "2026-09-18T15:18:50.380000+00:00",
+      "sog": 1.1,
+      "impliedSpeedKn": 1.1
+    },
+    {
+      "ts": "2026-09-18T15:27:10.855000+00:00",
+      "sog": 0.5,
+      "impliedSpeedKn": 0.5
+    },
+    {
+      "ts": "2026-09-18T15:38:01.168000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.2
+    },
+    {
+      "ts": "2026-09-18T17:48:35.939000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-18T20:48:42.400000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-18T23:51:53.640000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T02:31:01.089000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T06:21:20.656000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T10:37:27.716000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T13:33:36.069000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T17:31:45.214000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T20:25:49.886000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-19T22:45:54.032000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T02:11:05.366000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T06:32:21.583000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T09:23:30.449000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T12:44:35.268000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T16:02:44.133000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T18:26:48.351000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-20T22:05:55.497000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-21T01:14:07.616000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-21T04:54:19.281000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-21T07:42:30.567000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    },
+    {
+      "ts": "2026-09-21T07:51:49.039000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.1
+    },
+    {
+      "ts": "2026-09-21T07:58:59.299000+00:00",
+      "sog": 2.1,
+      "impliedSpeedKn": 2.2
+    },
+    {
+      "ts": "2026-09-21T08:07:03.530000+00:00",
+      "sog": 1.3,
+      "impliedSpeedKn": 1.0
+    },
+    {
+      "ts": "2026-09-21T08:15:49.386000+00:00",
+      "sog": 0.8,
+      "impliedSpeedKn": 0.9
+    },
+    {
+      "ts": "2026-09-21T08:25:19.950000+00:00",
+      "sog": 0.0,
+      "impliedSpeedKn": 0.0
+    }
+  ]
+}

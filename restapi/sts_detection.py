@@ -14,13 +14,11 @@ from __future__ import annotations
 import json
 import logging
 from typing import Any
-from urllib.parse import quote
-
-import duckdb
 import pandas as pd
-from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
+from duckdb_spatial import spatial_df
+from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
 from sanctions import (
     attach_sanctions,
@@ -35,12 +33,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 MAX_DISTANCE_M = 35.0
 MIN_SUSPICION_SCORE = 4.5
-
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
 
 ACTIVE_HIGH_SCORE_SQL = """
 SELECT
@@ -93,20 +85,6 @@ LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
 {class_b_join("m.mmsi")}
 WHERE m.observation_id = ANY(%(obs_ids)s)
 """
-
-
-def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=5,
-        max_overflow=10,
-        pool_timeout=30,
-    )
-
-
-def _ensure_duckdb_spatial() -> None:
-    duckdb.sql("INSTALL spatial")
-    duckdb.sql("LOAD spatial")
 
 
 def polygon_to_geojson(area: dict) -> dict:
@@ -178,7 +156,6 @@ def filter_observations_in_anchorages(
     if observations.empty:
         return observations.assign(anchorage_name=pd.Series(dtype="object"))
 
-    _ensure_duckdb_spatial()
     df_poly = pd.DataFrame([
         {
             "anchorage_name": area["name"],
@@ -188,10 +165,7 @@ def filter_observations_in_anchorages(
         for area in areas
     ])
 
-    duckdb.register("observations", observations)
-    duckdb.register("anchorage_polys", df_poly)
-
-    out = duckdb.sql(
+    out = spatial_df(
         """
         WITH hits AS (
             SELECT
@@ -215,8 +189,9 @@ def filter_observations_in_anchorages(
         LEFT JOIN excl_ids e ON e.observation_id = h.observation_id
         WHERE e.observation_id IS NULL
           AND NOT h.is_excl
-        """
-    ).df()
+        """,
+        {"observations": observations, "anchorage_polys": df_poly},
+    )
 
     if out.empty:
         return observations.iloc[0:0].assign(anchorage_name=pd.Series(dtype="object"))
@@ -246,8 +221,6 @@ def find_pairs_within_observations(
     if observations.empty or members.empty or len(members) < 2:
         return pd.DataFrame(columns=empty_cols)
 
-    _ensure_duckdb_spatial()
-
     obs_cols = observations[
         [
             "observation_id",
@@ -266,8 +239,7 @@ def find_pairs_within_observations(
         "curlatitude": "lat",
     })
 
-    duckdb.register("members_for_pairs", mem)
-    raw_pairs = duckdb.sql(
+    raw_pairs = spatial_df(
         f"""
         SELECT
             a.observation_id AS observation_id,
@@ -313,8 +285,9 @@ def find_pairs_within_observations(
                 ST_Point(a.lon, a.lat),
                 ST_Point(b.lon, b.lat)
               ) < {max_distance_m}
-        """
-    ).df()
+        """,
+        {"members_for_pairs": mem},
+    )
 
     if raw_pairs.empty:
         return pd.DataFrame(columns=empty_cols)
@@ -435,6 +408,8 @@ def detect_sts_in_anchorages(
     engine: Engine | None = None,
     min_suspicion_score: float = MIN_SUSPICION_SCORE,
     max_distance_m: float = MAX_DISTANCE_M,
+    *,
+    summary_only: bool = False,
 ) -> dict[str, Any]:
     """
     Active high-suspicion proximity clusters inside anchorage polygons.
@@ -449,17 +424,19 @@ def detect_sts_in_anchorages(
     members = load_members(obs_ids, engine)
     pairs = find_pairs_within_observations(in_anchorage, members, max_distance_m)
     pairs = attach_sanctions_pair_sides(pairs, engine)
-    extra_pair = [c for c in ("suspicion_score", "distance_m") if c in pairs.columns]
-    extra_asc = [False, True][: len(extra_pair)]
-    pairs = sort_listed_first(pairs, extra_sort=extra_pair, extra_ascending=extra_asc)
+    if not summary_only:
+        extra_pair = [c for c in ("suspicion_score", "distance_m") if c in pairs.columns]
+        extra_asc = [False, True][: len(extra_pair)]
+        pairs = sort_listed_first(pairs, extra_sort=extra_pair, extra_ascending=extra_asc)
 
     paired_vessels = paired_vessels_only(pairs, members)
     paired_vessels = attach_sanctions(paired_vessels, engine)
-    extra_v = ["suspicion_score"] if "suspicion_score" in paired_vessels.columns else []
-    extra_v_asc = [False] if extra_v else []
-    paired_vessels = sort_listed_first(
-        paired_vessels, extra_sort=extra_v, extra_ascending=extra_v_asc
-    )
+    if not summary_only:
+        extra_v = ["suspicion_score"] if "suspicion_score" in paired_vessels.columns else []
+        extra_v_asc = [False] if extra_v else []
+        paired_vessels = sort_listed_first(
+            paired_vessels, extra_sort=extra_v, extra_ascending=extra_v_asc
+        )
 
     sanctions_match_pair_count = int(pairs["sanctions_match"].sum()) if not pairs.empty else 0
     sanctions_match_vessel_count = (
@@ -475,15 +452,15 @@ def detect_sts_in_anchorages(
         "sanctions_match_vessel_count": sanctions_match_vessel_count,
         "max_distance_m": float(max_distance_m),
         "min_suspicion_score": float(min_suspicion_score),
-        "observations": in_anchorage,
+        "observations": in_anchorage if not summary_only else in_anchorage.iloc[0:0],
         "pairs": pairs,
         "paired_vessels": paired_vessels,
-        "pairs_payload": pairs_to_payload(pairs),
-        "paired_vessels_payload": vessels_to_payload(paired_vessels),
+        "pairs_payload": [] if summary_only else pairs_to_payload(pairs),
+        "paired_vessels_payload": [] if summary_only else vessels_to_payload(paired_vessels),
         # Back-compat keys
         "candidate_count": int(len(observations)),
         "in_anchorage_count": int(len(paired_vessels)),
-        "vessels_in_anchorage": paired_vessels,
+        "vessels_in_anchorage": paired_vessels if not summary_only else paired_vessels.iloc[0:0],
     }
 
 
