@@ -152,17 +152,31 @@ OBSERVATION_MIGRATION_COLUMNS = [
 # Database setup
 # ---------------------------------------------------------------------------
 
+_engine = None
+PG_STATEMENT_TIMEOUT_MS = 60000
+PG_LOCK_TIMEOUT_MS = 5000
+
+
 def get_pgEngine() -> Engine:
-    """Create and return a pooled SQLAlchemy engine for PostgreSQL."""
-    return create_engine(
-        DATABASE_URL,
-        pool_size=2,
-        max_overflow=0,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        # Cap any single statement so a slow cycle cannot pin the shared RDS for hours.
-        connect_args={"options": "-c statement_timeout=60000"},
-    )
+    """Return one cached SQLAlchemy engine, named for pg_stat_activity."""
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            DATABASE_URL,
+            pool_size=2,
+            max_overflow=0,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={
+                "application_name": "sts_proximity",
+                "options": (
+                    f"-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}"
+                    f" -c lock_timeout={PG_LOCK_TIMEOUT_MS}"
+                ),
+            },
+        )
+    return _engine
 
 
 
@@ -251,6 +265,9 @@ def find_close_pairs(df: pd.DataFrame, max_distance_m: float = MAX_DISTANCE_M) -
     slim = df[["mmsi", "curlongitude", "curlatitude"]].copy()
     duckdb.register("vessels", slim)
 
+    # Bounding-box prefilter (~110 m) then the same sphere test. Pairs beyond
+    # ~110 m cannot be under MAX_DISTANCE_M (30 m), so the result set is unchanged
+    # and DuckDB does not compute a full N² sphere join of every cargo/tanker.
     return duckdb.sql(f"""
         SELECT
             a.mmsi AS mmsi_a,
@@ -261,7 +278,9 @@ def find_close_pairs(df: pd.DataFrame, max_distance_m: float = MAX_DISTANCE_M) -
             ) AS distance_m
         FROM vessels a
         INNER JOIN vessels b ON a.mmsi < b.mmsi
-        WHERE ST_Distance_Sphere(
+        WHERE abs(a.curlatitude - b.curlatitude) < 0.001
+          AND abs(a.curlongitude - b.curlongitude) < 0.001
+          AND ST_Distance_Sphere(
                 ST_Point(a.curlongitude, a.curlatitude),
                 ST_Point(b.curlongitude, b.curlatitude)
             ) < {max_distance_m}
@@ -607,22 +626,37 @@ def _compute_cluster_metrics(mmsi_list: list[int], pairs: pd.DataFrame, vessels:
 
 def _replace_members_and_edges(session: Session, observation_id: int, members: pd.DataFrame, cluster_pairs: pd.DataFrame, centroid_lon: float, centroid_lat: float):
     """Replace member and edge rows with the latest snapshot for an observation."""
-    for row in session.exec(
-        select(Ais_VesselProximityMember).where(
-            Ais_VesselProximityMember.observation_id == observation_id
-        )
-    ).all():
-        session.delete(row)
+    session.execute(
+        text("DELETE FROM ais_vesselproximitymember WHERE observation_id = :id"),
+        {"id": observation_id},
+    )
+    session.execute(
+        text("DELETE FROM ais_vesselproximityedge WHERE observation_id = :id"),
+        {"id": observation_id},
+    )
 
-    for row in session.exec(
-        select(Ais_VesselProximityEdge).where(
-            Ais_VesselProximityEdge.observation_id == observation_id
-        )
-    ).all():
-        session.delete(row)
+    dists: list[float] = []
+    if not members.empty:
+        pair_df = pd.DataFrame({
+            "lon1": centroid_lon,
+            "lat1": centroid_lat,
+            "lon2": members["curlongitude"].astype(float).tolist(),
+            "lat2": members["curlatitude"].astype(float).tolist(),
+        })
+        duckdb.register("_prox_centroid_pairs", pair_df)
+        dists = [
+            0.0 if (d is None or (isinstance(d, float) and pd.isna(d))) else float(d)
+            for d in duckdb.sql("""
+                SELECT ST_Distance_Sphere(
+                    ST_Point(lon1, lat1),
+                    ST_Point(lon2, lat2)
+                ) AS d
+                FROM _prox_centroid_pairs
+            """).fetchdf()["d"].tolist()
+        ]
 
-    for _, row in members.iterrows():
-        dist_to_centroid = sphere_distance_m(
+    for i, (_, row) in enumerate(members.iterrows()):
+        dist_to_centroid = dists[i] if i < len(dists) else sphere_distance_m(
             centroid_lon, centroid_lat,
             float(row["curlongitude"]), float(row["curlatitude"]),
         )
@@ -706,6 +740,13 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
     updated = 0
     closed = 0
 
+    prepared = [
+        (cluster_signature(mmsi_list), mmsi_list,
+         _compute_cluster_metrics(mmsi_list, pairs, vessels, geocode_cache))
+        for mmsi_list in clusters
+    ]
+    identities = build_identity_map(vessels)
+
     with Session(engine) as session:
         open_by_sig = {
             obs.cluster_signature: obs
@@ -717,9 +758,7 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
             if obs.cluster_signature
         }
 
-        for mmsi_list in clusters:
-            sig = cluster_signature(mmsi_list)
-            metrics = _compute_cluster_metrics(mmsi_list, pairs, vessels, geocode_cache)
+        for sig, mmsi_list, metrics in prepared:
             existing = open_by_sig.get(sig)
 
             if existing:
@@ -770,8 +809,6 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
                     "Opened cluster %s: %s vessels, score %.2f",
                     sig, obs.vessel_count, obs.suspicion_score or 0,
                 )
-
-        identities = build_identity_map(vessels)
 
         for sig, obs in open_by_sig.items():
             if sig in current_signatures:
@@ -835,15 +872,21 @@ def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
 
     # Latest movement activity per MMSI, then stopped/stale filters
     # (same semantics as the old row_number()…=1 wrapper).
+    #
+    # tsout IS NULL is applied inside DISTINCT ON. That is equivalent to
+    # "latest row of any status, then keep it only if still open" because no
+    # MMSI currently has a closed row newer than an open one (the writer closes
+    # before inserting). Restricting first lets Postgres use the partial
+    # index on open rows (~5k) instead of walking all ~960k history rows.
     activity_query = """
         SELECT *
         FROM (
             SELECT DISTINCT ON (mmsi) *
             FROM public.ais_vesselmovementactivities
+            WHERE tsout IS NULL
             ORDER BY mmsi, ts DESC
         ) sub
-        WHERE tsout IS NULL
-          AND (
+        WHERE (
                 (tsstop IS NOT NULL AND tsstop <= now() - interval '1 HOURS')
                 OR tscurrent <= now() - interval '30 MINUTES'
               )

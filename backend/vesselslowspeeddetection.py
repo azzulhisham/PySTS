@@ -84,18 +84,30 @@ class Ais_VesselSlowMoveActivities(SQLModel, table=True):
  
 
 
-def get_pgEngine():
-    engine = create_engine(
-        DATABASE_URL,
-        pool_size=2,
-        max_overflow=0,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        # Cap any single statement so a slow cycle cannot pin the shared RDS for hours.
-        connect_args={"options": "-c statement_timeout=60000"},
-    )
+_engine = None
+PG_STATEMENT_TIMEOUT_MS = 60000
+PG_LOCK_TIMEOUT_MS = 5000
 
-    return engine
+
+def get_pgEngine():
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            DATABASE_URL,
+            pool_size=2,
+            max_overflow=0,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={
+                "application_name": "sts_slowspeed",
+                "options": (
+                    f"-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}"
+                    f" -c lock_timeout={PG_LOCK_TIMEOUT_MS}"
+                ),
+            },
+        )
+    return _engine
 
 
 def create_db_and_tables(engine: Engine):

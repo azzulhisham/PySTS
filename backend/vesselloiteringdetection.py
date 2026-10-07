@@ -91,15 +91,30 @@ class Ais_VesselLoiterActivity(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
+_engine = None
+PG_STATEMENT_TIMEOUT_MS = 120000
+PG_LOCK_TIMEOUT_MS = 5000
+
+
 def get_pg_engine() -> Engine:
-    return create_engine(
-        DATABASE_URL,
-        pool_size=1,
-        max_overflow=0,
-        pool_timeout=30,
-        pool_pre_ping=True,
-        connect_args={"options": "-c statement_timeout=120000"},
-    )
+    global _engine
+    if _engine is None:
+        _engine = create_engine(
+            DATABASE_URL,
+            pool_size=1,
+            max_overflow=0,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={
+                "application_name": "sts_loiter",
+                "options": (
+                    f"-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}"
+                    f" -c lock_timeout={PG_LOCK_TIMEOUT_MS}"
+                ),
+            },
+        )
+    return _engine
 
 
 def get_clickhouse_client():
