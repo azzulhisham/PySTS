@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 from sqlmodel import Field, SQLModel, create_engine, Session, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy import and_, or_, desc, text
+from sqlalchemy import and_, or_, desc, text, bindparam
 
 import gc
 import os
@@ -92,17 +92,75 @@ pswd = 'm4r1t1m3'
 encoded_password = quote(pswd)
 DATABASE_URL = f"postgresql://postgresadmin:{encoded_password}@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
 
+COMMIT_BATCH_SIZE = 300
+
+# The stale-record sweep closes zones older than 5 days whose vessel has left the
+# restricted area. Running it every cycle meant a full scan of the whole
+# ais_vesselinrestrictzone table every 30s to find rows that can only change once
+# a day. An hourly sweep is still far more frequent than the 5-day threshold it
+# enforces, so what it detects is unchanged.
+CLEANUP_INTERVAL_MINUTES = 60
+
+# A blocked write fails fast instead of pinning a backend behind a lock holder.
+PG_STATEMENT_TIMEOUT_MS = 60000
+PG_LOCK_TIMEOUT_MS = 5000
+
+_engine = None
+
 
 def get_pgEngine():
-    engine = create_engine(
-        DATABASE_URL, 
-        pool_size=10,
-        max_overflow=20,
-        pool_timeout=30,  # seconds    
-        # echo=True
-    )  # echo=True for logging SQL
+    # Previously this built a new Engine on every call, so each cycle created
+    # several independent pools of up to 30 connections. One cached engine is
+    # reused instead.
+    global _engine
 
-    return engine
+    if _engine is None:
+        _engine = create_engine(
+            DATABASE_URL,
+            pool_size=2,
+            max_overflow=2,
+            pool_timeout=30,
+            pool_pre_ping=True,
+            pool_recycle=1800,
+            connect_args={
+                # Named so these connections are attributable in pg_stat_activity
+                # instead of showing up as a blank application_name.
+                "application_name": "sts_vesselzone_b",
+                "options": (
+                    f"-c statement_timeout={PG_STATEMENT_TIMEOUT_MS}"
+                    f" -c lock_timeout={PG_LOCK_TIMEOUT_MS}"
+                ),
+            },
+        )
+
+    return _engine
+
+
+def _chunks(rows, size):
+    for start in range(0, len(rows), size):
+        yield rows[start : start + size]
+
+
+def _write_batches(items_to_update, items_to_insert):
+    """Write the decided changes in short, self-contained transactions.
+
+    The zone decisions are made in pure Python first and only then written. The
+    previous shape kept one Session open across the whole per-vessel loop and
+    committed every 300 vessels, so between commits the connection sat in
+    'idle in transaction' while Python did spatial work. Any such session older
+    than 60s is enough on its own to report the database as degraded.
+    """
+    engine = get_pgEngine()
+
+    for chunk in _chunks(items_to_update, COMMIT_BATCH_SIZE):
+        with Session(engine) as session:
+            session.bulk_update_mappings(Ais_VesselInRestrictZone, chunk)
+            session.commit()
+
+    for chunk in _chunks(items_to_insert, COMMIT_BATCH_SIZE):
+        with Session(engine) as session:
+            session.bulk_insert_mappings(Ais_VesselInRestrictZone, chunk)
+            session.commit()
 
 
 def get_pgConn():
@@ -171,15 +229,22 @@ def upsert_ais_position(data):
     items_to_insert = []
     current_vessels_zone = []
 
+    # Only the MMSIs in this batch are ever looked up below, so loading every open
+    # record in the table read the whole 318k-row table to use a few hundred rows,
+    # and without a predicate on mmsi it was a sequential scan. The tsDetected
+    # DESC order is kept because the lookup below takes the first match.
+    batch_mmsis = sorted({int(i['mmsi']) for i in data})
+
     query = text("""
         SELECT *
         FROM public.ais_vesselinrestrictzone
         WHERE "tsOut" IS NULL
+          AND mmsi IN :mmsis
         ORDER BY "tsDetected" DESC
-    """)
+    """).bindparams(bindparam("mmsis", expanding=True))
 
     try:
-        df = pd.read_sql(query, con=get_pgEngine())  
+        df = pd.read_sql(query, con=get_pgEngine(), params={"mmsis": batch_mmsis})
         current_vessels_zone = df.to_dict(orient='records')   
 
         del df
@@ -190,86 +255,70 @@ def upsert_ais_position(data):
         return 0
 
 
-    with Session(get_pgEngine()) as session:
-        logging.info(f'Loading data....{len(current_vessels_zone)}')
+    logging.info(f'Loading data....{len(current_vessels_zone)}')
 
-        for cnt, i in enumerate(data):
-            # ais_position = Ais_Position(**i)   
+    # The zone decisions below are pure Python with no transaction open; only
+    # after the loop is anything written.
+    for cnt, i in enumerate(data):
+        # ais_position = Ais_Position(**i)   
 
-            for idx, zone in enumerate(zones):
-                rslt = duckdb.sql(f'''
-                    SELECT ST_Within(ST_Point({i['longitude']}, {i['latitude']}), ST_GeomFromGeoJSON({zone})) as within_area
-                ''').fetchall()       
+        for idx, zone in enumerate(zones):
+            rslt = duckdb.sql(f'''
+                SELECT ST_Within(ST_Point({i['longitude']}, {i['latitude']}), ST_GeomFromGeoJSON({zone})) as within_area
+            ''').fetchall()       
 
-                in_zone = rslt[0][0] 
-                existing_vessel_zone = False
+            in_zone = rslt[0][0] 
+            existing_vessel_zone = False
 
-                try:
-                    existing_vessel_zone = next(filter(lambda x: x["mmsi"] == i['mmsi'] and x["zone"] == idx and pd.isnull(x['tsOut']), current_vessels_zone), None)      
-                except:
-                    continue
-
-
-                if in_zone:
-                    if existing_vessel_zone:
-                        logging.info(f"[UPDATE] :: vessel {i['mmsi']} in zone {existing_vessel_zone['zone']}")    
-                        payload = existing_vessel_zone.copy()      #.model_dump()
-
-                        payload["longitude"] = i['longitude']
-                        payload["latitude"] = i['latitude'] 
-                        payload["sog"] = i['sog'] 
-                        payload["cog"] = i['cog'] 
-                        payload["rot"] = i['rot'] 
-                        payload["trueHeading"] = i['trueHeading'] 
-                        payload["tsCurrent"] = i['ts']                                     
-                        items_to_update.append(payload)                         
-
-                    else:
-                        logging.info(f"[INSERT] :: vessel {i['mmsi']} entered zone {idx}")
-                        new_vessel_zone = {
-                            "tsDetected": i['ts'],
-                            "mmsi": i['mmsi'],
-                            "navStatus": i['navStatus'],
-                            "navStatusDesc": i['navStatusDesc'],
-                            "longitude": i['longitude'],
-                            "latitude": i['latitude'], 
-                            "sog": i['sog'], 
-                            "cog": i['cog'], 
-                            "rot": i['rot'], 
-                            "trueHeading": i['trueHeading'],
-                            "tsCurrent": i['ts'],
-                            "tsOut": None,
-                            "zone": idx                       
-                        }
-
-                        items_to_insert.append(new_vessel_zone)
-                else:                    
-                    if existing_vessel_zone:
-                        logging.info(f"[UPDATE] :: vessel {i['mmsi']} exit zone {existing_vessel_zone['zone']}")
-                        payload = existing_vessel_zone      #.model_dump()
-
-                        payload["tsOut"] = i['ts']                 
-                        items_to_update.append(payload)                
+            try:
+                existing_vessel_zone = next(filter(lambda x: x["mmsi"] == i['mmsi'] and x["zone"] == idx and pd.isnull(x['tsOut']), current_vessels_zone), None)      
+            except:
+                continue
 
 
-            if cnt % 300 == 0:
-                logging.info(f'Partially commiting to database....')
-                session.bulk_update_mappings(Ais_VesselInRestrictZone, items_to_update)
-                session.bulk_insert_mappings(Ais_VesselInRestrictZone, items_to_insert)
-                session.commit() 
+            if in_zone:
+                if existing_vessel_zone:
+                    logging.info(f"[UPDATE] :: vessel {i['mmsi']} in zone {existing_vessel_zone['zone']}")    
+                    payload = existing_vessel_zone.copy()      #.model_dump()
 
-                items_to_update.clear()
-                items_to_update = []
-                items_to_insert.clear()
-                items_to_insert = []
+                    payload["longitude"] = i['longitude']
+                    payload["latitude"] = i['latitude'] 
+                    payload["sog"] = i['sog'] 
+                    payload["cog"] = i['cog'] 
+                    payload["rot"] = i['rot'] 
+                    payload["trueHeading"] = i['trueHeading'] 
+                    payload["tsCurrent"] = i['ts']                                     
+                    items_to_update.append(payload)                         
 
-                logging.info(f'Partially upserting data done....')
+                else:
+                    logging.info(f"[INSERT] :: vessel {i['mmsi']} entered zone {idx}")
+                    new_vessel_zone = {
+                        "tsDetected": i['ts'],
+                        "mmsi": i['mmsi'],
+                        "navStatus": i['navStatus'],
+                        "navStatusDesc": i['navStatusDesc'],
+                        "longitude": i['longitude'],
+                        "latitude": i['latitude'], 
+                        "sog": i['sog'], 
+                        "cog": i['cog'], 
+                        "rot": i['rot'], 
+                        "trueHeading": i['trueHeading'],
+                        "tsCurrent": i['ts'],
+                        "tsOut": None,
+                        "zone": idx                       
+                    }
+
+                    items_to_insert.append(new_vessel_zone)
+            else:                    
+                if existing_vessel_zone:
+                    logging.info(f"[UPDATE] :: vessel {i['mmsi']} exit zone {existing_vessel_zone['zone']}")
+                    payload = existing_vessel_zone      #.model_dump()
+
+                    payload["tsOut"] = i['ts']                 
+                    items_to_update.append(payload)                
 
 
-        logging.info(f'Commiting to database....')
-        if len(items_to_update) != 0: session.bulk_update_mappings(Ais_VesselInRestrictZone, items_to_update)
-        if len(items_to_insert) != 0: session.bulk_insert_mappings(Ais_VesselInRestrictZone, items_to_insert)
-        if len(items_to_update) != 0 or len(items_to_insert) != 0: session.commit() 
+    _write_batches(items_to_update, items_to_insert)
 
     logging.info(f'Upserting data done....')
     
@@ -299,6 +348,8 @@ def chk_invalid_data():
         df = pd.read_sql(query, con=get_pgEngine())  
         current_vessels_inrec = df.to_dict(orient='records')   
 
+        outside = []
+
         for idx, itm in enumerate(current_vessels_inrec):
             rslt = duckdb.sql(f'''
                 SELECT ST_Within(ST_Point({itm['longitude']}, {itm['latitude']}), ST_GeomFromGeoJSON({outter_restricted_region})) as within_area
@@ -307,29 +358,31 @@ def chk_invalid_data():
             in_zone = rslt[0][0]  
 
             if not in_zone:
-                with get_pgEngine().connect() as conn:
-                    # Write your raw SQL UPDATE statement
-                    update_qry = text(f"""
-                        UPDATE public.ais_vesselinrestrictzone
-                        SET "tsOut" = now()   
-                        WHERE mmsi = :mmsi
-                    """)
+                logging.info(f'Updating data for mmsi: {itm["mmsi"]}')
+                outside.append(int(itm['mmsi']))
 
-                    # Execute the statement with parameters
-                    conn.execute(update_qry, {
-                        "mmsi": itm['mmsi']
-                    })
+        # One short transaction instead of opening a fresh connection, running one
+        # statement and committing, once per vessel. The predicate is unchanged,
+        # so the same open records are closed; now() is the transaction timestamp
+        # and was already identical within each of the old single-statement
+        # transactions.
+        if outside:
+            update_qry = text("""
+                UPDATE public.ais_vesselinrestrictzone
+                SET "tsOut" = now()
+                WHERE mmsi IN :mmsis
+            """).bindparams(bindparam("mmsis", expanding=True))
 
-                    # Commit the transaction
-                    print(f'Updating data for mmsi: {itm["mmsi"]}')
-                    conn.commit()  
-
+            with get_pgEngine().begin() as conn:
+                conn.execute(update_qry, {"mmsis": outside})
 
         del df
         gc.collect()  
 
-    except:
-        pass
+    except Exception as e:
+        # Was a bare 'except: pass', so a sweep that never worked would have been
+        # invisible.
+        logging.info(f'Error clearing invalid data....{e}')
 
 
     return 0
@@ -338,6 +391,9 @@ def chk_invalid_data():
 if __name__ == "__main__":
     runFlg = True
     create_db_and_tables()    
+
+    # Sweep once on startup, then only every CLEANUP_INTERVAL_MINUTES.
+    next_cleanup = 0.0
 
     while runFlg:
         try:
@@ -348,7 +404,9 @@ if __name__ == "__main__":
             del vessels_data
             gc.collect()
 
-            chk_invalid_data()
+            if time.monotonic() >= next_cleanup:
+                next_cleanup = time.monotonic() + CLEANUP_INTERVAL_MINUTES * 60
+                chk_invalid_data()
 
         except KeyboardInterrupt:
             runFlg = False
@@ -358,7 +416,7 @@ if __name__ == "__main__":
 
 
         logging.info(f'System sleep....')
-        time.sleep(10)     
+        time.sleep(30)     
        
 
 
