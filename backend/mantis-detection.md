@@ -333,15 +333,19 @@ Needed because neither detector can close an activity on its own: `tsout` is onl
 Implemented in `compute_suspicion_score()`:
 
 ```text
-duration_hours      = duration_seconds / 3600
-mixed_cargo_tanker  = 1  if cargo_count > 0 and tanker_count > 0  else 0
+duration_hours = duration_seconds / 3600
+composition    = 1.0  if tanker_count >= 2          (a cargo ship may also be present)
+                 0.5  elif cargo_count >= 2
+                 0.0  otherwise                     (cargo beside one tanker, dredger beside one ship)
 
 score = 2.0 * log1p(duration_hours)
       + 1.0 * (vessel_count - 1)
-      + 1.5 * mixed_cargo_tanker
+      + 1.5 * composition
 
 return round(score, 4)
 ```
+
+Cargo is ship type 70–79, tanker 80–89. Licensed dredgers count as neither. Before `2.3-tanker-pair-score` the composition term was `1` for any cargo + tanker mix and `0` otherwise; closed observations keep the score they were closed with.
 
 `log1p(x) = ln(1 + x)`. At 0 h the duration term is 0. Duration raises score with diminishing returns.
 
@@ -358,13 +362,15 @@ return round(score, 4)
 | --- | --- | --- |
 | Duration | `2.0 * log1p(hours)` | longer together → more suspicious, not linear |
 | Extra vessels | `1.0` per vessel beyond the first | trio scores +1 vs a pair |
-| Cargo + tanker mix | `+ 1.5` | typical STS interest |
+| Composition | `+ 1.5` two or more tankers, `+ 0.75` two or more cargo ships, `0` otherwise | tanker-to-tanker is the illicit oil transfer pattern in Malaysian waters; cargo beside a tanker is usually bunkering |
 
 **Hint only.** Ground truth for ML is `is_anomaly` after review, not this score.
 
-Worked example: 2 vessels, 1 cargo + 1 tanker, open 3 h  
-`2.0 * 1.386 + 1.0 * 1 + 1.5 * 1 ≈ 5.27` → **above** API `minSuspicionScore` 4.5.  
-Same pair at ~1 h: `2.0 * 0.693 + 1 + 1.5 ≈ 3.89` → **below** API cut, not shown.
+Time for a two-vessel pair to reach the API `minSuspicionScore` 4.5: tanker + tanker ≈ 1.7 h, cargo + cargo ≈ 3.0 h, cargo + tanker ≈ 4.8 h.
+
+Worked example: 2 tankers, open 3 h  
+`2.0 * 1.386 + 1.0 * 1 + 1.5 * 1 ≈ 5.27` → **above** 4.5.  
+1 cargo + 1 tanker, open 3 h: `2.0 * 1.386 + 1 + 0 ≈ 3.77` → **below** 4.5, not shown.
 
 ### Cargo / tanker counts in a cluster
 
@@ -431,7 +437,7 @@ Tug / patrol / fast-manoeuvring types (e.g. MMSIs that showed thousands of raw t
 
 ### Phase 1 — implemented (2026-08-18)
 
-**Rule version:** `v1.0-teleport-cargo-tanker-daily-dedupe-ofac`
+**Rule version:** `v1.1-teleport-snapback-filter`
 
 1. Load latest `ais_static` per MMSI with `70 <= shipType < 90`.
 2. ClickHouse: consecutive valid fixes on the same MMSI (`VALID_POSITION_SQL` — same as `/mantis/vessel-track`).
@@ -440,10 +446,11 @@ Tug / patrol / fast-manoeuvring types (e.g. MMSIs that showed thousands of raw t
    - `distanceM >= 1000`
    - **(`distanceM >= 20_000` AND implied speed > 50 kn)** OR **implied speed > 80 kn**
    - Implied speed (kn) = `geoDistance(prev, curr) / deltaSeconds × 1.94384`
-4. Inner join flagged pairs to cargo/tanker static only.
-5. **Dedupe:** one row per `(mmsi, UTC calendar day of anomaly fix)` — keep the hit with **highest** `impliedSpeedKn`.
-6. Attach OFAC labels (`sanctions.py`); listed vessels sorted first.
-7. `detectedAt` / `lastSeenAt` = AIS time of the **anomaly fix** (second point) — not API wall clock.
+4. Drop a **one-point spike**. The outlier is ignored when the fix before it and the fix after it are still within **2 km** of each other and that gap is under **10%** of the jump. A false track that stays at the new position is kept. Same rule on `GET /mantis/spoofing/vessel-analysis`.
+5. Inner join flagged pairs to cargo/tanker static only.
+6. **Dedupe:** one row per `(mmsi, UTC calendar day of anomaly fix)` — keep the hit with **highest** `impliedSpeedKn`.
+7. Attach OFAC labels (`sanctions.py`); listed vessels sorted first.
+8. `detectedAt` / `lastSeenAt` = AIS time of the **anomaly fix** (second point) — not API wall clock.
 
 Optional query params `from` / `to` (ISO 8601 UTC); same **3-day max** window as `GET /mantis/vessel-track` (`resolve_track_range`).
 
@@ -626,10 +633,118 @@ HAVING COUNT(m.id) <> o.vessel_count;
 
 ---
 
+## Locked design — unexplained STS notification (not built)
+
+Agreed 2026-10-09. Do not implement a different shape without updating this section.
+
+The notification is an **unexplained pair that still needs a person**. The machine does not set `is_anomaly`. Training uses only rows a person has classed.
+
+1. **Proximity candidates.** Types **70–89** can start a pair. Also admit an MMSI or IMO that is on the dredge-licence cache (later, the bunker list), and only when that vessel is within **30 m** of a cargo or tanker. Do not add a vessel just because of its type when the type is fishing (**30**), towing (**31**, **32**), tug (**52**), or passenger (**60–69**). Leave pleasure, pilot, and high-speed craft out as well. The licence cache is read from `jkptg_prod.shipprojects` on `marineai` every **12 hours**, then matched in process. No cross-database join.
+2. **Spoofing store.** A separate job writes `ais_positionanomaly`. The API reads that table. The STS case job does not scan ClickHouse.
+3. **Review job.** Its own `systemctl` service, about every **15 minutes**, one `pnav` connection, observations touched since a watermark. Every row in `ais_vesselproximityobservation` can become a case. `polygons.py` does not decide which rows are kept. `in_anchorage` / `outside_anchorage` are labels only. Writes `ais_stsreviewcase` only. Does not recompute pairs.
+4. **Notification API.** Reads `ais_stsreviewcase` where `suspicion_score >= 4.5`, `dredge_licence_match` is false, `bunker_list_match` is false, and at least one of `sanctions_match`, `outside_anchorage`, `dark_overlap`, `illegal_anchor_overlap` is true. Loiter and anchor swing are stored and do not trigger. Status on the wire is `unreviewed`.
+5. **Verify API.** A person sets `review_class` to `illicit_transfer`, `bunkering`, `dredge`, `other_legal`, or `uncertain`. Export for training keeps labeled rows only.
+6. **STS screen buffer.** `GET /mantis/sts-activities` keeps the anchorage cut. Each **parent** polygon is expanded by **1 km** before the centroid test. Excl holes stay at the drawn ring and are not expanded. Buffer in metres (geodesic), not an alphashape and not a degree offset. Expanded rings are built once at process start. A centroid inside two expanded parents keeps one anchorage name, as today. Overview uses the same filter, so its STS counts follow this band. `ais_stsreviewcase` does not use the band: `in_anchorage` / `outside_anchorage` stay on the original parent polygon.
+
+When the bunker list arrives, load it like `shipprojects`. A match sets `bunker_list_match` and the pair drops off the notification. The row stays as a legal example.
+
+### `ais_positionanomaly`
+
+One kept hit per MMSI per UTC day (highest `implied_kn`), after the snap-back filter. Ship name, dimensions, and OFAC are joined at read time from `ais_static` and the sanctions views.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | bigserial PK | |
+| `mmsi` | bigint | not null |
+| `event_day` | date | UTC day of `ts`. Unique with `mmsi` |
+| `ts` | timestamptz | anomaly fix (second point) |
+| `prev_ts` | timestamptz | previous fix |
+| `latitude` | double precision | |
+| `longitude` | double precision | |
+| `prev_latitude` | double precision | |
+| `prev_longitude` | double precision | |
+| `dist_m` | double precision | |
+| `dt_s` | integer | whole seconds, 10–900 |
+| `implied_kn` | double precision | |
+| `reason` | varchar(20) | `teleport` or `high_speed` |
+| `rule_version` | varchar(80) | writer version, currently `v1.1-teleport-snapback-filter` |
+| `created_at` | timestamptz | |
+| `updated_at` | timestamptz | replaced when a worse hit arrives the same day |
+
+Unique `(mmsi, event_day)`.
+
+### `ais_stsreviewcase`
+
+One row per `ais_vesselproximityobservation`. The review job may refresh the snapshot while `status = unreviewed`. It must not overwrite `review_class`, `labeled_at`, `labeled_by`, or `review_notes` after a person has saved them.
+
+| Column | Type | Notes |
+| --- | --- | --- |
+| `id` | bigserial PK | |
+| `observation_id` | bigint | unique, the proximity observation |
+| `cluster_signature` | varchar(255) | |
+| `status` | varchar(20) | `unreviewed` (default) or `reviewed` |
+| `review_class` | varchar(30) | null until a person sets it |
+| `labeled_at` | timestamptz | |
+| `labeled_by` | varchar(120) | |
+| `review_notes` | text | |
+| `first_detected_at` | timestamptz | copied from the observation |
+| `last_detected_at` | timestamptz | |
+| `duration_seconds` | double precision | |
+| `suspicion_score` | double precision | sort hint only |
+| `is_open` | boolean | |
+| `centroid_latitude` | double precision | |
+| `centroid_longitude` | double precision | |
+| `vessel_count` | integer | |
+| `cargo_count` | integer | |
+| `tanker_count` | integer | |
+| `max_internal_distance_m` | double precision | |
+| `in_anchorage` | boolean | parent polygon, Excl holes ignored |
+| `anchorage_name` | text | null when outside |
+| `outside_anchorage` | boolean | |
+| `sanctions_match` | boolean | true if any member matches OFAC |
+| `dredge_licence_match` | boolean | in-force `shipprojects` row covers the pair time |
+| `bunker_list_match` | boolean | false until the bunker list exists |
+| `dark_overlap` | boolean | a member is on an open dark candidate during the pair |
+| `illegal_anchor_overlap` | boolean | a member is an illegal-anchoring candidate during the pair |
+| `loiter_overlap` | boolean | loiter circle overlaps the pair. Context only |
+| `anchor_swing_overlap` | boolean | swing circle overlaps the pair. Context only |
+| `spoof_overlap` | boolean | a member has an `ais_positionanomaly` row on a day the pair was open |
+| `members` | jsonb | one object per hull, see below |
+| `refreshed_at` | timestamptz | last snapshot |
+| `created_at` | timestamptz | |
+
+Each object in `members`: `mmsi`, `imo`, `shipName`, `shipType`, `shipTypeDesc`, `sanctionsMatch`, `matchConfidence`, `sanctionsList`, `onDredgeLicence`, `dredgeProjectId`, `onBunkerList`.
+
+### Work list
+
+Items 1–7 are in the repo and the processors are running. Item 8 is not built. The MANTIS API process is not on `10.10.20.200`, so the route changes are in the repo only until that API is deployed.
+
+| Order | Work | Where | Load rule |
+| --- | --- | --- | --- |
+| 1 | Dredge-licence cache every **12 hours** from `marineai` / `jkptg_prod.public.shipprojects` (`mmsi`, `imo`, `shipName`, `id` as project id, licence start/end, `status`). Match MMSI, else IMO. In force only when the pair time sits inside the licence dates. | New helper used by the proximity job and the review job. Own short connection. Never joined from `pnav`. | One small read twice a day. |
+| 2 | Admit those licence MMSIs into proximity **only** within **30 m** of a type **70–89** vessel. Same-hull suppression unchanged. Types **30**, **31**, **32**, **52**, **60–69** never enter on type alone. Pleasure, pilot, and high-speed craft stay out. | `backend/vesselproximitydetection.py` only. | No extra ClickHouse. No second scan of movement history. Extra rows are the licensed MMSIs that are already stopped. |
+| 2b | Widen `GET /mantis/sts-activities` by a **1 km** metre buffer on each parent polygon. Excl holes unchanged. Precompute rings at startup. No alphashape. | `restapi/sts_detection.py` | In-memory geometry only. Same Postgres read as today. |
+| 3 | Create `ais_positionanomaly` as specified above. Job recomputes the current spoofing rule on a slow loop and upserts `(mmsi, event_day)` when `implied_kn` is higher. | New `backend` script, own `systemctl` unit. | ClickHouse only inside this process. Pool size 1 on `pnav` for the upsert. |
+| 4 | Point `GET /mantis/spoofing` and vessel-analysis at `ais_positionanomaly` for the fleet list. Same response fields as today. | `restapi/spoofing.py`, `restapi/spoofing_vessel_analysis.py` | Postgres read. No ClickHouse on those routes once the table is the source. |
+| 5 | Create `ais_stsreviewcase` as specified above. Review job every **15 minutes**, watermark on `observation_id` / `last_detected_at`, one `pnav` connection, statement timeout. Refresh snapshots for `status = unreviewed` only. | New `backend` script, own `systemctl` unit. | Reads proximity, loiter, dark, illegal-anchoring, sanctions, and `ais_positionanomaly` by MMSI and time. Writes this table only. Does not set `is_anomaly` on the observation. |
+| 6 | `GET /mantis/sts-review` returns cases that pass the notification rule in step 4 of the locked design, sanctions first, then `suspicion_score` descending. | `restapi/main.py`, Swagger | Read-only. |
+| 7 | `POST /mantis/sts-review/<id>/verify` sets `review_class`, `labeled_by`, `review_notes`, `labeled_at`, and `status = reviewed`. | Same | One update of that row. |
+| 8 | Training export reads `ais_stsreviewcase` where `review_class` is not null. | Later, with the first labeled batch | Not part of the first build unless asked. |
+
+Bunker list, when it exists, is a second cache in the same shape as step 1. It sets `bunker_list_match` and `members[].onBunkerList`. No new table and no new route.
+
+Out of scope until a later ask: summing detector flags into a score, auto-setting `is_anomaly`, concession-polygon tests, opening proximity to all ship types, and streaming the overview.
+
+---
+
 ## Change log (this document)
 
 | Date | Note |
 | --- | --- |
+| 2026-10-09 | Proximity `2.3-tanker-pair-score`. Composition term is now `1.0` when a cluster has two or more tankers (cargo may also be present), `0.5` for two or more cargo ships, `0` otherwise; it was `1` for any cargo + tanker mix. Open observations take the new score on their next update. Closed observations are not rescored. Deployed to 10.10.20.200 at 12:33 UTC (backup `vesselproximitydetection.py.bak-20261009-123319`); service active, no errors after restart. |
+| 2026-10-09 | Built and started. `ais_positionanomaly` and `ais_stsreviewcase` created on `pnav`. Proximity `2.2-dredge-licence` restarted on `10.10.20.200`. New units `ais_vesselspoofingstore` and `ais_vesselstsreview` are active. First cycle wrote 20 spoofing rows and 100 unreviewed cases. Pleasure, pilot, high-speed craft, tug, fishing, and passenger stay out. API routes are in the repo; that host's only container is `py-bpa-restapi`. |
+| 2026-10-09 | Locked and frozen, not started. Proximity stays 70–89 plus dredge-licence MMSIs (12-hour cache from `shipprojects`); fishing 30, towing 31–32, tug 52, and passenger 60–69 stay out. `ais_stsreviewcase` follows every `ais_vesselproximityobservation`. `GET /mantis/sts-activities` keeps the anchorage cut with each parent polygon buffered by **1 km**; Excl holes are not buffered. Spoofing facts go to `ais_positionanomaly`. Notification reads `ais_stsreviewcase` and does not set `is_anomaly`. |
+| 2026-09-29 | Spoofing drops a one-point position spike. A teleport pair is ignored when the fixes on either side of the outlier are within **2 km** and that gap is under **10%** of the jump. A jump that stays at the new position is kept. `rule_version` **v1.1-teleport-snapback-filter**. Same filter on `/mantis/spoofing/vessel-analysis`. Cargo/tanker filter, 10–900 s gap, and daily dedupe unchanged. |
 | 2026-09-24 | Loitering storage ceiling widened. `MAX_RADIUS_M` is **6 NM** (11,112 m); `detection_version` **1.1-loiter-circle-6nm**. Net still &lt; **0.5 NM** and net/path still &lt; **0.20**. ClickHouse read unchanged (2 h, 5-minute samples, cargo/tanker 70–89). API `GET /mantis/loitering`: no `pattern` still returns open rows with a flag. `pattern=loitering` keeps path ≥ **2 NM**, net ≤ **0.5 NM**, net/path ≤ **0.10**, radius ≥ **max(length, 300 m)** and ≤ **6 NM**. `pattern=anchorSwing` keeps radius **100 m** to **max(length, 300 m)**, path ≤ **1 NM**, net/path ≤ **0.20**. `minPathM`, `maxPathM`, `maxNetM`, `maxNetOverPath`, `minRadiusM`, `maxRadiusM` override the preset. Response adds `netOverPath` and `filters`. |
 | 2026-09-23 | New loitering job `backend/vesselloiteringdetection.py` → `ais_vesselloiteractivity`, API `GET /mantis/loitering` (Postgres read only). Circle test: span ≥ 2 h, ≥ 8 samples, radius &gt; 100 m and ≤ 1 NM, net &lt; 0.5 NM and &lt; 20% of path. Flags `outside_anchorage`, `near_restricted` (5 NM), `before_sts` (6 h, 5 NM). One open row per MMSI. Loop 15 minutes. |
 | 2026-09-09 | `vesselstrajectorydetection.py` performance (same detection rules): TXN1 in-memory open-activity map; TXN2 only open rows whose MMSI has `sog > 0.5` in the current AIS batch (no per-row `duckdb.register`). Trajectory update semantics unchanged (no skip on `ts <= tscurrent`). Cycle summary logs added. |

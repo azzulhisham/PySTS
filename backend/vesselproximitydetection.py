@@ -18,6 +18,7 @@ import pandas as pd
 import duckdb
 
 from ais_static_sql import CURRENT_STATIC_ROW_ORDER
+from dredge_licence import EXCLUDED_SHIP_TYPES, licensed_mmsis
 
 """
 Detect cargo/tanker vessels within MAX_DISTANCE_M, group them into proximity clusters,
@@ -34,7 +35,7 @@ closed with reason 'same_vessel'.
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-DETECTION_VERSION = "2.1"
+DETECTION_VERSION = "2.3-tanker-pair-score"
 MAX_DISTANCE_M = 30.0
 LOOP_INTERVAL_SECONDS = 30
 CLOSE_GRACE_SECONDS = 60
@@ -244,15 +245,24 @@ def cluster_signature(mmsi_list: list[int]) -> str:
 
 
 
+def composition_factor(cargo_count: int, tanker_count: int) -> float:
+    """1.0 for two or more tankers (a cargo ship may also be present), 0.5 for two or
+    more cargo ships, otherwise 0. Cargo beside a single tanker is the bunkering shape."""
+    if tanker_count >= 2:
+        return 1.0
+    if cargo_count >= 2:
+        return 0.5
+    return 0.0
+
+
 def compute_suspicion_score(duration_seconds: float, vessel_count: int, cargo_count: int, tanker_count: int) -> float:
-    """Score cluster suspiciousness from duration, size, and cargo/tanker mix."""
+    """Score cluster suspiciousness from duration, size, and cargo/tanker composition."""
     duration_hours = duration_seconds / 3600.0
-    mixed_cargo_tanker = 1 if cargo_count > 0 and tanker_count > 0 else 0
 
     score = (
         2.0 * math.log1p(duration_hours)
         + 1.0 * (vessel_count - 1)
-        + 1.5 * mixed_cargo_tanker
+        + 1.5 * composition_factor(cargo_count, tanker_count)
     )
 
     return round(score, 4)
@@ -853,7 +863,12 @@ def upsert_open_clusters(engine: Engine, clusters: list[list[int]], pairs: pd.Da
 # ---------------------------------------------------------------------------
 
 def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
-    """Load stopped/stale cargo and tanker vessels eligible for proximity detection."""
+    """Stopped cargo/tanker vessels, plus a licensed dredger that is not an excluded type.
+
+    A dredger is admitted only from the 12-hour shipprojects cache. Fishing, towing,
+    tugs, pleasure, pilot, high-speed craft, and passenger ships are never added
+    on type alone, and a licence does not override that exclusion.
+    """
     # One current static row per MMSI, populated row preferred over an empty shell.
     static_query = f"""
         SELECT mmsi, "shipType", "shipTypeDesc", "shipName", callsign, imo,
@@ -895,8 +910,16 @@ def load_candidate_vessels(engine: Engine) -> pd.DataFrame:
     df["navstatusdesc"] = df["navstatusdesc"].astype("object")
 
     df = df.merge(df_static, on="mmsi", how="inner")
-    df = df[(df["shipType"] >= 70) & (df["shipType"] < 90)]
-    df = df.dropna(subset=["curlongitude", "curlatitude"])
+    df = df.dropna(subset=["curlongitude", "curlatitude", "shipType"])
+    df["shipType"] = df["shipType"].astype(int)
+    df["is_core"] = (df["shipType"] >= 70) & (df["shipType"] < 90)
+    licensed = licensed_mmsis()
+    admitted_extra = (
+        ~df["is_core"]
+        & df["mmsi"].astype(int).isin(licensed)
+        & ~df["shipType"].isin(EXCLUDED_SHIP_TYPES)
+    )
+    df = df[df["is_core"] | admitted_extra]
     df = df.drop_duplicates(subset="mmsi", keep="first")
 
     return df
@@ -926,6 +949,11 @@ def run_proximity_detection(engine: Engine | None = None) -> dict:
         }
 
     pairs = find_close_pairs(df, MAX_DISTANCE_M)
+    # A licensed dredger joins a cluster only when it is within 30 m of a cargo/tanker.
+    if not pairs.empty and "is_core" in df.columns:
+        core = set(df.loc[df["is_core"], "mmsi"].astype(int))
+        keep = pairs["mmsi_a"].astype(int).isin(core) | pairs["mmsi_b"].astype(int).isin(core)
+        pairs = pairs.loc[keep].reset_index(drop=True)
     pairs, same_vessel_pairs = drop_same_vessel_pairs(pairs, build_identity_map(df))
 
     if same_vessel_pairs:

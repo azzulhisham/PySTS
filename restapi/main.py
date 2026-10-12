@@ -12,6 +12,7 @@ from polygons import anchorage_areas, all_polygons
 from sts_detection import (
     detect_sts_in_anchorages,
 )
+from sts_review import list_unexplained, list_unreviewed, verify_case
 from illegal_anchoring import detect_illegal_anchoring
 from loitering import detect_loitering
 from dark_vessels import detect_dark_vessels
@@ -23,6 +24,7 @@ from timelineplayback import (
     get_vessel_activity_timeline,
     get_vessel_track_replay,
     iter_vessel_track_ndjson,
+    parse_datetime,
     resolve_track_range,
 )
 from sanctions import query_ofac_vessels
@@ -180,8 +182,8 @@ def get_mantis_overview():
 def get_sts_activities():
     """
     Active (is_open) high-suspicion proximity pairs whose cluster centroid
-    falls inside a parent / watch polygon (not an Excl hole). Returns only
-    paired vessels.
+    falls inside a parent polygon expanded by 1 km (not an Excl hole).
+    Returns only paired vessels.
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -198,6 +200,7 @@ def get_sts_activities():
         payload = {
             "minSuspicionScore": result["min_suspicion_score"],
             "maxDistanceM": result["max_distance_m"],
+            "anchorageBufferM": result["anchorage_buffer_m"],
             "openHighScoreCount": result["open_high_score_count"],
             "inAnchorageClusterCount": result["in_anchorage_cluster_count"],
             "pairCount": result["pair_count"],
@@ -211,6 +214,96 @@ def get_sts_activities():
     
     except Exception as e:
         logging.error(f"[get_sts_activities] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/sts-review", methods=["GET"])
+@cross_origin()
+def get_sts_review():
+    """
+    Unreviewed proximity cases that are still unexplained: suspicion score at
+    least 4.5, not a dredge-licence match, not a bunker-list match, and at
+    least one of sanctions, outside anchorage, dark, or illegal anchoring.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        min_score = request.args.get("minSuspicionScore", type=float)
+        result = list_unexplained(
+            min_suspicion_score=min_score if min_score is not None else 4.5,
+        )
+        payload = {
+            "minSuspicionScore": result["min_suspicion_score"],
+            "caseCount": result["case_count"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
+            "cases": result["cases"],
+        }
+        return jsonify(json_for_client(payload, ["cases"])), 200
+    except Exception as e:
+        logging.error(f"[get_sts_review] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/sts-review/unreviewed", methods=["GET"])
+@cross_origin()
+def get_sts_review_unreviewed():
+    """
+    Every unreviewed case in ais_stsreviewcase.
+
+    Optional from / to (ISO 8601) keep a case whose open interval overlaps
+    that window. Use caseId with POST /mantis/sts-review/<caseId>/verify.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    def _when(name: str):
+        raw = request.args.get(name)
+        if raw is None or raw == "":
+            return None
+        return parse_datetime(raw)
+
+    try:
+        result = list_unreviewed(date_from=_when("from"), date_to=_when("to"))
+        payload = {
+            "dateFrom": result["date_from"],
+            "dateTo": result["date_to"],
+            "caseCount": result["case_count"],
+            "cases": result["cases"],
+        }
+        return jsonify(json_for_client(payload, ["cases"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_sts_review_unreviewed] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/sts-review/<int:case_id>/verify", methods=["POST"])
+@cross_origin()
+def post_sts_review_verify(case_id: int):
+    """Record a human label. Does not change the proximity observation."""
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        body = request.get_json(silent=True) or {}
+        review_class = body.get("reviewClass")
+        if not review_class:
+            return jsonify({"message": "reviewClass is required"}), 400
+        result = verify_case(
+            case_id,
+            str(review_class),
+            body.get("labeledBy"),
+            body.get("reviewNotes"),
+        )
+        if result is None:
+            return jsonify({"message": "Case not found or already reviewed"}), 404
+        return jsonify(result), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[post_sts_review_verify] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 

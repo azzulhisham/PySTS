@@ -1,5 +1,5 @@
 """
-STS (ship-to-ship) proximity inside restapi anchorage polygons.
+STS (ship-to-ship) proximity inside restapi anchorage polygons, expanded 1 km.
 
 Uses active proximity clusters from ais_vesselproximityobservation
 (is_open = TRUE) with high suspicion_score, keeps those whose centroid
@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from typing import Any
 import pandas as pd
 from sqlalchemy.engine import Engine
@@ -33,6 +34,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 MAX_DISTANCE_M = 35.0
 MIN_SUSPICION_SCORE = 4.5
+ANCHORAGE_BUFFER_M = 1000.0
+
+_screen_polys: pd.DataFrame | None = None
 
 ACTIVE_HIGH_SCORE_SQL = """
 SELECT
@@ -144,26 +148,92 @@ def load_members(
     )
 
 
+def _metres_to_geojson(geom: dict, lon0: float, lat0: float, scale_x: float, scale_y: float) -> str:
+    def back(point: list[float]) -> list[float]:
+        return [lon0 + point[0] / scale_x, lat0 + point[1] / scale_y]
+
+    if geom.get("type") == "Polygon":
+        rings = [[back(point) for point in ring] for ring in geom["coordinates"]]
+        return json.dumps({"type": "Polygon", "coordinates": rings})
+    if geom.get("type") == "MultiPolygon" and geom.get("coordinates"):
+        best = max(geom["coordinates"], key=lambda rings: len(rings[0]) if rings else 0)
+        rings = [[back(point) for point in ring] for ring in best]
+        return json.dumps({"type": "Polygon", "coordinates": rings})
+    raise ValueError(f"unexpected buffered geometry {geom.get('type')}")
+
+
+def _buffer_ring_geojson(ring_lonlat: list, metres: float) -> str:
+    """Expand one ring by `metres` using a local equirectangular plane."""
+    ring = [[float(lon), float(lat)] for lon, lat in ring_lonlat]
+    if ring[0] != ring[-1]:
+        ring.append(ring[0])
+    lat0 = sum(point[1] for point in ring) / len(ring)
+    lon0 = sum(point[0] for point in ring) / len(ring)
+    scale_x = 111320.0 * math.cos(math.radians(lat0))
+    if abs(scale_x) < 1.0:
+        scale_x = 1.0
+    scale_y = 111320.0
+    coords = ", ".join(
+        f"{(lon - lon0) * scale_x} {(lat - lat0) * scale_y}" for lon, lat in ring
+    )
+    frame = spatial_df(
+        f"""
+        SELECT ST_AsGeoJSON(
+            ST_Buffer(ST_GeomFromText('POLYGON(({coords}))'), {float(metres)})
+        ) AS gj
+        """,
+        {},
+    )
+    return _metres_to_geojson(json.loads(frame.iloc[0]["gj"]), lon0, lat0, scale_x, scale_y)
+
+
+def anchorage_screen_polygons(metres: float = ANCHORAGE_BUFFER_M) -> pd.DataFrame:
+    """Parent polygons expanded by 1 km. Excl holes stay on their original ring."""
+    global _screen_polys
+    if _screen_polys is not None:
+        return _screen_polys
+    rows = []
+    for area in anchorage_areas:
+        excl = is_excl_name(area["name"])
+        if excl:
+            geojson = json.dumps(polygon_to_geojson(area))
+        else:
+            try:
+                geojson = _buffer_ring_geojson(area["polygon"], metres)
+            except Exception:
+                logging.exception("Anchorage buffer failed for %s; using the original ring", area["name"])
+                geojson = json.dumps(polygon_to_geojson(area))
+        rows.append({
+            "anchorage_name": area["name"],
+            "is_excl": excl,
+            "geojson": geojson,
+        })
+    _screen_polys = pd.DataFrame(rows)
+    return _screen_polys
+
+
 def filter_observations_in_anchorages(
     observations: pd.DataFrame,
     areas: list[dict] | None = None,
 ) -> pd.DataFrame:
     """
-    Keep open clusters whose centroid falls inside a parent polygon.
-    Drop clusters whose centroid is also inside an Excl carve-out.
+    Keep clusters whose centroid falls inside a parent polygon expanded by 1 km.
+    Drop clusters whose centroid is inside an Excl carve-out (original ring).
     """
-    areas = areas or anchorage_areas
     if observations.empty:
         return observations.assign(anchorage_name=pd.Series(dtype="object"))
 
-    df_poly = pd.DataFrame([
-        {
-            "anchorage_name": area["name"],
-            "is_excl": is_excl_name(area["name"]),
-            "geojson": json.dumps(polygon_to_geojson(area)),
-        }
-        for area in areas
-    ])
+    if areas is None:
+        df_poly = anchorage_screen_polygons()
+    else:
+        df_poly = pd.DataFrame([
+            {
+                "anchorage_name": area["name"],
+                "is_excl": is_excl_name(area["name"]),
+                "geojson": json.dumps(polygon_to_geojson(area)),
+            }
+            for area in areas
+        ])
 
     out = spatial_df(
         """
@@ -452,6 +522,7 @@ def detect_sts_in_anchorages(
         "sanctions_match_vessel_count": sanctions_match_vessel_count,
         "max_distance_m": float(max_distance_m),
         "min_suspicion_score": float(min_suspicion_score),
+        "anchorage_buffer_m": ANCHORAGE_BUFFER_M,
         "observations": in_anchorage if not summary_only else in_anchorage.iloc[0:0],
         "pairs": pairs,
         "paired_vessels": paired_vessels,

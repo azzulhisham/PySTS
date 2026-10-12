@@ -262,9 +262,14 @@
             "type": "integer",
             "description": "Active (is_open) clusters meeting the suspicion score threshold (all areas)."
           },
+          "anchorageBufferM": {
+            "type": "number",
+            "description": "Parent polygons are expanded by this many metres. Excl holes are not expanded.",
+            "example": 1000
+          },
           "inAnchorageClusterCount": {
             "type": "integer",
-            "description": "High-score open clusters whose centroid is inside a parent / watch polygon and not inside an Excl hole."
+            "description": "High-score open clusters whose centroid is inside a parent polygon expanded by anchorageBufferM and not inside an Excl hole."
           },
           "pairCount": {
             "type": "integer",
@@ -1077,7 +1082,7 @@
         "properties": {
           "ruleVersion": {
             "type": "string",
-            "example": "v1.0-teleport-cargo-tanker-daily-dedupe-ofac"
+            "example": "v1.1-teleport-snapback-filter"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -1810,8 +1815,8 @@
         "tags": [
           "mantis"
         ],
-        "summary": "Get active high-suspicion STS pairs inside anchorage polygons.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent / watch polygon. Clusters whose centroid is inside an **Excl** carve-out (hole) are excluded. Pairs are recomputed at \u2264 **35 m**. Each vessel includes **`lastSeenAt`** (AIS time of the fix used for that member). **`pairedAt`** is pipeline wall clock only — use `lastSeenAt` with GET /mantis/vessel-track. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
+        "summary": "Get active high-suspicion STS pairs inside anchorage polygons expanded by 1 km.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent polygon **expanded by 1 km**. **Excl** carve-outs stay on their original ring and still drop a cluster. Pairs are recomputed at \u2264 **35 m**. Each vessel includes **`lastSeenAt`** (AIS time of the fix used for that member). **`pairedAt`** is pipeline wall clock only — use `lastSeenAt` with GET /mantis/vessel-track. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first. `anchorageBufferM` is 1000.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {
@@ -1848,6 +1853,102 @@
           "500": {
             "description": "Internal server error."
           }
+        }
+      }
+    },
+    "/mantis/sts-review": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "Unexplained STS cases waiting for a human label.",
+        "description": "Reads `ais_stsreviewcase`. Returns unreviewed cases with suspicion_score at least 4.5, dredge licence not matched, bunker list not matched, and at least one of sanctions, outside the original anchorage, dark overlap, or illegal-anchoring overlap. Loiter and anchor swing are stored on the case and do not by themselves put a case in this list. Sanctioned cases are sorted first. This is a queue, not a confirmed anomaly.",
+        "operationId": "getStsReview",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "minSuspicionScore",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number", "default": 4.5 }
+          }
+        ],
+        "responses": {
+          "200": { "description": "Unexplained unreviewed cases." },
+          "401": { "description": "Unauthorized." },
+          "500": { "description": "Internal server error." }
+        }
+      }
+    },
+    "/mantis/sts-review/unreviewed": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "All unreviewed STS cases, with an optional date window.",
+        "description": "Reads every `ais_stsreviewcase` row with status unreviewed, including pairs the notification queue hides. Optional `from` and `to` (ISO 8601) keep a case whose open interval overlaps that window: it started on or before `to`, and it was still detected on or after `from`. `caseId` is the id for POST /mantis/sts-review/{caseId}/verify. Reviewed rows stay out.",
+        "operationId": "getStsReviewUnreviewed",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "Keep cases still detected at or after this time."
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" },
+            "description": "Keep cases that started at or before this time."
+          }
+        ],
+        "responses": {
+          "200": { "description": "Unreviewed cases." },
+          "400": { "description": "Invalid date window." },
+          "401": { "description": "Unauthorized." },
+          "500": { "description": "Internal server error." }
+        }
+      }
+    },
+    "/mantis/sts-review/{caseId}/verify": {
+      "post": {
+        "tags": ["mantis"],
+        "summary": "Record a human label on one STS review case.",
+        "description": "Sets status to reviewed. reviewClass is one of illicit_transfer, bunkering, dredge, other_legal, uncertain. Does not change the proximity observation.",
+        "operationId": "verifyStsReview",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "caseId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "integer" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["reviewClass"],
+                "properties": {
+                  "reviewClass": {
+                    "type": "string",
+                    "enum": ["illicit_transfer", "bunkering", "dredge", "other_legal", "uncertain"]
+                  },
+                  "labeledBy": { "type": "string" },
+                  "reviewNotes": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Case marked reviewed." },
+          "400": { "description": "Missing or unknown reviewClass." },
+          "401": { "description": "Unauthorized." },
+          "404": { "description": "Case not found or already reviewed." },
+          "500": { "description": "Internal server error." }
         }
       }
     },
@@ -2021,7 +2122,7 @@
           "mantis"
         ],
         "summary": "Get position anomalies (spoofing) — Phase 1 teleport.",
-        "description": "Also referred to as **GET /mantis/position-anomaly** in product docs — that path is **not** served; use **`/mantis/spoofing`**.\n\nPhase 1 scans ClickHouse `ais_position` for impossible movement between consecutive AIS fixes on the same MMSI (teleport / high implied speed). **Class-A cargo/tanker only** (`shipType` 70–89 from latest `ais_static`). Results are **deduped to one row per MMSI per UTC day** (worst implied speed that day). `detectedAt` / `lastSeenAt` are the AIS time of the anomaly fix.\n\nOptional `from` / `to` (ISO 8601 UTC) — same **3-day max** window as GET /mantis/vessel-track. OFAC labels attached; listed vessels sorted first.\n\n**This Swagger page:** `anomalies` is capped at 20 samples.",
+        "description": "Also referred to as **GET /mantis/position-anomaly** in product docs — that path is **not** served; use **`/mantis/spoofing`**.\n\nPhase 1 reads stored teleport hits from Postgres `ais_positionanomaly` (written by the spoofing store from ClickHouse). **Class-A cargo/tanker only** (`shipType` 70–89). Results are **one row per MMSI per UTC day** (worst implied speed that day). `detectedAt` / `lastSeenAt` are the AIS time of the anomaly fix.\n\nOptional `from` / `to` (ISO 8601 UTC) — same **3-day max** window as GET /mantis/vessel-track. OFAC labels attached; listed vessels sorted first.\n\n**This Swagger page:** `anomalies` is capped at 20 samples.",
         "operationId": "getSpoofing",
         "security": [
           {
@@ -2079,7 +2180,7 @@
           "mantis"
         ],
         "summary": "Spoofing drill-down for one vessel.",
-        "description": "Companion to **GET /mantis/spoofing** (fleet dashboard). Returns **all** teleport / high-speed hits for one MMSI in the window (**no daily dedupe**), vessel header (static + **flagName** from `public.ais_flagname` via MID from MMSI), summary KPIs, optional **track** and **speedSeries** (implied vs SOG) for map/chart analysis. Same **3-day max** window and Phase 1 thresholds as fleet spoofing. Query **`mmsi`** required; optional `from` / `to`; `includeTrack` / `includeSpeedSeries` (default true).\n\n**This Swagger page:** `events`, `track`, and `speedSeries` are each capped at 20 samples.",
+        "description": "Companion to **GET /mantis/spoofing** (fleet dashboard). Returns stored teleport hits for one MMSI from `ais_positionanomaly` (one row per UTC day), vessel header (static + **flagName** from `public.ais_flagname` via MID from MMSI), summary KPIs, optional **track** and **speedSeries** for map/chart analysis. Same **3-day max** window as fleet spoofing. Query **`mmsi`** required; optional `from` / `to`; `includeTrack` / `includeSpeedSeries` (default true). The chart track still reads ClickHouse when requested.\n\n**This Swagger page:** `events`, `track`, and `speedSeries` are each capped at 20 samples.",
         "operationId": "getSpoofingVesselAnalysis",
         "security": [
           {

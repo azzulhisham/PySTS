@@ -2,9 +2,10 @@
 Position anomalies (Phase 1: impossible AIS jumps / teleport).
 
 Scans ClickHouse `ais_position` for consecutive fixes on the same MMSI whose
-implied speed exceeds physical limits. Keeps Class-A cargo/tanker only
-(shipType 70-89 from the current `ais_static` row per MMSI) and dedupes to one
-row per MMSI per UTC day (worst implied speed that day).
+implied speed exceeds physical limits. A one-point spike is dropped when the
+fixes on either side of it are still close together. Keeps Class-A cargo/tanker
+only (shipType 70-89 from the current `ais_static` row per MMSI) and dedupes to
+one row per MMSI per UTC day (worst implied speed that day).
 
 Also referred to in product docs as GET /mantis/position-anomaly; the served
 path is GET /mantis/spoofing.
@@ -38,7 +39,7 @@ from vessel_size import (
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-RULE_VERSION = "v1.0-teleport-cargo-tanker-daily-dedupe-ofac"
+RULE_VERSION = "v1.1-teleport-snapback-filter"
 SHIP_TYPE_FILTER = "70-89 (cargo/tanker/container Class-A large vessels)"
 DEDUPE_RULE = "One row per MMSI per UTC day; keep the hit with highest impliedSpeedKn."
 
@@ -48,6 +49,41 @@ MIN_DIST_M = 1000
 LONG_JUMP_DIST_M = 20_000
 LONG_JUMP_MIN_KN = 50.0
 HIGH_SPEED_MIN_KN = 80.0
+# One bad fix between two reports that are still near each other. 2 km covers
+# a cargo ship moving during the jump; the return must also be under 10% of
+# the jump so a real course change is kept.
+SNAP_BACK_MAX_M = 2_000
+
+PAIR_WINDOW_SQL = "PARTITION BY mmsi ORDER BY ts ROWS BETWEEN 2 PRECEDING AND 1 FOLLOWING"
+
+# prev2 = the fix before the previous point. next = the fix after this point.
+# snap_prev_m: this fix vs the one before the previous (previous point was the spike).
+# snap_curr_m: the next fix vs the previous (this point was the spike).
+SPIKE_SELECT_SQL = """
+        lagInFrame(ts, 2) OVER w AS prev2_ts,
+        leadInFrame(ts, 1) OVER w AS next_ts,
+        geoDistance(
+            lagInFrame(longitude, 2) OVER w, lagInFrame(latitude, 2) OVER w,
+            longitude, latitude
+        ) AS snap_prev_m,
+        geoDistance(
+            lagInFrame(longitude) OVER w, lagInFrame(latitude) OVER w,
+            leadInFrame(longitude, 1) OVER w, leadInFrame(latitude, 1) OVER w
+        ) AS snap_curr_m"""
+
+SPIKE_EXCLUSION_SQL = f"""
+  AND NOT (
+        (
+            prev2_ts > toDateTime64('2000-01-01', 3)
+            AND snap_prev_m <= {SNAP_BACK_MAX_M}
+            AND snap_prev_m * 10 < dist_m
+        )
+        OR (
+            next_ts > toDateTime64('2000-01-01', 3)
+            AND snap_curr_m <= {SNAP_BACK_MAX_M}
+            AND snap_curr_m * 10 < dist_m
+        )
+  )"""
 
 CARGO_TANKER_STATIC_SQL = f"""
 SELECT
@@ -112,19 +148,21 @@ FROM (
             ) / dateDiff('second', lagInFrame(ts) OVER w, ts)) * 1.94384 > {LONG_JUMP_MIN_KN},
             'teleport',
             'high_speed'
-        ) AS reason
+        ) AS reason,
+{SPIKE_SELECT_SQL}
     FROM pnav.ais_position
     WHERE ts >= toDateTime64({{date_from}}, 3)
       AND ts <= toDateTime64({{date_to}}, 3)
       AND mmsi > 0
       {{mmsi_filter}}
       {VALID_POSITION_SQL.strip()}
-    WINDOW w AS (PARTITION BY mmsi ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+    WINDOW w AS ({PAIR_WINDOW_SQL})
 )
 WHERE prev_ts IS NOT NULL
   AND dt_s BETWEEN {MIN_DT_S} AND {MAX_DT_S}
   AND dist_m >= {MIN_DIST_M}
   AND ((dist_m >= {LONG_JUMP_DIST_M} AND implied_kn > {LONG_JUMP_MIN_KN}) OR implied_kn > {HIGH_SPEED_MIN_KN})
+{SPIKE_EXCLUSION_SQL}
 """
 
 
@@ -216,6 +254,60 @@ def anomalies_to_payload(anomalies: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
+def load_stored_anomalies(engine: Engine, date_from: datetime, date_to: datetime) -> pd.DataFrame:
+    """Hits already written by the spoofing store. No ClickHouse on this path."""
+    return pd.read_sql(
+        text(
+            """
+            SELECT
+                mmsi,
+                ts,
+                prev_ts,
+                prev_latitude AS prev_lat,
+                prev_longitude AS prev_lon,
+                latitude,
+                longitude,
+                dist_m,
+                dt_s,
+                implied_kn,
+                reason,
+                event_day
+            FROM public.ais_positionanomaly
+            WHERE ts >= :date_from AND ts <= :date_to
+            """
+        ),
+        con=engine,
+        params={"date_from": date_from, "date_to": date_to},
+    )
+
+
+def load_static_for_mmsis(engine: Engine, mmsi_list: list[int]) -> pd.DataFrame:
+    """Current static row for a small MMSI list. Does not window the whole history."""
+    if not mmsi_list:
+        return pd.DataFrame()
+    return pd.read_sql(
+        text(
+            f"""
+            SELECT DISTINCT ON (mmsi)
+                mmsi,
+                "shipName" AS shipname,
+                "shipType" AS shiptype,
+                "shipTypeDesc" AS shiptypedesc,
+                imo,
+                to_bow,
+                to_stern,
+                to_port,
+                to_starboard
+            FROM public.ais_static
+            WHERE mmsi = ANY(:mmsis)
+            ORDER BY mmsi, {CURRENT_STATIC_ROW_ORDER}
+            """
+        ),
+        con=engine,
+        params={"mmsis": [int(m) for m in mmsi_list]},
+    )
+
+
 def detect_spoofing(
     date_from: datetime | str | None = None,
     date_to: datetime | str | None = None,
@@ -224,22 +316,27 @@ def detect_spoofing(
     summary_only: bool = False,
 ) -> dict[str, Any]:
     """
-    Phase 1 position-anomaly scan: teleport / impossible jumps.
+    Position anomalies stored in ais_positionanomaly.
 
     Date window follows the same 3-day cap as GET /mantis/vessel-track.
     """
     engine = engine or get_pg_engine()
     dt_from, dt_to, range_meta = resolve_track_range(date_from, date_to)
 
-    static = load_cargo_tanker_static(engine)
-    cargo_mmsis = static["mmsi"].astype(int).tolist() if not static.empty else []
-    raw_hits = load_teleport_hits(dt_from, dt_to, mmsi_list=cargo_mmsis)
+    raw_hits = load_stored_anomalies(engine, dt_from, dt_to)
+    static = load_static_for_mmsis(
+        engine,
+        raw_hits["mmsi"].astype(int).tolist() if not raw_hits.empty else [],
+    )
 
     raw_hit_count = int(len(raw_hits))
-    if raw_hits.empty or static.empty:
+    if raw_hits.empty:
         return _empty_result(dt_from, dt_to, range_meta, raw_hit_count)
 
-    merged = raw_hits.merge(static, on="mmsi", how="inner")
+    if static.empty:
+        merged = raw_hits
+    else:
+        merged = raw_hits.merge(static, on="mmsi", how="left")
     filtered_hit_count = int(len(merged))
     deduped = dedupe_daily(merged)
 
@@ -271,6 +368,7 @@ def detect_spoofing(
             "longJumpDistanceM": LONG_JUMP_DIST_M,
             "longJumpMinImpliedKn": LONG_JUMP_MIN_KN,
             "highSpeedMinImpliedKn": HIGH_SPEED_MIN_KN,
+            "snapBackMaxM": SNAP_BACK_MAX_M,
         },
         "raw_hit_count": raw_hit_count,
         "filtered_hit_count": filtered_hit_count,
@@ -303,6 +401,7 @@ def _empty_result(
             "longJumpDistanceM": LONG_JUMP_DIST_M,
             "longJumpMinImpliedKn": LONG_JUMP_MIN_KN,
             "highSpeedMinImpliedKn": HIGH_SPEED_MIN_KN,
+            "snapBackMaxM": SNAP_BACK_MAX_M,
         },
         "raw_hit_count": raw_hit_count,
         "filtered_hit_count": 0,

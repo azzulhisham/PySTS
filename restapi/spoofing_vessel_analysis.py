@@ -24,7 +24,11 @@ from spoofing import (
     MAX_DT_S,
     MIN_DIST_M,
     MIN_DT_S,
+    PAIR_WINDOW_SQL,
     RULE_VERSION,
+    SNAP_BACK_MAX_M,
+    SPIKE_EXCLUSION_SQL,
+    SPIKE_SELECT_SQL,
     get_pg_engine,
 )
 from timelineplayback import (
@@ -92,18 +96,20 @@ FROM (
             ) / dateDiff('second', lagInFrame(ts) OVER w, ts)) * 1.94384 > {LONG_JUMP_MIN_KN},
             'teleport',
             'high_speed'
-        ) AS reason
+        ) AS reason,
+{SPIKE_SELECT_SQL}
     FROM pnav.ais_position
     WHERE mmsi = {{mmsi}}
       AND ts >= toDateTime64({{date_from}}, 3)
       AND ts <= toDateTime64({{date_to}}, 3)
       {VALID_POSITION_SQL.strip()}
-    WINDOW w AS (PARTITION BY mmsi ORDER BY ts ROWS BETWEEN 1 PRECEDING AND CURRENT ROW)
+    WINDOW w AS ({PAIR_WINDOW_SQL})
 )
 WHERE prev_ts IS NOT NULL
   AND dt_s BETWEEN {MIN_DT_S} AND {MAX_DT_S}
   AND dist_m >= {MIN_DIST_M}
   AND ((dist_m >= {LONG_JUMP_DIST_M} AND implied_kn > {LONG_JUMP_MIN_KN}) OR implied_kn > {HIGH_SPEED_MIN_KN})
+{SPIKE_EXCLUSION_SQL}
 ORDER BY ts ASC
 """
 
@@ -183,17 +189,38 @@ def load_vessel_teleport_hits(
     date_from: datetime,
     date_to: datetime,
     client=None,
+    engine: Engine | None = None,
 ) -> pd.DataFrame:
-    client = client or get_clickhouse_client()
-    query = VESSEL_TELEPORT_HIT_SQL.format(
-        mmsi=int(mmsi),
-        date_from=f"'{_ch_literal_ts(date_from)}'",
-        date_to=f"'{_ch_literal_ts(date_to)}'",
+    """Stored daily hits for one MMSI. The chart track is still loaded separately."""
+    engine = engine or get_pg_engine()
+    frame = pd.read_sql(
+        text(
+            """
+            SELECT
+                mmsi,
+                ts,
+                prev_ts,
+                prev_latitude AS prev_lat,
+                prev_longitude AS prev_lon,
+                latitude,
+                longitude,
+                NULL::double precision AS prev_sog,
+                NULL::double precision AS curr_sog,
+                dist_m,
+                dt_s,
+                implied_kn,
+                reason
+            FROM public.ais_positionanomaly
+            WHERE mmsi = :mmsi
+              AND ts >= :date_from
+              AND ts <= :date_to
+            ORDER BY ts ASC
+            """
+        ),
+        con=engine,
+        params={"mmsi": int(mmsi), "date_from": date_from, "date_to": date_to},
     )
-    result = client.query(query)
-    if not result.row_count:
-        return pd.DataFrame(columns=result.column_names)
-    return pd.DataFrame(result.result_rows, columns=result.column_names)
+    return frame
 
 
 def count_ais_positions(
@@ -377,7 +404,7 @@ def detect_vessel_spoofing_analysis(
         labelled = attach_sanctions(static_df.copy(), engine)
         sanctions_row = labelled.iloc[0]
 
-    hits = load_vessel_teleport_hits(mmsi, dt_from, dt_to, client=client)
+    hits = load_vessel_teleport_hits(mmsi, dt_from, dt_to, engine=engine)
     position_count = count_ais_positions(mmsi, dt_from, dt_to, client=client)
 
     events_payload = events_to_payload(hits)
@@ -428,6 +455,7 @@ def detect_vessel_spoofing_analysis(
             "longJumpDistanceM": LONG_JUMP_DIST_M,
             "longJumpMinImpliedKn": LONG_JUMP_MIN_KN,
             "highSpeedMinImpliedKn": HIGH_SPEED_MIN_KN,
+            "snapBackMaxM": SNAP_BACK_MAX_M,
         },
         "vessel": _vessel_header(mmsi, static_row, mid, flag_name, sanctions_row),
         "summary": {

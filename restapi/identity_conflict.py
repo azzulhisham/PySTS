@@ -19,7 +19,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.engine import Engine
 
-from duckdb_spatial import spatial_fetchone
+from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 
 from sanctions import (
@@ -31,7 +31,6 @@ from sanctions import (
 from vessel_size import (
     CURRENT_STATIC_ROW_ORDER,
     DIM_SELECT,
-    class_b_join,
     dimension_fields,
 )
 
@@ -45,6 +44,58 @@ MATCH_RULE = (
     "IMO plus name, callsign or dimensions; or name plus callsign or dimensions. "
     "Placeholder / repdigit IMOs and names shorter than 3 characters are ignored."
 )
+
+# Most MMSIs have one static row. Sorting the whole history (the old
+# row_number() over SELECT *) is what held the API worker. Duplicate MMSIs
+# are a small set (~930 on ais_static); only those use the preference order
+# so an empty Message 5 shell does not hide a populated row.
+def _current_rows_sql(table: str, columns: str, *, ship_type_filter: bool) -> str:
+    type_sql = 'AND "shipType" >= 70 AND "shipType" < 90' if ship_type_filter else ""
+    picked_type_sql = 'WHERE "shipType" >= 70 AND "shipType" < 90' if ship_type_filter else ""
+    return f"""
+    WITH multi AS (
+        SELECT mmsi
+        FROM {table}
+        GROUP BY mmsi
+        HAVING COUNT(*) > 1
+    )
+    SELECT {columns}
+    FROM {table} src
+    WHERE NOT EXISTS (SELECT 1 FROM multi d WHERE d.mmsi = src.mmsi)
+      {type_sql}
+    UNION ALL
+    SELECT {columns}
+    FROM (
+        SELECT DISTINCT ON (mmsi) {columns}
+        FROM {table} src
+        WHERE EXISTS (SELECT 1 FROM multi d WHERE d.mmsi = src.mmsi)
+        ORDER BY mmsi, {CURRENT_STATIC_ROW_ORDER}
+    ) picked
+    {picked_type_sql}
+    """
+
+
+_STATIC_COLUMNS = """
+    mmsi,
+    ts,
+    "shipName",
+    "shipType",
+    "shipTypeDesc",
+    callsign,
+    imo,
+    to_bow,
+    to_stern,
+    to_port,
+    to_starboard
+"""
+
+_STATICB_COLUMNS = """
+    mmsi,
+    to_bow,
+    to_stern,
+    to_port,
+    to_starboard
+"""
 
 CANDIDATE_SQL = f"""
 SELECT
@@ -63,16 +114,12 @@ SELECT
     p.cog,
     p."navStatus" AS navstatus
 FROM (
-    SELECT *,
-           row_number() OVER (
-               PARTITION BY mmsi ORDER BY {CURRENT_STATIC_ROW_ORDER}
-           ) AS rowcount_static
-    FROM public.ais_static
+{_current_rows_sql("public.ais_static", _STATIC_COLUMNS, ship_type_filter=True)}
 ) s
 LEFT JOIN public.ais_position p ON p.mmsi = s.mmsi
-{class_b_join("s.mmsi")}
-WHERE s.rowcount_static = 1
-  AND s."shipType" >= 70 AND s."shipType" < 90
+LEFT JOIN (
+{_current_rows_sql("public.ais_staticb", _STATICB_COLUMNS, ship_type_filter=False)}
+) sb ON sb.mmsi = s.mmsi
 """
 
 
@@ -259,27 +306,45 @@ def _group_match_reasons(mmsis: list[int], identities: dict[int, dict]) -> list[
     return [key for key in order if key in reasons]
 
 
-def _max_internal_distance_m(members: pd.DataFrame) -> float | None:
-    points = members.dropna(subset=["longitude", "latitude"])
-    if len(points) < 2:
-        return None
-
-    result = spatial_fetchone(
+def _distances_by_signature(members_by_sig: dict[str, pd.DataFrame]) -> dict[str, float]:
+    """One spatial pass for every group. Opening DuckDB once per group stalled the worker."""
+    rows: list[dict[str, Any]] = []
+    for signature, members in members_by_sig.items():
+        points = members.dropna(subset=["longitude", "latitude"])
+        if len(points) < 2:
+            continue
+        for _, row in points.iterrows():
+            rows.append({
+                "signature": signature,
+                "mmsi": int(row["mmsi"]),
+                "longitude": float(row["longitude"]),
+                "latitude": float(row["latitude"]),
+            })
+    if not rows:
+        return {}
+    found = spatial_df(
         """
-        SELECT MAX(
-            ST_Distance_Sphere(
-                ST_Point(a.longitude, a.latitude),
-                ST_Point(b.longitude, b.latitude)
-            )
-        ) AS max_dist
+        SELECT
+            a.signature,
+            MAX(
+                ST_Distance_Sphere(
+                    ST_Point(a.longitude, a.latitude),
+                    ST_Point(b.longitude, b.latitude)
+                )
+            ) AS max_dist
         FROM id_members a
-        INNER JOIN id_members b ON a.mmsi < b.mmsi
+        INNER JOIN id_members b
+          ON a.signature = b.signature
+         AND a.mmsi < b.mmsi
+        GROUP BY a.signature
         """,
-        {"id_members": points[["mmsi", "longitude", "latitude"]]},
+        {"id_members": pd.DataFrame(rows)},
     )
-    if result is None or result[0] is None:
-        return None
-    return float(result[0])
+    out: dict[str, float] = {}
+    for _, row in found.iterrows():
+        if pd.notna(row.get("max_dist")):
+            out[str(row["signature"])] = float(row["max_dist"])
+    return out
 
 
 def _best_confidence_values(values: list[str]) -> str:
@@ -354,15 +419,23 @@ def detect_identity_conflicts(
     identities = {int(row["mmsi"]): vessel_identity(row) for _, row in candidates.iterrows()}
     by_mmsi = candidates.set_index("mmsi", drop=False)
 
+    built = _build_groups(candidates)
+    members_by_sig: dict[str, pd.DataFrame] = {}
+    for mmsis in built:
+        signature = "_".join(str(m) for m in mmsis)
+        members_by_sig[signature] = by_mmsi.loc[mmsis].reset_index(drop=True)
+    distances = _distances_by_signature(members_by_sig)
+
     groups: list[dict[str, Any]] = []
-    for mmsis in _build_groups(candidates):
-        members = by_mmsi.loc[mmsis].reset_index(drop=True)
+    for mmsis in built:
+        signature = "_".join(str(m) for m in mmsis)
+        members = members_by_sig[signature]
         event_times = [ts for ts in (_ais_event_ts(row) for _, row in members.iterrows()) if ts is not None]
         if not event_times:
             continue
 
         used_position = any(_to_utc_ts(row.get("last_ais_ts")) is not None for _, row in members.iterrows())
-        distance_m = _max_internal_distance_m(members)
+        distance_m = distances.get(signature)
         if max_distance_m is not None:
             if distance_m is None or distance_m >= float(max_distance_m):
                 continue
@@ -381,7 +454,7 @@ def detect_identity_conflicts(
         identities_payload = [identity_to_payload(row) for _, row in members_sorted.iterrows()]
 
         groups.append({
-            "cluster_signature": "_".join(str(m) for m in mmsis),
+            "cluster_signature": signature,
             "detected_at": max(event_times),
             "first_ais_at": min(event_times),
             "used_position_ts": used_position,
