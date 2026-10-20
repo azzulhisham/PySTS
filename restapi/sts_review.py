@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +18,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from pg_engine import get_pg_engine
+from sts_detection import filter_observations_in_anchorages
 
 MIN_SUSPICION_SCORE = 4.5
 REVIEW_CLASSES = frozenset({
@@ -81,6 +82,12 @@ def _iso(value: Any) -> str | None:
     return parsed.isoformat()
 
 
+def _iso_z(value: Any) -> str | None:
+    """UTC with a Z suffix, so the value can go back in a query string without encoding '+'."""
+    iso = _iso(value)
+    return None if iso is None else iso.replace("+00:00", "Z")
+
+
 def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
     records = []
     if frame.empty:
@@ -101,6 +108,7 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "reviewNotes": _clean(row.get("review_notes")),
             "suspicionScore": None if _clean(row.get("suspicion_score")) is None else float(row["suspicion_score"]),
             "isOpen": None if _clean(row.get("is_open")) is None else bool(row["is_open"]),
+            "notifiedAt": _iso(row.get("notified_at")),
             "firstDetectedAt": _iso(row.get("first_detected_at")),
             "lastDetectedAt": _iso(row.get("last_detected_at")),
             "durationSeconds": None if _clean(row.get("duration_seconds")) is None else float(row["duration_seconds"]),
@@ -123,10 +131,17 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
-LIST_SQL = text(
-    """
-    SELECT *
-    FROM public.ais_stsreviewcase
+DEFAULT_PAGE_SIZE = 100
+MAX_PAGE_SIZE = 1000
+
+# id breaks ties so pages do not overlap when a review cycle stamps many cases
+# with the same last_detected_at.
+PAGE_ORDER = """
+    ORDER BY last_detected_at DESC NULLS LAST, suspicion_score DESC NULLS LAST, id DESC
+    LIMIT :limit OFFSET :offset
+"""
+
+QUEUE_WHERE = """
     WHERE status = 'unreviewed'
       AND suspicion_score >= :min_score
       AND dredge_licence_match IS NOT TRUE
@@ -137,15 +152,22 @@ LIST_SQL = text(
          OR dark_overlap IS TRUE
          OR illegal_anchor_overlap IS TRUE
       )
-    ORDER BY sanctions_match DESC NULLS LAST, suspicion_score DESC NULLS LAST
+"""
+
+_QUEUE_PARAMS = {"min_score": MIN_SUSPICION_SCORE}
+
+LIST_SQL = text("SELECT * FROM public.ais_stsreviewcase" + QUEUE_WHERE + PAGE_ORDER)
+
+LIST_COUNT_SQL = text(
     """
+    SELECT COUNT(*) AS case_count,
+           COUNT(*) FILTER (WHERE sanctions_match IS TRUE) AS sanctions_match_count
+    FROM public.ais_stsreviewcase
+    """
+    + QUEUE_WHERE
 )
 
-
-UNREVIEWED_SQL = text(
-    """
-    SELECT *
-    FROM public.ais_stsreviewcase
+UNREVIEWED_WHERE = """
     WHERE status = 'unreviewed'
       AND (
             CAST(:date_from AS timestamptz) IS NULL
@@ -155,42 +177,186 @@ UNREVIEWED_SQL = text(
             CAST(:date_to AS timestamptz) IS NULL
             OR COALESCE(first_detected_at, last_detected_at) <= CAST(:date_to AS timestamptz)
       )
-    ORDER BY last_detected_at DESC NULLS LAST, suspicion_score DESC NULLS LAST
+"""
+
+UNREVIEWED_SQL = text("SELECT * FROM public.ais_stsreviewcase" + UNREVIEWED_WHERE + PAGE_ORDER)
+
+UNREVIEWED_COUNT_SQL = text(
+    "SELECT COUNT(*) AS case_count FROM public.ais_stsreviewcase" + UNREVIEWED_WHERE
+)
+
+
+NOTIFY_LIMIT = 200
+NOTIFY_DEFAULT_LOOKBACK = timedelta(minutes=5)
+NOTIFY_AREAS = ("anchorage", "all")
+
+# The review pipeline stamps a whole batch with its transaction start time, so a
+# row can become visible a few seconds after its notified_at. Reading only up to
+# now() minus this lag keeps a cursor from skipping such rows.
+NOTIFY_COMMIT_LAG = "60 seconds"
+
+NOTIFY_UNTIL_SQL = text(f"SELECT now() - interval '{NOTIFY_COMMIT_LAG}'")
+
+NOTIFY_SQL = text(
+    "SELECT * FROM public.ais_stsreviewcase"
+    + QUEUE_WHERE
+    + """
+      AND notified_at > :since
+      AND notified_at <= :until
+    ORDER BY notified_at, id
+    LIMIT :limit
     """
 )
+
+NOTIFY_AT_SQL = text(
+    "SELECT * FROM public.ais_stsreviewcase"
+    + QUEUE_WHERE
+    + """
+      AND notified_at = :at
+    ORDER BY id
+    """
+)
+
+
+def _in_anchorage_screen(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep cases whose centroid is inside a parent anchorage buffered 1 km, outside Excl holes."""
+    located = frame.dropna(subset=["centroid_latitude", "centroid_longitude"])
+    if located.empty:
+        return frame.iloc[0:0]
+    kept = filter_observations_in_anchorages(
+        located[["observation_id", "centroid_longitude", "centroid_latitude"]].reset_index(drop=True)
+    )
+    return frame[frame["observation_id"].isin(set(kept["observation_id"].tolist()))]
+
+
+def list_notifications(
+    since: datetime | None = None,
+    area: str = "anchorage",
+    engine: Engine | None = None,
+) -> dict[str, Any]:
+    """
+    Cases that entered the review queue after `since`, oldest first. Pass the
+    returned next_since as `since` on the following call.
+    """
+    if area not in NOTIFY_AREAS:
+        raise ValueError("area must be anchorage or all")
+    if since is not None and since.tzinfo is None:
+        since = since.replace(tzinfo=timezone.utc)
+    engine = engine or get_pg_engine()
+    with engine.connect() as conn:
+        until = conn.execute(NOTIFY_UNTIL_SQL).scalar_one()
+        if since is None:
+            since = until - NOTIFY_DEFAULT_LOOKBACK
+        if since >= until:
+            frame = pd.DataFrame()
+            next_since, has_more = since, False
+        else:
+            frame = pd.read_sql(
+                NOTIFY_SQL,
+                con=conn,
+                params={**_QUEUE_PARAMS, "since": since, "until": until, "limit": NOTIFY_LIMIT + 1},
+            )
+            has_more = len(frame) > NOTIFY_LIMIT
+            if not has_more:
+                next_since = until
+            else:
+                # Never split one notified_at between two calls: the cursor is "after this time".
+                boundary = frame.iloc[NOTIFY_LIMIT]["notified_at"]
+                frame = frame.iloc[:NOTIFY_LIMIT]
+                frame = frame[frame["notified_at"] < boundary]
+                if frame.empty:
+                    frame = pd.read_sql(NOTIFY_AT_SQL, con=conn, params={**_QUEUE_PARAMS, "at": boundary})
+                    next_since = boundary
+                else:
+                    next_since = frame["notified_at"].max()
+
+    scanned = len(frame)
+    if area == "anchorage" and not frame.empty:
+        frame = _in_anchorage_screen(frame)
+    cases = cases_to_payload(frame)
+    return {
+        "area": area,
+        "since": _iso_z(since),
+        "until": _iso_z(until),
+        "next_since": _iso_z(next_since),
+        "has_more": has_more,
+        "scanned_count": scanned,
+        "notification_count": len(cases),
+        "sanctions_match_count": sum(1 for case in cases if case["sanctionsMatch"]),
+        "cases": cases,
+    }
+
+
+def _check_page(page: int, page_size: int) -> None:
+    if page < 1:
+        raise ValueError("page must be 1 or greater")
+    if page_size < 1 or page_size > MAX_PAGE_SIZE:
+        raise ValueError(f"pageSize must be between 1 and {MAX_PAGE_SIZE}")
+
+
+def _page_fields(page: int, page_size: int, total: int, returned: int) -> dict[str, int]:
+    return {
+        "page": page,
+        "page_size": page_size,
+        "total_pages": (total + page_size - 1) // page_size,
+        "returned_count": returned,
+    }
 
 
 def list_unreviewed(
     date_from: datetime | None = None,
     date_to: datetime | None = None,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
     engine: Engine | None = None,
 ) -> dict[str, Any]:
-    """Every unreviewed case. Optional window overlaps the pair's open interval."""
+    """One page of unreviewed cases. Optional window overlaps the pair's open interval."""
     if date_from is not None and date_to is not None and date_from > date_to:
         raise ValueError("from must be earlier than to")
+    _check_page(page, page_size)
     engine = engine or get_pg_engine()
-    frame = pd.read_sql(
-        UNREVIEWED_SQL,
-        con=engine,
-        params={"date_from": date_from, "date_to": date_to},
-    )
+    window = {"date_from": date_from, "date_to": date_to}
+    with engine.connect() as conn:
+        total = int(conn.execute(UNREVIEWED_COUNT_SQL, window).scalar_one())
+        frame = pd.read_sql(
+            UNREVIEWED_SQL,
+            con=conn,
+            params={**window, "limit": page_size, "offset": (page - 1) * page_size},
+        )
     cases = cases_to_payload(frame)
     return {
         "date_from": None if date_from is None else date_from.astimezone(timezone.utc).isoformat(),
         "date_to": None if date_to is None else date_to.astimezone(timezone.utc).isoformat(),
-        "case_count": len(cases),
+        "case_count": total,
+        **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,
     }
 
 
-def list_unexplained(min_suspicion_score: float = MIN_SUSPICION_SCORE, engine: Engine | None = None) -> dict[str, Any]:
+def list_unexplained(
+    min_suspicion_score: float = MIN_SUSPICION_SCORE,
+    page: int = 1,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    engine: Engine | None = None,
+) -> dict[str, Any]:
+    """One page of the notification queue. Counts cover every matching case."""
+    _check_page(page, page_size)
     engine = engine or get_pg_engine()
-    frame = pd.read_sql(LIST_SQL, con=engine, params={"min_score": float(min_suspicion_score)})
+    score = {"min_score": float(min_suspicion_score)}
+    with engine.connect() as conn:
+        counts = conn.execute(LIST_COUNT_SQL, score).mappings().one()
+        frame = pd.read_sql(
+            LIST_SQL,
+            con=conn,
+            params={**score, "limit": page_size, "offset": (page - 1) * page_size},
+        )
     cases = cases_to_payload(frame)
+    total = int(counts["case_count"])
     return {
         "min_suspicion_score": float(min_suspicion_score),
-        "case_count": len(cases),
-        "sanctions_match_count": sum(1 for case in cases if case["sanctionsMatch"]),
+        "case_count": total,
+        "sanctions_match_count": int(counts["sanctions_match_count"]),
+        **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,
     }
 

@@ -62,11 +62,19 @@ CREATE TABLE IF NOT EXISTS public.ais_stsreviewcase (
     spoof_overlap boolean,
     members jsonb,
     refreshed_at timestamptz,
-    created_at timestamptz NOT NULL DEFAULT now()
+    created_at timestamptz NOT NULL DEFAULT now(),
+    -- Set once, when the case first passes the GET /mantis/sts-review queue rule.
+    notified_at timestamptz
 );
 
 CREATE INDEX IF NOT EXISTS idx_stsreviewcase_status
     ON public.ais_stsreviewcase (status);
+
+ALTER TABLE public.ais_stsreviewcase ADD COLUMN IF NOT EXISTS notified_at timestamptz;
+
+CREATE INDEX IF NOT EXISTS idx_stsreviewcase_notified_at
+    ON public.ais_stsreviewcase (notified_at)
+    WHERE notified_at IS NOT NULL;
 """
 
 

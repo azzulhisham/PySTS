@@ -47,6 +47,8 @@ LOOP_SECONDS = int(os.environ.get("sts_review_loop_seconds", "900"))
 CATCHUP_PAUSE_SECONDS = int(os.environ.get("sts_review_catchup_pause_seconds", "5"))
 BATCH_LIMIT = int(os.environ.get("sts_review_batch", "100"))
 NM_M = 1852.0
+# Must match the queue rule in restapi/sts_review.py (GET /mantis/sts-review).
+NOTIFY_MIN_SCORE = 4.5
 
 _password = os.environ.get("pnav_db_password", "m4r1t1m3")
 DATABASE_URL = (
@@ -240,7 +242,7 @@ UPSERT = text(
         max_internal_distance_m, in_anchorage, anchorage_name, outside_anchorage,
         sanctions_match, dredge_licence_match, bunker_list_match,
         dark_overlap, illegal_anchor_overlap, loiter_overlap, anchor_swing_overlap,
-        spoof_overlap, members, refreshed_at, created_at
+        spoof_overlap, members, refreshed_at, created_at, notified_at
     ) VALUES (
         :observation_id, :cluster_signature, 'unreviewed',
         :first_detected_at, :last_detected_at, :duration_seconds, :suspicion_score, :is_open,
@@ -248,7 +250,8 @@ UPSERT = text(
         :max_internal_distance_m, :in_anchorage, :anchorage_name, :outside_anchorage,
         :sanctions_match, :dredge_licence_match, false,
         :dark_overlap, :illegal_anchor_overlap, :loiter_overlap, :anchor_swing_overlap,
-        :spoof_overlap, CAST(:members AS jsonb), now(), now()
+        :spoof_overlap, CAST(:members AS jsonb), now(), now(),
+        CASE WHEN CAST(:notify AS boolean) THEN now() END
     )
     ON CONFLICT (observation_id) DO UPDATE SET
         cluster_signature = EXCLUDED.cluster_signature,
@@ -274,10 +277,27 @@ UPSERT = text(
         anchor_swing_overlap = EXCLUDED.anchor_swing_overlap,
         spoof_overlap = EXCLUDED.spoof_overlap,
         members = EXCLUDED.members,
-        refreshed_at = now()
+        refreshed_at = now(),
+        notified_at = COALESCE(ais_stsreviewcase.notified_at, EXCLUDED.notified_at)
     WHERE ais_stsreviewcase.status = 'unreviewed'
     """
 )
+
+
+def _notifiable(row: dict) -> bool:
+    """Same test as the GET /mantis/sts-review queue. bunker_list_match is always false here."""
+    score = row["suspicion_score"]
+    return (
+        score is not None
+        and score >= NOTIFY_MIN_SCORE
+        and not row["dredge_licence_match"]
+        and bool(
+            row["sanctions_match"]
+            or row["outside_anchorage"]
+            or row["dark_overlap"]
+            or row["illegal_anchor_overlap"]
+        )
+    )
 
 
 def _ids(frame: pd.DataFrame) -> list[int]:
@@ -497,6 +517,8 @@ def run_once() -> int:
             "members": json.dumps(payloads),
         })
 
+    for row in rows:
+        row["notify"] = _notifiable(row)
     with engine.begin() as conn:
         conn.execute(UPSERT, rows)
     logging.info("STS review: refreshed %s case(s)", len(rows))

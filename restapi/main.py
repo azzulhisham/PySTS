@@ -12,7 +12,7 @@ from polygons import anchorage_areas, all_polygons
 from sts_detection import (
     detect_sts_in_anchorages,
 )
-from sts_review import list_unexplained, list_unreviewed, verify_case
+from sts_review import DEFAULT_PAGE_SIZE, list_notifications, list_unexplained, list_unreviewed, verify_case
 from illegal_anchoring import detect_illegal_anchoring
 from loitering import detect_loitering
 from dark_vessels import detect_dark_vessels
@@ -90,6 +90,29 @@ def json_for_client(payload, list_keys: list[str], wrap_list_as: str | None = No
         from_swagger=is_swagger_request(),
         wrap_list_as=wrap_list_as,
     )
+
+
+def _page_args() -> tuple[int, int]:
+    def _int(name: str, default: int) -> int:
+        raw = request.args.get(name)
+        if raw is None or raw.strip() == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(f"{name} must be an integer") from None
+
+    return _int("page", 1), _int("pageSize", DEFAULT_PAGE_SIZE)
+
+
+def _page_payload(result: dict) -> dict:
+    return {
+        "totalCount": result["case_count"],
+        "page": result["page"],
+        "pageSize": result["page_size"],
+        "totalPages": result["total_pages"],
+        "returnedCount": result["returned_count"],
+    }
 
 
 @app.route("/authentication/token", methods=["POST"])
@@ -230,16 +253,22 @@ def get_sts_review():
 
     try:
         min_score = request.args.get("minSuspicionScore", type=float)
+        page, page_size = _page_args()
         result = list_unexplained(
             min_suspicion_score=min_score if min_score is not None else 4.5,
+            page=page,
+            page_size=page_size,
         )
         payload = {
             "minSuspicionScore": result["min_suspicion_score"],
             "caseCount": result["case_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            **_page_payload(result),
             "cases": result["cases"],
         }
         return jsonify(json_for_client(payload, ["cases"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
     except Exception as e:
         logging.error(f"[get_sts_review] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
@@ -264,11 +293,18 @@ def get_sts_review_unreviewed():
         return parse_datetime(raw)
 
     try:
-        result = list_unreviewed(date_from=_when("from"), date_to=_when("to"))
+        page, page_size = _page_args()
+        result = list_unreviewed(
+            date_from=_when("from"),
+            date_to=_when("to"),
+            page=page,
+            page_size=page_size,
+        )
         payload = {
             "dateFrom": result["date_from"],
             "dateTo": result["date_to"],
             "caseCount": result["case_count"],
+            **_page_payload(result),
             "cases": result["cases"],
         }
         return jsonify(json_for_client(payload, ["cases"])), 200
@@ -276,6 +312,42 @@ def get_sts_review_unreviewed():
         return jsonify({"message": str(e)}), 400
     except Exception as e:
         logging.error(f"[get_sts_review_unreviewed] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/sts-review/notifications", methods=["GET"])
+@cross_origin()
+def get_sts_review_notifications():
+    """
+    Cases that entered the /mantis/sts-review queue after `since`, for polling.
+
+    Send back nextSince as `since` on the next call; omit it on the first call
+    to get the last 5 minutes. area=anchorage (default) keeps cases inside an
+    anchorage polygon buffered 1 km, like the dashboard; area=all keeps every case.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        raw_since = request.args.get("since")
+        since = parse_datetime(raw_since) if raw_since and raw_since.strip() else None
+        result = list_notifications(since=since, area=request.args.get("area") or "anchorage")
+        payload = {
+            "area": result["area"],
+            "since": result["since"],
+            "until": result["until"],
+            "nextSince": result["next_since"],
+            "hasMore": result["has_more"],
+            "scannedCount": result["scanned_count"],
+            "notificationCount": result["notification_count"],
+            "sanctionsMatchCount": result["sanctions_match_count"],
+            "cases": result["cases"],
+        }
+        return jsonify(json_for_client(payload, ["cases"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_sts_review_notifications] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 
