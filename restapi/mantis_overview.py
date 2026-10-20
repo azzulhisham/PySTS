@@ -22,6 +22,7 @@ from illegal_anchoring import detect_illegal_anchoring
 from pg_engine import get_pg_engine
 from spoofing import detect_spoofing
 from sts_detection import detect_sts_in_anchorages
+from sts_review import MIN_SUSPICION_SCORE
 
 logger = logging.getLogger(__name__)
 
@@ -227,7 +228,7 @@ def _run_spoofing_module(
 
 def detect_mantis_overview(
     *,
-    min_suspicion_score: float = 4.5,
+    min_suspicion_score: float = MIN_SUSPICION_SCORE,
     include_coverage_exit: bool = False,
     spoofing_from: datetime | str | None = None,
     spoofing_to: datetime | str | None = None,

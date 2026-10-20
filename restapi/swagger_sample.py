@@ -63,7 +63,7 @@ def apply_swagger_sample(
         out["message"] = SWAGGER_SAMPLE_MESSAGE
         if len(list_keys) == 1:
             key = list_keys[0]
-            out["totalCount"] = totals.get(key, 0)
+            out.setdefault("totalCount", totals.get(key, 0))
             out["returnedCount"] = len(out.get(key) or [])
         else:
             out["totalCounts"] = totals

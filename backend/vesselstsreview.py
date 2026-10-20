@@ -40,6 +40,7 @@ from illegal_anchoring import classify_illegal_anchoring  # noqa: E402
 from mantis_tables import ensure_tables  # noqa: E402
 from polygons import anchorage_areas, is_excl_name  # noqa: E402
 from sanctions import load_ofac_indexes, match_vessel  # noqa: E402
+from sts_review import is_notifiable_case  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -250,7 +251,7 @@ UPSERT = text(
         max_internal_distance_m, in_anchorage, anchorage_name, outside_anchorage,
         sanctions_match, dredge_licence_match, bunker_list_match,
         dark_overlap, illegal_anchor_overlap, loiter_overlap, anchor_swing_overlap,
-        spoof_overlap, members, refreshed_at, created_at
+        spoof_overlap, members, refreshed_at, created_at, notified_at
     ) VALUES (
         :observation_id, :cluster_signature, 'unreviewed',
         :first_detected_at, :last_detected_at, :duration_seconds, :suspicion_score, :is_open,
@@ -258,7 +259,8 @@ UPSERT = text(
         :max_internal_distance_m, :in_anchorage, :anchorage_name, :outside_anchorage,
         :sanctions_match, :dredge_licence_match, false,
         :dark_overlap, :illegal_anchor_overlap, :loiter_overlap, :anchor_swing_overlap,
-        :spoof_overlap, CAST(:members AS jsonb), now(), now()
+        :spoof_overlap, CAST(:members AS jsonb), now(), now(),
+        CASE WHEN CAST(:notify AS boolean) THEN now() END
     )
     ON CONFLICT (observation_id) DO UPDATE SET
         cluster_signature = EXCLUDED.cluster_signature,
@@ -284,10 +286,16 @@ UPSERT = text(
         anchor_swing_overlap = EXCLUDED.anchor_swing_overlap,
         spoof_overlap = EXCLUDED.spoof_overlap,
         members = EXCLUDED.members,
-        refreshed_at = now()
+        refreshed_at = now(),
+        notified_at = COALESCE(ais_stsreviewcase.notified_at, EXCLUDED.notified_at)
     WHERE ais_stsreviewcase.status = 'unreviewed'
     """
 )
+
+
+def _notifiable(row: dict) -> bool:
+    """Same test as the GET /mantis/sts-review queue. bunker_list_match is always false here."""
+    return is_notifiable_case(row)
 
 
 def _ids(frame: pd.DataFrame) -> list[int]:
@@ -508,6 +516,8 @@ def run_once() -> int:
             "members": json.dumps(payloads),
         })
 
+    for row in rows:
+        row["notify"] = _notifiable(row)
     with engine.begin() as conn:
         conn.execute(UPSERT, rows)
     logging.info("STS review: refreshed %s case(s)", len(rows))

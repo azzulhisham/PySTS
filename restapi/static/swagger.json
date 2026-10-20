@@ -247,6 +247,38 @@
       "StsActivitiesResponse": {
         "type": "object",
         "properties": {
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "totalCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: full length of each list before the cap."
+          },
+          "returnedCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: rows returned in each list."
+          },
           "minSuspicionScore": {
             "type": "number",
             "format": "double",
@@ -446,6 +478,32 @@
       "IllegalAnchoringResponse": {
         "type": "object",
         "properties": {
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `vessels` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `vessels`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
           "ruleVersion": {
             "type": "string",
             "example": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label"
@@ -650,6 +708,32 @@
       "DarkVesselsResponse": {
         "type": "object",
         "properties": {
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `vessels` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `vessels`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
           "ruleVersion": {
             "type": "string",
             "example": "v1.2-slowmove-dark-polygon-ofac-label"
@@ -901,6 +985,38 @@
       "IdentityConflictResponse": {
         "type": "object",
         "properties": {
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "totalCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: full length of each list before the cap."
+          },
+          "returnedCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: rows returned in each list."
+          },
           "ruleVersion": {
             "type": "string",
             "example": "v1.0-identity-conflict-ais-ts-ofac"
@@ -1085,6 +1201,32 @@
       "SpoofingResponse": {
         "type": "object",
         "properties": {
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `anomalies` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `anomalies`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
           "ruleVersion": {
             "type": "string",
             "example": "v1.1-teleport-snapback-filter"
@@ -1189,6 +1331,38 @@
       "SpoofingVesselAnalysisResponse": {
         "type": "object",
         "properties": {
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "totalCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: full length of each list before the cap."
+          },
+          "returnedCounts": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "description": "Only when `sample` is true: rows returned in each list."
+          },
           "ruleVersion": { "type": "string" },
           "analysisRule": { "type": "string" },
           "phase": { "type": "integer" },
@@ -1334,6 +1508,741 @@
           }
         }
       },
+      "StsReviewMember": {
+        "type": "object",
+        "description": "One vessel in the reviewed cluster, as captured by the STS review pipeline.",
+        "properties": {
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipName": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipType": {
+            "type": "integer",
+            "nullable": true
+          },
+          "shipTypeDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this vessel matches OFAC."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "possible",
+              "none"
+            ]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "SDN",
+              "CONS"
+            ]
+          },
+          "onDredgeLicence": {
+            "type": "boolean",
+            "description": "True when the vessel holds a dredge licence in force during the pair."
+          },
+          "dredgeProjectId": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Dredge project id when `onDredgeLicence` is true."
+          },
+          "onBunkerList": {
+            "type": "boolean",
+            "description": "Always false until a bunker register is connected."
+          }
+        }
+      },
+      "StsReviewCase": {
+        "type": "object",
+        "properties": {
+          "notifiedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "When the case first met the queue rule. Set once by the STS review pipeline; null if it never did."
+          },
+          "caseId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Use with POST /mantis/sts-review/{caseId}/verify."
+          },
+          "observationId": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Proximity observation id."
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "unreviewed",
+              "reviewed"
+            ]
+          },
+          "reviewClass": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "illicit_transfer",
+              "bunkering",
+              "dredge",
+              "other_legal",
+              "uncertain",
+              null
+            ]
+          },
+          "labeledAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "labeledBy": {
+            "type": "string",
+            "nullable": true
+          },
+          "reviewNotes": {
+            "type": "string",
+            "nullable": true
+          },
+          "suspicionScore": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "example": 5.27
+          },
+          "isOpen": {
+            "type": "boolean",
+            "nullable": true,
+            "description": "True while the cluster is still detected."
+          },
+          "firstDetectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastDetectedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "durationSeconds": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "centroidLatitude": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "centroidLongitude": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "vesselCount": {
+            "type": "integer",
+            "nullable": true
+          },
+          "inAnchorage": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "anchorageName": {
+            "type": "string",
+            "nullable": true
+          },
+          "outsideAnchorage": {
+            "type": "boolean",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "At least one member matches OFAC."
+          },
+          "dredgeLicenceMatch": {
+            "type": "boolean"
+          },
+          "bunkerListMatch": {
+            "type": "boolean"
+          },
+          "darkOverlap": {
+            "type": "boolean"
+          },
+          "illegalAnchorOverlap": {
+            "type": "boolean"
+          },
+          "loiterOverlap": {
+            "type": "boolean"
+          },
+          "anchorSwingOverlap": {
+            "type": "boolean"
+          },
+          "spoofOverlap": {
+            "type": "boolean"
+          },
+          "members": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StsReviewMember"
+            }
+          }
+        }
+      },
+      "StsReviewResponse": {
+        "type": "object",
+        "properties": {
+          "minSuspicionScore": {
+            "type": "number",
+            "format": "double",
+            "example": 4.5
+          },
+          "sanctionsMatchCount": {
+            "type": "integer",
+            "description": "Matching cases with a sanctioned member, across all pages."
+          },
+          "caseCount": {
+            "type": "integer",
+            "description": "Cases matching the query across all pages."
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Same as `caseCount`."
+          },
+          "page": {
+            "type": "integer",
+            "example": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "example": 100
+          },
+          "totalPages": {
+            "type": "integer",
+            "description": "0 when no case matches."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Cases in `cases` for this page. 20 when this call is from Swagger UI and the page is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StsReviewCase"
+            }
+          }
+        }
+      },
+      "StsReviewUnreviewedResponse": {
+        "type": "object",
+        "properties": {
+          "dateFrom": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "dateTo": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "caseCount": {
+            "type": "integer",
+            "description": "Cases matching the query across all pages."
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Same as `caseCount`."
+          },
+          "page": {
+            "type": "integer",
+            "example": 1
+          },
+          "pageSize": {
+            "type": "integer",
+            "example": 100
+          },
+          "totalPages": {
+            "type": "integer",
+            "description": "0 when no case matches."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Cases in `cases` for this page. 20 when this call is from Swagger UI and the page is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StsReviewCase"
+            }
+          }
+        }
+      },
+      "StsReviewVerifyResponse": {
+        "type": "object",
+        "properties": {
+          "caseId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observationId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "status": {
+            "type": "string",
+            "example": "reviewed"
+          },
+          "reviewClass": {
+            "type": "string",
+            "enum": [
+              "illicit_transfer",
+              "bunkering",
+              "dredge",
+              "other_legal",
+              "uncertain"
+            ]
+          },
+          "labeledAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "labeledBy": {
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "LoiteringFilters": {
+        "type": "object",
+        "description": "Geometry filters applied after the preset and any overrides. Null means not applied.",
+        "properties": {
+          "pattern": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "loitering",
+              "anchorSwing",
+              null
+            ]
+          },
+          "minPathM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "maxPathM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "maxNetM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "maxNetOverPath": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "minRadiusM": {
+            "nullable": true,
+            "oneOf": [
+              {
+                "type": "number",
+                "format": "double"
+              },
+              {
+                "type": "string",
+                "example": "max(lengthM, 300)"
+              }
+            ],
+            "description": "Metres, or the text `max(lengthM, 300)` when the hull-relative radius is used."
+          },
+          "maxRadiusM": {
+            "nullable": true,
+            "oneOf": [
+              {
+                "type": "number",
+                "format": "double"
+              },
+              {
+                "type": "string",
+                "example": "max(lengthM, 300)"
+              }
+            ],
+            "description": "Metres, or the text `max(lengthM, 300)` when the hull-relative radius is used."
+          }
+        }
+      },
+      "LoiteringEvent": {
+        "type": "object",
+        "properties": {
+          "loiterId": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mmsi": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "shipName": {
+            "type": "string",
+            "nullable": true
+          },
+          "shipType": {
+            "type": "integer",
+            "nullable": true
+          },
+          "shipTypeDesc": {
+            "type": "string",
+            "nullable": true
+          },
+          "latitude": {
+            "type": "number",
+            "format": "double",
+            "description": "Centre of the loiter circle."
+          },
+          "longitude": {
+            "type": "number",
+            "format": "double",
+            "description": "Centre of the loiter circle."
+          },
+          "startedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "endedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastSeenAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "Same as `endedAt`. Use as the anchor for GET /mantis/vessel-track."
+          },
+          "radiusM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Maximum distance from the mean centre."
+          },
+          "pathM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Distance travelled along the track."
+          },
+          "netM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Straight-line distance from first to last sample."
+          },
+          "netOverPath": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "sampleCount": {
+            "type": "integer",
+            "nullable": true
+          },
+          "outsideAnchorage": {
+            "type": "boolean"
+          },
+          "nearRestricted": {
+            "type": "boolean",
+            "description": "Within 5 NM of the restricted limit."
+          },
+          "beforeSts": {
+            "type": "boolean",
+            "description": "An STS observation starts within 6 h and 5 NM."
+          },
+          "flags": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "outside_anchorage",
+                "near_restricted",
+                "before_sts"
+              ]
+            }
+          },
+          "anchorageName": {
+            "type": "string",
+            "nullable": true
+          },
+          "restrictedDistanceM": {
+            "type": "number",
+            "nullable": true,
+            "format": "double"
+          },
+          "stsObservationId": {
+            "type": "integer",
+            "nullable": true,
+            "format": "int64"
+          },
+          "toBow": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to bow. Class A from ais_static, else Class B from ais_staticb."
+          },
+          "toStern": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to stern."
+          },
+          "toPort": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to port."
+          },
+          "toStarboard": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Metres from AIS GPS antenna to starboard."
+          },
+          "lengthM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Overall length in metres (toBow + toStern). Null if either offset is missing."
+          },
+          "beamM": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Beam (width) in metres (toPort + toStarboard). Null if either offset is missing."
+          },
+          "imo": {
+            "type": "string",
+            "nullable": true
+          },
+          "sanctionsMatch": {
+            "type": "boolean",
+            "description": "True if this vessel matches OFAC. Label only."
+          },
+          "matchConfidence": {
+            "type": "string",
+            "enum": [
+              "confirmed",
+              "possible",
+              "none"
+            ]
+          },
+          "sanctionsList": {
+            "type": "string",
+            "nullable": true,
+            "enum": [
+              "SDN",
+              "CONS"
+            ]
+          }
+        }
+      },
+      "LoiteringResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": {
+            "type": "string",
+            "example": "v1.1-loiter-circle-6nm"
+          },
+          "shipTypeFilter": {
+            "type": "string",
+            "example": "70-89 (cargo/tanker/container Class-A large vessels)"
+          },
+          "filters": {
+            "$ref": "#/components/schemas/LoiteringFilters"
+          },
+          "eventCount": {
+            "type": "integer"
+          },
+          "byFlag": {
+            "type": "object",
+            "properties": {
+              "outside_anchorage": {
+                "type": "integer"
+              },
+              "near_restricted": {
+                "type": "integer"
+              },
+              "before_sts": {
+                "type": "integer"
+              }
+            }
+          },
+          "sanctionsMatchCount": {
+            "type": "integer"
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `events` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `events`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LoiteringEvent"
+            }
+          }
+        }
+      },
+      "StsReviewNotificationsResponse": {
+        "type": "object",
+        "properties": {
+          "area": {
+            "type": "string",
+            "enum": [
+              "anchorage",
+              "all"
+            ]
+          },
+          "since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Start of the window (exclusive). The `since` you sent, or 5 minutes before `until` when omitted."
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "description": "End of the window (inclusive): server time minus 60 seconds, so rows still being committed are not skipped."
+          },
+          "nextSince": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Send this as `since` on the next call. Equals `until` unless `hasMore` is true.",
+            "example": "2026-10-12T07:15:00.123456Z"
+          },
+          "hasMore": {
+            "type": "boolean",
+            "description": "More than 200 cases entered the queue in this window. Call again at once with `nextSince`."
+          },
+          "scannedCount": {
+            "type": "integer",
+            "description": "Cases in the window before the area filter."
+          },
+          "notificationCount": {
+            "type": "integer",
+            "description": "Cases in `cases` (after the area filter)."
+          },
+          "sanctionsMatchCount": {
+            "type": "integer"
+          },
+          "totalCount": {
+            "type": "integer",
+            "description": "Same as `notificationCount`."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `cases`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
+          "cases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StsReviewCase"
+            }
+          }
+        }
+      },
       "ErrorMessage": {
         "type": "object",
         "properties": {
@@ -1394,6 +2303,32 @@
       "VesselTimelineResponse": {
         "type": "object",
         "properties": {
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `events` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `events`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
           "mmsi": {
             "type": "integer",
             "format": "int64"
@@ -1484,6 +2419,32 @@
       "VesselTrackResponse": {
         "type": "object",
         "properties": {
+          "totalCount": {
+            "type": "integer",
+            "description": "Rows in the full `track` list before the Swagger sample cap."
+          },
+          "returnedCount": {
+            "type": "integer",
+            "description": "Rows in `track`. 20 when this call is from Swagger UI and the list is larger."
+          },
+          "fromSwagger": {
+            "type": "boolean",
+            "description": "True when the request Referer is the Swagger page."
+          },
+          "sample": {
+            "type": "boolean",
+            "description": "True when the payload was capped for Swagger UI."
+          },
+          "sampleLimit": {
+            "type": "integer",
+            "nullable": true,
+            "example": 20
+          },
+          "message": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explains the 20-row sample when `sample` is true."
+          },
           "mmsi": {
             "type": "integer",
             "format": "int64"
@@ -1579,7 +2540,8 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1614,10 +2576,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 invalid credentials."
+            "description": "Unauthorized \u2014 invalid credentials.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Server error."
+            "description": "Server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1659,10 +2623,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1714,10 +2680,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1750,10 +2718,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1815,11 +2785,17 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid query parameter, for example the spoofing date window.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1862,10 +2838,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -1874,7 +2852,7 @@
       "get": {
         "tags": ["mantis"],
         "summary": "Unexplained STS cases waiting for a human label.",
-        "description": "Reads `ais_stsreviewcase`. Returns unreviewed cases with suspicion_score at least 4.5, dredge licence not matched, bunker list not matched, and at least one of sanctions, outside the original anchorage, dark overlap, or illegal-anchoring overlap. Loiter and anchor swing are stored on the case and do not by themselves put a case in this list. Sanctioned cases are sorted first. This is a queue, not a confirmed anomaly.",
+        "description": "Reads `ais_stsreviewcase`. Returns unreviewed cases with suspicion_score at least 4.5, dredge licence not matched, bunker list not matched, and at least one of sanctions, outside the original anchorage, dark overlap, or illegal-anchoring overlap. Loiter and anchor swing are stored on the case and do not by themselves put a case in this list. Sorted by `lastDetectedAt` descending (newest first), then `suspicionScore` descending, then `caseId` descending. This is a queue, not a confirmed anomaly.\n\n**Paginated.** `page` starts at 1; `pageSize` defaults to 100 (maximum 1000). `caseCount` / `totalCount` and `sanctionsMatchCount` cover every matching case, not just the page. `totalPages` and `returnedCount` describe the page. A page past the end returns an empty `cases` list.",
         "operationId": "getStsReview",
         "security": [{ "BearerAuth": [] }],
         "parameters": [
@@ -1883,12 +2861,27 @@
             "in": "query",
             "required": false,
             "schema": { "type": "number", "default": 4.5 }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "default": 1 },
+            "description": "Page number, starting at 1."
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+            "description": "Cases per page."
           }
         ],
         "responses": {
-          "200": { "description": "Unexplained unreviewed cases." },
-          "401": { "description": "Unauthorized." },
-          "500": { "description": "Internal server error." }
+          "200": { "description": "One page of unexplained unreviewed cases.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StsReviewResponse" } } } },
+          "400": { "description": "Invalid page or pageSize.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "401": { "description": "Unauthorized.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } }
         }
       }
     },
@@ -1896,7 +2889,7 @@
       "get": {
         "tags": ["mantis"],
         "summary": "All unreviewed STS cases, with an optional date window.",
-        "description": "Reads every `ais_stsreviewcase` row with status unreviewed, including pairs the notification queue hides. Optional `from` and `to` (ISO 8601) keep a case whose open interval overlaps that window: it started on or before `to`, and it was still detected on or after `from`. `caseId` is the id for POST /mantis/sts-review/{caseId}/verify. Reviewed rows stay out.",
+        "description": "Reads every `ais_stsreviewcase` row with status unreviewed, including pairs the notification queue hides. Optional `from` and `to` (ISO 8601) keep a case whose open interval overlaps that window: it started on or before `to`, and it was still detected on or after `from`. `caseId` is the id for POST /mantis/sts-review/{caseId}/verify. Reviewed rows stay out. Sorted by `lastDetectedAt` descending (newest first), then `suspicionScore` descending, then `caseId` descending.\n\n**Paginated.** `page` starts at 1; `pageSize` defaults to 100 (maximum 1000). `caseCount` / `totalCount` cover every matching case, not just the page. `totalPages` and `returnedCount` describe the page. A page past the end returns an empty `cases` list.",
         "operationId": "getStsReviewUnreviewed",
         "security": [{ "BearerAuth": [] }],
         "parameters": [
@@ -1913,13 +2906,109 @@
             "required": false,
             "schema": { "type": "string", "format": "date-time" },
             "description": "Keep cases that started at or before this time."
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "default": 1 },
+            "description": "Page number, starting at 1."
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "minimum": 1, "maximum": 1000, "default": 100 },
+            "description": "Cases per page."
           }
         ],
         "responses": {
-          "200": { "description": "Unreviewed cases." },
-          "400": { "description": "Invalid date window." },
-          "401": { "description": "Unauthorized." },
-          "500": { "description": "Internal server error." }
+          "200": { "description": "One page of unreviewed cases.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StsReviewUnreviewedResponse" } } } },
+          "400": { "description": "Invalid date window, page, or pageSize.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "401": { "description": "Unauthorized.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } }
+        }
+      }
+    },
+    "/mantis/sts-review/notifications": {
+      "get": {
+        "tags": [
+          "mantis"
+        ],
+        "summary": "New STS review cases since the last poll.",
+        "description": "For frontend polling (for example every 5 minutes). Returns cases that entered the `GET /mantis/sts-review` queue after `since`, oldest first. A case enters the queue once, when the STS review pipeline (every 15 minutes) first finds it meets the queue rule; that moment is `notifiedAt` and never changes, so a case is delivered once.\n\n**Polling:** omit `since` on the first call (returns the last 5 minutes). Store `nextSince` and send it as `since` on the next call. A late or missed poll catches up without gaps. If `hasMore` is true, call again immediately with `nextSince`. Ignore a `caseId` you already hold, as a safety net.\n\n**Area:** `anchorage` (default) keeps cases whose centre is inside an anchorage polygon expanded by 1 km, outside Excl holes, the same boundary as the dashboard and `GET /mantis/sts-activities`. `all` keeps every case.\n\nAt most 200 cases are read per call. Cases already reviewed, or that no longer meet the queue rule, are left out.",
+        "operationId": "getStsReviewNotifications",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            },
+            "description": "`nextSince` from the previous call. ISO 8601; UTC assumed when no offset is given."
+          },
+          {
+            "name": "area",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "anchorage",
+                "all"
+              ],
+              "default": "anchorage"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Cases that entered the queue in the window. `cases` is empty when there is nothing new.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StsReviewNotificationsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid since or area.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorMessage"
+                }
+              }
+            }
+          }
         }
       }
     },
@@ -1958,11 +3047,11 @@
           }
         },
         "responses": {
-          "200": { "description": "Case marked reviewed." },
-          "400": { "description": "Missing or unknown reviewClass." },
-          "401": { "description": "Unauthorized." },
-          "404": { "description": "Case not found or already reviewed." },
-          "500": { "description": "Internal server error." }
+          "200": { "description": "Case marked reviewed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/StsReviewVerifyResponse" } } } },
+          "400": { "description": "Missing or unknown reviewClass.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "401": { "description": "Unauthorized.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "404": { "description": "Case not found or already reviewed.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "500": { "description": "Internal server error.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } }
         }
       }
     },
@@ -2046,9 +3135,10 @@
           }
         ],
         "responses": {
-          "200": { "description": "Open loiter events." },
-          "401": { "description": "Unauthorized." },
-          "500": { "description": "Internal server error. The loiter table is created when the backend job runs." }
+          "200": { "description": "Open loiter events.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/LoiteringResponse" } } } },
+          "400": { "description": "Unknown pattern.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "401": { "description": "Unauthorized.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
+          "500": { "description": "Internal server error. The loiter table is created when the backend job runs.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } }
         }
       }
     },
@@ -2077,10 +3167,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -2122,10 +3214,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -2187,13 +3281,16 @@
             }
           },
           "400": {
-            "description": "Invalid date range (e.g. from after to)."
+            "description": "Invalid date range (e.g. from after to).",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "401": {
-            "description": "Unauthorized — missing or invalid Bearer token."
+            "description": "Unauthorized — missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -2270,13 +3367,16 @@
             }
           },
           "400": {
-            "description": "Missing mmsi or invalid date range."
+            "description": "Missing mmsi or invalid date range.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "401": {
-            "description": "Unauthorized."
+            "description": "Unauthorized.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -2351,10 +3451,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }
@@ -2446,10 +3548,12 @@
             }
           },
           "401": {
-            "description": "Unauthorized \u2014 missing or invalid Bearer token."
+            "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
-            "description": "Internal server error."
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           }
         }
       }

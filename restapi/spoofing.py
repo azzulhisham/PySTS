@@ -23,8 +23,8 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ais_identity import (
-    VALID_SHIP_MMSI_SQL,
     VALID_SHIP_MMSI_SQL_CH,
+    VALID_SHIP_MMSI_SQL_S,
     clean_ship_name,
     is_valid_ship_mmsi,
 )
@@ -162,7 +162,7 @@ FROM (
 ) s
 {class_b_join("s.mmsi")}
 WHERE s.rowcount_static = 1
-{VALID_SHIP_MMSI_SQL.replace("mmsi", "s.mmsi")}
+{VALID_SHIP_MMSI_SQL_S}
   AND s."shipType" >= 70 AND s."shipType" < 90
 """
 

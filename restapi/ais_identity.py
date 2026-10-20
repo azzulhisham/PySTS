@@ -19,6 +19,14 @@ VALID_SHIP_MMSI_SQL = f"""
   AND mod(mmsi, 1000000) <> 0
 """
 
+# Same rule, qualified for queries that join another table with an `mmsi` column
+# (e.g. ais_static s LEFT JOIN ais_staticb sb).
+VALID_SHIP_MMSI_SQL_S = f"""
+  AND s.mmsi >= {MID_MIN}000000
+  AND s.mmsi <= {MID_MAX}999999
+  AND mod(s.mmsi, 1000000) <> 0
+"""
+
 # ClickHouse (clickhouse_connect raw queries — '%' is fine here).
 VALID_SHIP_MMSI_SQL_CH = f"""
   AND mmsi >= {MID_MIN}000000
