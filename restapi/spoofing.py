@@ -162,7 +162,7 @@ FROM (
 ) s
 {class_b_join("s.mmsi")}
 WHERE s.rowcount_static = 1
-{VALID_SHIP_MMSI_SQL}
+{VALID_SHIP_MMSI_SQL.replace("mmsi", "s.mmsi")}
   AND s."shipType" >= 70 AND s."shipType" < 90
 """
 
