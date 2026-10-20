@@ -17,6 +17,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
+from ais_identity import clean_ship_name
 from pg_engine import get_pg_engine
 
 MIN_SUSPICION_SCORE = 4.5
@@ -39,7 +40,12 @@ def get_write_engine() -> Engine:
         return _write_engine
     with _write_lock:
         if _write_engine is None:
-            password = os.environ.get("pnav_db_password", "m4r1t1m3")
+            password = os.environ.get("pnav_db_password")
+            if not password or not str(password).strip():
+                raise RuntimeError(
+                    "Environment variable pnav_db_password is required for "
+                    "STS review writes (no hard-coded credentials)."
+                )
             url = (
                 f"postgresql://postgresadmin:{quote(password)}"
                 f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
@@ -91,6 +97,16 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
             members = json.loads(members)
         elif members is None or (isinstance(members, float) and pd.isna(members)):
             members = []
+        cleaned_members = []
+        for member in members or []:
+            if not isinstance(member, dict):
+                cleaned_members.append(member)
+                continue
+            item = dict(member)
+            if "shipName" in item:
+                item["shipName"] = clean_ship_name(item.get("shipName"))
+            cleaned_members.append(item)
+        members = cleaned_members
         records.append({
             "caseId": int(row["id"]),
             "observationId": int(row["observation_id"]),

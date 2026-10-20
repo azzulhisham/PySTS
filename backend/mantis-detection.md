@@ -125,12 +125,15 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Dark: confirmed-stop exclude | `CONFIRMED_STOP_ROWCOUNT = 30` (`rowcount < 30`) | `dark_vessels.py` |
 | Dark: slow-down evidence | `MIN_SLOWDOWN_ROWCOUNT = 5` | `dark_vessels.py` |
 | Dark: coverage-exit age | `COVERAGE_EXIT_DAYS = 3` | `dark_vessels.py` |
+| Dark: max gap cap | `DARK_MAX_DAYS` (default **7**) — gaps ≥ cap are `possible_coverage_exit` only | `dark_vessels.py` |
+| Dark: include coverage exit | query `includeCoverageExit` default **false** (overview + list) | `dark_vessels.py`, `main.py` |
 | Dark: ship type | `70–89` | `dark_vessels.py` |
 | Dark: polygons | **label only, never drop**; Excl name preferred if in a hole | `dark_vessels.py` |
 | Dark: Restricted Limit | **not** used for `polygonName` | `dark_vessels.py` |
 | Identity conflict | same-hull groups of 2+ MMSIs; `detectedAt` = latest AIS `ts` | `identity_conflict.py` |
 | Identity match | IMO + (name\|callsign\|dims) **or** name + (callsign\|dims) | same file |
-| Spoofing Phase 1 | teleport implied speed; dedupe 1/MMSI/UTC day; `from`/`to` max 3 d | `spoofing.py` |
+| Spoofing Phase 1 | teleport / high_speed alerts; DQ reasons stored separately; `from`/`to` max 3 d | `spoofing.py` |
+| Spoofing data quality | `includeDataQuality` (default false); `dataQualityCount` per MMSI-day | `spoofing.py`, `main.py` |
 | Sanctions / bunker labels | OFAC **on API**; bunker **skipped** | `sanctionsMatch` on STS / dark / anchoring / identity-conflict / spoofing; `onBunkerRegister` later |
 
 ### Identity ingest (`ofac_sdn_ingest.py` / `ofac_cons_ingest.py` — not a detector loop)
@@ -269,10 +272,10 @@ Source: `restapi/dark_vessels.py`. Candidate must have `tsout IS NULL`, `tsstop 
 | `darkReason` | Rule | `confidence` |
 | --- | --- | --- |
 | `suspected_dark_after_slowdown` | `rowcount >= 5` and `< 30` and `tscurrent` within 3 days | `high` |
-| `possible_coverage_exit` | `tscurrent` older than 3 days **or** last sog `> 3.0` | `low` |
+| `possible_coverage_exit` | silence ≥ `DARK_MAX_DAYS` (default 7), **or** `tscurrent` older than 3 days, **or** last sog `> 3.0` (optional: last fix outside `DARK_COVERAGE_GEOJSON`) | `low` |
 | `low_evidence_ais_gap` | otherwise | `medium` |
 
-Query `includeCoverageExit=false` drops `possible_coverage_exit`.
+Response includes `darkMaxDays`. Query `includeCoverageExit` defaults to **false** (drops `possible_coverage_exit`); set `true` for the previous full list. Same default on `GET /mantis/overview`.
 
 Polygons: **label only**. `polygonName` from `restapi/polygons.py` named areas; Excl name if inside a hole; never drop.
 
@@ -454,7 +457,11 @@ Tug / patrol / fast-manoeuvring types (e.g. MMSIs that showed thousands of raw t
 
 Optional query params `from` / `to` (ISO 8601 UTC); same **3-day max** window as `GET /mantis/vessel-track` (`resolve_track_range`).
 
-Response fields include `reason` (`teleport` | `high_speed`), `phase` (1), `detector` (`teleport`), `rawHitCount`, `filteredHitCount`, `anomalyCount`.
+Optional `includeDataQuality` (default **false**). Data-quality reasons `bad_position_data` and `duplicate_mmsi` are stored in `ais_positionanomaly` but left out of `anomalies` / `anomalyCount` / alert `byReason` unless the flag is true. `dataQualityCount` is always returned and is **per MMSI-day** after daily dedupe within the data-quality class.
+
+Response fields include `reason` (`teleport` | `high_speed`, plus DQ reasons when included), `phase` (1), `detector` (`teleport`), `rawHitCount`, `filteredHitCount`, `anomalyCount`, `dataQualityCount`, `includeDataQuality`.
+
+**Store upsert priority** (`backend/vesselspoofingstore.py`, no DDL): for the same `(mmsi, event_day)`, an alert row (`teleport` / `high_speed`) always replaces a data-quality row; a data-quality row never replaces an alert; within the same class the higher `implied_kn` wins (`ON CONFLICT … WHERE`).
 
 ### Live probe (2026-09-03, last 3 days)
 
@@ -741,6 +748,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
+| 2026-10-20 | Plausibility filters (not deployed): `bad_position_data` = short-gap or snap-back only; `duplicate_mmsi`; dark `DARK_MAX_DAYS` + default `includeCoverageExit=false` (`darkMaxDays` in response); spoofing `includeDataQuality` / `dataQualityCount`. Store upsert prefers alerts over data-quality for `(mmsi, event_day)`. Notifications / `notified_at` live on branch `sts-notifications`, not main. |
 | 2026-10-09 | Proximity `2.3-tanker-pair-score`. Composition term is now `1.0` when a cluster has two or more tankers (cargo may also be present), `0.5` for two or more cargo ships, `0` otherwise; it was `1` for any cargo + tanker mix. Open observations take the new score on their next update. Closed observations are not rescored. Deployed to 10.10.20.200 at 12:33 UTC (backup `vesselproximitydetection.py.bak-20261009-123319`); service active, no errors after restart. |
 | 2026-10-09 | Built and started. `ais_positionanomaly` and `ais_stsreviewcase` created on `pnav`. Proximity `2.2-dredge-licence` restarted on `10.10.20.200`. New units `ais_vesselspoofingstore` and `ais_vesselstsreview` are active. First cycle wrote 20 spoofing rows and 100 unreviewed cases. Pleasure, pilot, high-speed craft, tug, fishing, and passenger stay out. API routes are in the repo; that host's only container is `py-bpa-restapi`. |
 | 2026-10-09 | Locked and frozen, not started. Proximity stays 70–89 plus dredge-licence MMSIs (12-hour cache from `shipprojects`); fishing 30, towing 31–32, tug 52, and passenger 60–69 stay out. `ais_stsreviewcase` follows every `ais_vesselproximityobservation`. `GET /mantis/sts-activities` keeps the anchorage cut with each parent polygon buffered by **1 km**; Excl holes are not buffered. Spoofing facts go to `ais_positionanomaly`. Notification reads `ais_stsreviewcase` and does not set `is_anomaly`. |

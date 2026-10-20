@@ -48,7 +48,17 @@ CATCHUP_PAUSE_SECONDS = int(os.environ.get("sts_review_catchup_pause_seconds", "
 BATCH_LIMIT = int(os.environ.get("sts_review_batch", "100"))
 NM_M = 1852.0
 
-_password = os.environ.get("pnav_db_password", "m4r1t1m3")
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(
+            f"Environment variable {name} is required for STS review "
+            f"(no hard-coded credentials)."
+        )
+    return str(value)
+
+
+_password = _require_env("pnav_db_password")
 DATABASE_URL = (
     f"postgresql://postgresadmin:{quote(_password)}"
     f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
@@ -395,6 +405,7 @@ def run_once() -> int:
                 FROM public.ais_positionanomaly
                 WHERE mmsi = ANY(:mmsis)
                   AND event_day BETWEEN CAST(:batch_start AS date) AND CAST(:batch_end AS date)
+                  AND reason NOT IN ('bad_position_data', 'duplicate_mmsi')
                 """
             ),
             con=engine,

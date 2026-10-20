@@ -40,6 +40,32 @@ from sqlmodel import Field, SQLModel, create_engine
 from ais_static_sql import CURRENT_STATIC_ROW_ORDER
 from polygons import anchorage_areas, is_excl_name, restricted_limit  # noqa: E402
 
+# Shared MMSI plausibility (restapi helper). Prefer local restapi copy when present.
+_RESTAPI = Path(__file__).resolve().parent.parent / "restapi"
+if _RESTAPI.is_dir() and str(_RESTAPI) not in sys.path:
+    sys.path.insert(0, str(_RESTAPI))
+try:
+    from ais_identity import VALID_SHIP_MMSI_SQL, is_valid_ship_mmsi  # noqa: E402
+except ImportError:  # pragma: no cover - deployed layout with restapi beside sts/
+    VALID_SHIP_MMSI_SQL = """
+  AND mmsi >= 201000000
+  AND mmsi <= 775999999
+  AND mod(mmsi, 1000000) <> 0
+"""
+
+    def is_valid_ship_mmsi(mmsi) -> bool:  # type: ignore[misc]
+        try:
+            n = int(mmsi)
+        except (TypeError, ValueError):
+            return False
+        text = str(n)
+        return (
+            len(text) == 9
+            and not text.endswith("000000")
+            and 201 <= int(text[:3]) <= 775
+        )
+
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
 DETECTION_VERSION = "1.1-loiter-circle-6nm"
@@ -57,14 +83,28 @@ STS_MAX_DISTANCE_M = 5 * 1852.0
 PLACE_MATCH_M = 2 * 1852.0
 MMSI_CHUNK = 1500
 
-pswd = "m4r1t1m3"
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
-CLICKHOUSE_HOST = os.environ.get("clickhouse_host", "56.69.44.39")
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(
+            f"Environment variable {name} is required for loitering detection "
+            f"(no hard-coded credentials)."
+        )
+    return value
+
+
+def _database_url() -> str:
+    password = _require_env("pnav_db_password")
+    host = os.environ.get(
+        "pnav_db_host",
+        "marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com",
+    )
+    user = os.environ.get("pnav_db_user", "postgresadmin")
+    name = os.environ.get("pnav_db_name", "pnav")
+    return f"postgresql://{user}:{quote(password)}@{host}:5432/{name}"
+
+
 CLICKHOUSE_USER = os.environ.get("clickhouse_user", "default")
-CLICKHOUSE_PASSWORD = os.environ.get("clickhouse_password", "Pinc@200901029426")
 
 
 class Ais_VesselLoiterActivity(SQLModel, table=True):
@@ -100,7 +140,7 @@ def get_pg_engine() -> Engine:
     global _engine
     if _engine is None:
         _engine = create_engine(
-            DATABASE_URL,
+            _database_url(),
             pool_size=1,
             max_overflow=0,
             pool_timeout=30,
@@ -118,9 +158,11 @@ def get_pg_engine() -> Engine:
 
 
 def get_clickhouse_client():
-    kwargs = {"host": CLICKHOUSE_HOST, "user": CLICKHOUSE_USER}
-    if CLICKHOUSE_PASSWORD:
-        kwargs["password"] = CLICKHOUSE_PASSWORD
+    kwargs = {
+        "host": _require_env("clickhouse_host"),
+        "user": CLICKHOUSE_USER,
+        "password": _require_env("clickhouse_password"),
+    }
     return clickhouse_connect.get_client(**kwargs)
 
 
@@ -153,14 +195,14 @@ def load_cargo_tanker_mmsis(engine: Engine) -> list[int]:
             FROM public.ais_static
         ) s
         WHERE rn = 1
-          AND mmsi > 0
+{VALID_SHIP_MMSI_SQL}
           AND "shipType" >= 70 AND "shipType" < 90
         """,
         con=engine,
     )
     if df.empty:
         return []
-    return [int(v) for v in df["mmsi"].tolist()]
+    return [int(v) for v in df["mmsi"].tolist() if is_valid_ship_mmsi(v)]
 
 
 def fetch_track_samples(client, mmsis: list[int], start: datetime, end: datetime) -> pd.DataFrame:

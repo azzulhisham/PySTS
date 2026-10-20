@@ -18,11 +18,21 @@ from urllib.parse import quote
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine
 
-_pswd = os.environ.get("pnav_db_password", "m4r1t1m3")
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(_pswd)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(
+            f"Environment variable {name} is required for the MANTIS API "
+            f"(no hard-coded credentials)."
+        )
+    return str(value)
+
+
+def _database_url() -> str:
+    return (
+        f"postgresql://postgresadmin:{quote(_require_env('pnav_db_password'))}"
+        f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
+    )
 
 # milliseconds (PostgreSQL GUC units for these settings)
 API_STATEMENT_TIMEOUT_MS = int(os.environ.get("mantis_pg_statement_timeout_ms", "60000"))
@@ -54,7 +64,7 @@ def get_pg_engine() -> Engine:
     with _engine_lock:
         if _engine is None:
             _engine = create_engine(
-                DATABASE_URL,
+                _database_url(),
                 pool_size=API_POOL_SIZE,
                 max_overflow=API_MAX_OVERFLOW,
                 pool_timeout=30,

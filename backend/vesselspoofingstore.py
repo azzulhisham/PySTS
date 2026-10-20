@@ -34,7 +34,13 @@ sys.path.insert(0, str(BACKEND_DIR))
 sys.path.insert(0, str(RESTAPI_DIR))
 
 from mantis_tables import ensure_tables  # noqa: E402
-from spoofing import RULE_VERSION, dedupe_daily, load_cargo_tanker_static, load_teleport_hits  # noqa: E402
+from spoofing import (  # noqa: E402
+    RULE_VERSION,
+    _split_alert_and_quality,
+    dedupe_daily,
+    load_cargo_tanker_static,
+    load_teleport_hits,
+)
 from timelineplayback import resolve_track_range  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -42,11 +48,26 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 LOOP_SECONDS = int(os.environ.get("spoof_store_loop_seconds", "900"))
 CARGO_REFRESH_SECONDS = int(os.environ.get("spoof_cargo_refresh_seconds", str(12 * 3600)))
 
-_password = os.environ.get("pnav_db_password", "m4r1t1m3")
-DATABASE_URL = (
-    f"postgresql://postgresadmin:{quote(_password)}"
-    f"@marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com:5432/pnav"
-)
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(
+            f"Environment variable {name} is required for the spoofing store "
+            f"(no hard-coded credentials)."
+        )
+    return value
+
+
+def _database_url() -> str:
+    password = _require_env("pnav_db_password")
+    host = os.environ.get(
+        "pnav_db_host",
+        "marineai2.cxwk8yige5f2.ap-southeast-5.rds.amazonaws.com",
+    )
+    user = os.environ.get("pnav_db_user", "postgresadmin")
+    name = os.environ.get("pnav_db_name", "pnav")
+    return f"postgresql://{user}:{quote(password)}@{host}:5432/{name}"
+
 
 _engine: Engine | None = None
 _cargo_mmsis: list[int] = []
@@ -57,7 +78,7 @@ def get_engine() -> Engine:
     global _engine
     if _engine is None:
         _engine = create_engine(
-            DATABASE_URL,
+            _database_url(),
             pool_size=1,
             max_overflow=0,
             pool_timeout=30,
@@ -93,6 +114,8 @@ def _ts(value) -> datetime | None:
     return parsed.to_pydatetime()
 
 
+# Conflict rule mirrors spoofing.should_replace_stored_anomaly (no DDL):
+# alert replaces data-quality; data-quality never replaces alert; same class → higher kn.
 UPSERT = text(
     """
     INSERT INTO public.ais_positionanomaly (
@@ -117,7 +140,17 @@ UPSERT = text(
         reason = EXCLUDED.reason,
         rule_version = EXCLUDED.rule_version,
         updated_at = now()
-    WHERE ais_positionanomaly.implied_kn < EXCLUDED.implied_kn
+    WHERE (
+            EXCLUDED.reason NOT IN ('bad_position_data', 'duplicate_mmsi')
+            AND ais_positionanomaly.reason IN ('bad_position_data', 'duplicate_mmsi')
+        )
+        OR (
+            (
+                (EXCLUDED.reason IN ('bad_position_data', 'duplicate_mmsi'))
+                = (ais_positionanomaly.reason IN ('bad_position_data', 'duplicate_mmsi'))
+            )
+            AND ais_positionanomaly.implied_kn < EXCLUDED.implied_kn
+        )
     """
 )
 
@@ -158,9 +191,30 @@ def upsert_hits(frame: pd.DataFrame) -> int:
 def run_once() -> int:
     date_from, date_to, _meta = resolve_track_range(None, None)
     hits = load_teleport_hits(date_from, date_to, mmsi_list=cargo_mmsis())
-    deduped = dedupe_daily(hits)
+    # Split before daily dedupe so a high-implied ghost does not displace a
+    # teleport alert. UNIQUE (mmsi, event_day): prefer the alert row.
+    alerts, quality = _split_alert_and_quality(hits)
+    alerts = dedupe_daily(alerts)
+    quality = dedupe_daily(quality)
+    if not alerts.empty and not quality.empty:
+        alert_keys = set(
+            zip(alerts["mmsi"].astype(int), alerts["event_day"].astype(str))
+        )
+        quality = quality[
+            ~quality.apply(
+                lambda r: (int(r["mmsi"]), str(r["event_day"])) in alert_keys,
+                axis=1,
+            )
+        ]
+    deduped = pd.concat([alerts, quality], ignore_index=True) if len(quality) or len(alerts) else hits.iloc[0:0]
     written = upsert_hits(deduped)
-    logging.info("Spoofing store: raw=%s kept=%s", len(hits), written)
+    logging.info(
+        "Spoofing store: raw=%s alerts=%s quality=%s kept=%s",
+        len(hits),
+        len(alerts),
+        len(quality),
+        written,
+    )
     return written
 
 

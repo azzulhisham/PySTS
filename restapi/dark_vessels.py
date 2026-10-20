@@ -16,10 +16,13 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from pathlib import Path
 from typing import Any
 import pandas as pd
 from sqlalchemy.engine import Engine
 
+from ais_identity import VALID_SHIP_MMSI_SQL, clean_ship_name, is_valid_ship_mmsi
 from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
@@ -31,6 +34,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 MIN_SILENCE_MINUTES = 30
 COVERAGE_EXIT_DAYS = 3
+# Gaps longer than this are always treated as coverage exit (not suspected dark).
+DARK_MAX_DAYS = int(os.environ.get("DARK_MAX_DAYS", "7"))
+# Optional GeoJSON Polygon/MultiPolygon path. When set, last position outside it
+# is labelled possible_coverage_exit (applied in Python on already-fetched rows).
+DARK_COVERAGE_GEOJSON = os.environ.get("DARK_COVERAGE_GEOJSON", "").strip()
 CONFIRMED_STOP_ROWCOUNT = 30
 MIN_SLOWDOWN_ROWCOUNT = 5
 
@@ -63,6 +71,8 @@ SELECT
 {DIM_SELECT},
     EXTRACT(EPOCH FROM (now() - a.tscurrent)) AS silence_seconds,
     CASE
+        WHEN a.tscurrent <= now() - interval '{DARK_MAX_DAYS} days'
+            THEN 'possible_coverage_exit'
         WHEN a.rowcount >= {MIN_SLOWDOWN_ROWCOUNT}
              AND a.rowcount < {CONFIRMED_STOP_ROWCOUNT}
              AND a.tscurrent > now() - interval '{COVERAGE_EXIT_DAYS} days'
@@ -73,6 +83,8 @@ SELECT
         ELSE 'low_evidence_ais_gap'
     END AS dark_reason,
     CASE
+        WHEN a.tscurrent <= now() - interval '{DARK_MAX_DAYS} days'
+            THEN 'low'
         WHEN a.rowcount >= {MIN_SLOWDOWN_ROWCOUNT}
              AND a.rowcount < {CONFIRMED_STOP_ROWCOUNT}
              AND a.tscurrent > now() - interval '{COVERAGE_EXIT_DAYS} days'
@@ -94,6 +106,7 @@ WHERE a.tsout IS NULL
   AND a.rowcount < {CONFIRMED_STOP_ROWCOUNT}
   AND a.tscurrent IS NOT NULL
   AND a.tscurrent <= now() - interval '{MIN_SILENCE_MINUTES} minutes'
+{VALID_SHIP_MMSI_SQL.replace("mmsi", "a.mmsi")}
   AND s."shipType" >= 70 AND s."shipType" < 90
 ORDER BY a.tscurrent ASC
 """
@@ -223,7 +236,9 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
         records.append({
             "activityId": int(v["activity_id"]),
             "mmsi": int(v["mmsi"]),
-            "shipName": v.get("shipname") if pd.notna(v.get("shipname")) else None,
+            "shipName": clean_ship_name(
+                v.get("shipname") if pd.notna(v.get("shipname")) else None
+            ),
             "shipType": int(v["shiptype"]) if pd.notna(v.get("shiptype")) else None,
             "shipTypeDesc": v.get("shiptypedesc") if pd.notna(v.get("shiptypedesc")) else None,
             "latitude": float(lat) if pd.notna(lat) else None,
@@ -250,20 +265,84 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
+def _load_coverage_geom() -> dict | None:
+    if not DARK_COVERAGE_GEOJSON:
+        return None
+    path = Path(DARK_COVERAGE_GEOJSON)
+    if not path.is_file():
+        logging.warning("DARK_COVERAGE_GEOJSON not found: %s", path)
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logging.exception("Failed to read DARK_COVERAGE_GEOJSON %s", path)
+        return None
+    if data.get("type") == "Feature":
+        return data.get("geometry")
+    if data.get("type") == "FeatureCollection":
+        features = data.get("features") or []
+        return features[0].get("geometry") if features else None
+    return data
+
+
+def apply_coverage_polygon(vessels: pd.DataFrame) -> pd.DataFrame:
+    """Relabel last position outside the optional coverage polygon as coverage exit."""
+    geom = _load_coverage_geom()
+    if geom is None or vessels.empty:
+        return vessels
+
+    work = vessels.copy()
+    lon = work["curlongitude"] if "curlongitude" in work.columns else work["longitude"]
+    lat = work["curlatitude"] if "curlatitude" in work.columns else work["latitude"]
+    if "curlongitude" in work.columns and "longitude" in work.columns:
+        lon = work["curlongitude"].where(work["curlongitude"].notna(), work["longitude"])
+    if "curlatitude" in work.columns and "latitude" in work.columns:
+        lat = work["curlatitude"].where(work["curlatitude"].notna(), work["latitude"])
+    work["_lon"] = lon
+    work["_lat"] = lat
+
+    # Trusted env-configured path; embed GeoJSON so DuckDB can ST_Within without
+    # an extra Postgres round-trip.
+    geo_lit = json.dumps(geom).replace("'", "''")
+    located = spatial_df(
+        f"""
+        SELECT
+            v.* EXCLUDE (_lon, _lat),
+            CASE
+                WHEN v._lon IS NULL OR v._lat IS NULL THEN FALSE
+                ELSE ST_Within(
+                    ST_Point(v._lon, v._lat),
+                    ST_GeomFromGeoJSON('{geo_lit}')
+                )
+            END AS _in_coverage
+        FROM dark_vessels v
+        """,
+        {"dark_vessels": work},
+    )
+    outside = ~located["_in_coverage"].fillna(False)
+    located.loc[outside, "dark_reason"] = "possible_coverage_exit"
+    located.loc[outside, "confidence"] = "low"
+    return located.drop(columns=["_in_coverage"], errors="ignore")
+
+
 def detect_dark_vessels(
     engine: Engine | None = None,
-    include_coverage_exit: bool = True,
+    include_coverage_exit: bool = False,
     *,
     summary_only: bool = False,
 ) -> dict[str, Any]:
     """
     Return suspected dark vessels from slow-move activities.
 
-    Set include_coverage_exit=False for a tighter ops list
-    (suspected_dark_after_slowdown + low_evidence_ais_gap only).
+    include_coverage_exit defaults to False (ops list). Pass True for the
+    previous view that also lists possible_coverage_exit.
     """
     engine = engine or get_pg_engine()
     df = load_dark_candidates(engine)
+    if not df.empty:
+        df = df[df["mmsi"].map(is_valid_ship_mmsi)].reset_index(drop=True)
+
+    df = apply_coverage_polygon(df)
 
     if not include_coverage_exit and not df.empty:
         df = df[df["dark_reason"] != "possible_coverage_exit"].reset_index(drop=True)
@@ -292,9 +371,10 @@ def detect_dark_vessels(
         "sanctions_match_count": sanctions_match_count,
         "min_silence_minutes": MIN_SILENCE_MINUTES,
         "coverage_exit_days": COVERAGE_EXIT_DAYS,
+        "dark_max_days": DARK_MAX_DAYS,
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "include_coverage_exit": include_coverage_exit,
-        "rule_version": "v1.2-slowmove-dark-polygon-ofac-label",
+        "rule_version": "v1.3-dark-max-days-coverage-polygon",
         "vessels": df if not summary_only else df.iloc[0:0],
         "vessels_payload": [] if summary_only else vessels_to_payload(df),
         "sql": DARK_VESSEL_SQL,

@@ -30,9 +30,17 @@ from pg_engine import get_pg_engine
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-CLICKHOUSE_HOST = os.environ.get("clickhouse_host", "56.69.44.39")
-CLICKHOUSE_USER = os.environ.get("clickhouse_user", "default")
-CLICKHOUSE_PASSWORD = os.environ.get("clickhouse_password", "Pinc@200901029426")
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if value is None or str(value).strip() == "":
+        raise RuntimeError(
+            f"Environment variable {name} is required for ClickHouse access "
+            f"(no hard-coded credentials)."
+        )
+    return str(value)
+
+
+CLICKHOUSE_USER_DEFAULT = "default"
 
 MAX_TRACK_RANGE = timedelta(days=3)
 TRACK_CHUNK_MINUTES = 20
@@ -225,9 +233,13 @@ ORDER BY event_time ASC, event_type ASC
 # client to recognise the sentinels. The range test also discards NaN and +/-Inf,
 # which ClickHouse treats as outside any BETWEEN.
 # ---------------------------------------------------------------------------
+# AIS "not available" is stored as lat 91 / lon 181. BETWEEN already drops those
+# and any NaN / ±Inf ClickHouse treats as outside the range.
 VALID_POSITION_SQL = """
   AND latitude BETWEEN -90 AND 90
   AND longitude BETWEEN -180 AND 180
+  AND latitude != 91
+  AND longitude != 181
 """
 
 VESSEL_TRACK_REPLAY_SQL_CLASS_A = """
@@ -275,11 +287,10 @@ ORDER BY ts ASC
 
 def get_clickhouse_client():
     kwargs: dict[str, Any] = {
-        "host": CLICKHOUSE_HOST,
-        "user": CLICKHOUSE_USER,
+        "host": _require_env("clickhouse_host"),
+        "user": os.environ.get("clickhouse_user", CLICKHOUSE_USER_DEFAULT),
+        "password": _require_env("clickhouse_password"),
     }
-    if CLICKHOUSE_PASSWORD:
-        kwargs["password"] = CLICKHOUSE_PASSWORD
     return clickhouse_connect.get_client(**kwargs)
 
 

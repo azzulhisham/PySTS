@@ -54,6 +54,7 @@ def _dark_vessels_summary(result: dict[str, Any]) -> dict[str, Any]:
         "shipTypeFilter": result["ship_type_filter"],
         "minSilenceMinutes": result["min_silence_minutes"],
         "coverageExitDays": result["coverage_exit_days"],
+        "darkMaxDays": result.get("dark_max_days"),
         "includeCoverageExit": result["include_coverage_exit"],
         "candidateCount": result["candidate_count"],
         "byReason": by_reason,
@@ -112,9 +113,12 @@ def _spoofing_summary(result: dict[str, Any]) -> dict[str, Any]:
         "toOmitted": range_meta.get("toOmitted"),
         "rangeCapped": range_meta.get("rangeCapped"),
         "maxRangeDays": range_meta.get("maxRangeDays"),
+        # anomalyCount matches GET /mantis/spoofing (alert rows after dedupe).
+        # rawHitCount / filteredHitCount remain as diagnostics only.
         "rawHitCount": result["raw_hit_count"],
         "filteredHitCount": result["filtered_hit_count"],
         "anomalyCount": result["anomaly_count"],
+        "dataQualityCount": result.get("data_quality_count", 0),
         "byReason": by_reason,
         "teleportCount": _reason_count(by_reason, "teleport"),
         "highSpeedCount": _reason_count(by_reason, "high_speed"),
@@ -224,7 +228,7 @@ def _run_spoofing_module(
 def detect_mantis_overview(
     *,
     min_suspicion_score: float = 4.5,
-    include_coverage_exit: bool = True,
+    include_coverage_exit: bool = False,
     spoofing_from: datetime | str | None = None,
     spoofing_to: datetime | str | None = None,
     include_spoofing: bool = True,

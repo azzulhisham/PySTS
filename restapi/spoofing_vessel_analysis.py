@@ -15,9 +15,12 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from ais_identity import VALID_SHIP_MMSI_SQL_CH, clean_ship_name, mid_from_mmsi
 from api_timestamps import format_last_seen_at
 from sanctions import attach_sanctions, payload_fields
 from spoofing import (
+    BAD_DATA_KNOTS,
+    DATA_QUALITY_REASONS,
     HIGH_SPEED_MIN_KN,
     LONG_JUMP_DIST_M,
     LONG_JUMP_MIN_KN,
@@ -26,8 +29,8 @@ from spoofing import (
     MIN_DT_S,
     PAIR_WINDOW_SQL,
     RULE_VERSION,
+    SNAP_BACK_COND_SQL,
     SNAP_BACK_MAX_M,
-    SPIKE_EXCLUSION_SQL,
     SPIKE_SELECT_SQL,
     get_pg_engine,
 )
@@ -50,6 +53,12 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 VESSEL_ANALYSIS_RULE = "All consecutive-fix teleport hits for one MMSI (no daily dedupe)."
 
+_VESSEL_BAD_DATA_WHERE = (
+    f"OR (dt_s >= {MIN_DT_S} AND implied_kn > {BAD_DATA_KNOTS})"
+    if BAD_DATA_KNOTS > 0
+    else ""
+)
+
 VESSEL_TELEPORT_HIT_SQL = f"""
 SELECT
     mmsi,
@@ -64,7 +73,17 @@ SELECT
     dist_m,
     dt_s,
     implied_kn,
-    reason
+    multiIf(
+        dt_s < {MIN_DT_S},
+        'bad_position_data',
+        {SNAP_BACK_COND_SQL},
+        'bad_position_data',
+        {BAD_DATA_KNOTS} > 0 AND implied_kn > {BAD_DATA_KNOTS},
+        'bad_position_data',
+        dist_m >= {LONG_JUMP_DIST_M} AND implied_kn > {LONG_JUMP_MIN_KN},
+        'teleport',
+        'high_speed'
+    ) AS reason
 FROM (
     SELECT
         mmsi,
@@ -84,33 +103,32 @@ FROM (
         (geoDistance(
             lagInFrame(longitude) OVER w, lagInFrame(latitude) OVER w,
             longitude, latitude
-        ) / dateDiff('second', lagInFrame(ts) OVER w, ts)) * 1.94384 AS implied_kn,
-        multiIf(
-            geoDistance(
-                lagInFrame(longitude) OVER w, lagInFrame(latitude) OVER w,
-                longitude, latitude
-            ) >= {LONG_JUMP_DIST_M}
-            AND (geoDistance(
-                lagInFrame(longitude) OVER w, lagInFrame(latitude) OVER w,
-                longitude, latitude
-            ) / dateDiff('second', lagInFrame(ts) OVER w, ts)) * 1.94384 > {LONG_JUMP_MIN_KN},
-            'teleport',
-            'high_speed'
-        ) AS reason,
+        ) / greatest(dateDiff('second', lagInFrame(ts) OVER w, ts), 1)) * 1.94384 AS implied_kn,
 {SPIKE_SELECT_SQL}
-    FROM pnav.ais_position
-    WHERE mmsi = {{mmsi}}
-      AND ts >= toDateTime64({{date_from}}, 3)
-      AND ts <= toDateTime64({{date_to}}, 3)
-      {VALID_POSITION_SQL.strip()}
+    FROM (
+        SELECT mmsi, ts, latitude, longitude, sog
+        FROM pnav.ais_position
+        WHERE mmsi = {{mmsi}}
+          AND ts >= toDateTime64({{date_from}}, 3)
+          AND ts <= toDateTime64({{date_to}}, 3)
+{VALID_SHIP_MMSI_SQL_CH}
+          {VALID_POSITION_SQL.strip()}
+        LIMIT 1 BY mmsi, toStartOfSecond(ts), latitude, longitude
+    )
     WINDOW w AS ({PAIR_WINDOW_SQL})
 )
 WHERE prev_ts IS NOT NULL
-  AND dt_s BETWEEN {MIN_DT_S} AND {MAX_DT_S}
+  AND dt_s BETWEEN 0 AND {MAX_DT_S}
   AND dist_m >= {MIN_DIST_M}
-  AND ((dist_m >= {LONG_JUMP_DIST_M} AND implied_kn > {LONG_JUMP_MIN_KN}) OR implied_kn > {HIGH_SPEED_MIN_KN})
-{SPIKE_EXCLUSION_SQL}
+  AND (
+        (dt_s < {MIN_DT_S} AND dist_m >= {LONG_JUMP_DIST_M})
+        OR {SNAP_BACK_COND_SQL}
+        {_VESSEL_BAD_DATA_WHERE}
+        OR (dt_s >= {MIN_DT_S} AND dist_m >= {LONG_JUMP_DIST_M} AND implied_kn > {LONG_JUMP_MIN_KN})
+        OR (dt_s >= {MIN_DT_S} AND implied_kn > {HIGH_SPEED_MIN_KN})
+  )
 ORDER BY ts ASC
+SETTINGS max_execution_time = 60
 """
 
 VESSEL_STATIC_SQL = text(f"""
@@ -139,20 +157,6 @@ FLAGNAME_SQL = text("""
     WHERE mid = :mid
     LIMIT 1
 """)
-
-
-def mid_from_mmsi(mmsi: int) -> int | None:
-    """Maritime identification digits from a 9-digit MMSI (VT Explorer MID rules)."""
-    mmsi9 = str(int(mmsi)).strip()
-    if len(mmsi9) < 9:
-        mmsi9 = mmsi9.zfill(9)
-    elif len(mmsi9) > 9:
-        mmsi9 = mmsi9[-9:]
-    if len(mmsi9) != 9 or not mmsi9.isdigit():
-        return None
-    if mmsi9[:2] in ("00", "99", "96"):
-        return int(mmsi9[2:5])
-    return int(mmsi9[:3])
 
 
 def _usable_sog(value: Any) -> float | None:
@@ -245,6 +249,8 @@ def count_ais_positions(
 
 
 def _risk_level(implied_kn: float, reason: str) -> str:
+    if reason in DATA_QUALITY_REASONS:
+        return "data quality"
     if reason == "teleport" or implied_kn >= HIGH_SPEED_MIN_KN:
         return "critical"
     if implied_kn >= LONG_JUMP_MIN_KN:
@@ -253,6 +259,10 @@ def _risk_level(implied_kn: float, reason: str) -> str:
 
 
 def _assessment(reason: str, implied_kn: float) -> str:
+    if reason == "bad_position_data":
+        return "Implausible AIS position data (short-gap jump or single-point snap-back)"
+    if reason == "duplicate_mmsi":
+        return "MMSI appears to alternate between two distant clusters (shared / duplicate identity)"
     if reason == "teleport":
         return "Possible spoofing / position jump"
     if implied_kn >= HIGH_SPEED_MIN_KN:
@@ -303,12 +313,49 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
     return records
 
 
+def _usable_position(lat: Any, lon: Any) -> bool:
+    """Drop AIS not-available sentinels (lat 91 / lon 181) and out-of-range coords."""
+    try:
+        if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
+            return False
+        la, lo = float(lat), float(lon)
+    except (TypeError, ValueError):
+        return False
+    if abs(la) > 90 or abs(lo) > 180:
+        return False
+    if la == 91.0 or lo == 181.0:
+        return False
+    return True
+
+
 def build_speed_series(track: pd.DataFrame) -> list[dict[str, Any]]:
-    """One row per fix: reported SOG and implied speed from the previous fix."""
+    """One row per fix: reported SOG and implied speed from the previous fix.
+
+    Exact same-second same-position duplicates are dropped first. Implied speed
+    is only computed when the gap is at least MIN_DT_S (same floor as spoofing).
+    """
     if track.empty or "ts" not in track.columns:
         return []
 
-    work = track.sort_values("ts").reset_index(drop=True)
+    work = track.copy()
+    work = work[work.apply(
+        lambda r: _usable_position(r.get("latitude"), r.get("longitude")), axis=1
+    )]
+    if work.empty:
+        return []
+
+    work["_ts"] = pd.to_datetime(work["ts"], utc=True)
+    work["_sec"] = work["_ts"].dt.floor("s")
+    work = (
+        work.sort_values("_ts")
+        .drop_duplicates(subset=["mmsi", "_sec", "latitude", "longitude"], keep="first")
+        if "mmsi" in work.columns
+        else work.sort_values("_ts").drop_duplicates(
+            subset=["_sec", "latitude", "longitude"], keep="first"
+        )
+    )
+    work = work.reset_index(drop=True)
+
     series: list[dict[str, Any]] = []
     prev_lat = prev_lon = prev_ts = None
 
@@ -319,7 +366,8 @@ def build_speed_series(track: pd.DataFrame) -> list[dict[str, Any]]:
         implied = None
         if prev_lat is not None and prev_lon is not None and prev_ts is not None:
             dt_s = (pd.Timestamp(ts) - pd.Timestamp(prev_ts)).total_seconds()
-            if dt_s and dt_s > 0:
+            # Same floor as TELEPORT_HIT_SQL — sub-10s gaps produced million-kn spikes.
+            if dt_s is not None and dt_s >= MIN_DT_S:
                 duckdb_implied = _implied_kn_haversine(
                     float(prev_lon), float(prev_lat), float(lon), float(lat), dt_s
                 )
@@ -366,7 +414,8 @@ def _vessel_header(
         "cargoTankerEligible": False,
     }
     if static_row is not None:
-        header["shipName"] = static_row.get("shipname") if pd.notna(static_row.get("shipname")) else None
+        raw_name = static_row.get("shipname") if pd.notna(static_row.get("shipname")) else None
+        header["shipName"] = clean_ship_name(raw_name)
         st = static_row.get("shiptype")
         header["shipType"] = int(st) if pd.notna(st) else None
         header["shipTypeDesc"] = (
@@ -455,6 +504,7 @@ def detect_vessel_spoofing_analysis(
             "longJumpDistanceM": LONG_JUMP_DIST_M,
             "longJumpMinImpliedKn": LONG_JUMP_MIN_KN,
             "highSpeedMinImpliedKn": HIGH_SPEED_MIN_KN,
+            "badDataKnots": BAD_DATA_KNOTS,
             "snapBackMaxM": SNAP_BACK_MAX_M,
         },
         "vessel": _vessel_header(mmsi, static_row, mid, flag_name, sanctions_row),

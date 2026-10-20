@@ -23,6 +23,7 @@ from sqlalchemy.engine import Engine
 
 from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
+from ais_identity import clean_ship_name
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
@@ -275,7 +276,9 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             port_name = None
         records.append({
             "mmsi": int(v["mmsi"]),
-            "shipName": v.get("shipname") if pd.notna(v.get("shipname")) else None,
+            "shipName": clean_ship_name(
+                v.get("shipname") if pd.notna(v.get("shipname")) else None
+            ),
             "shipType": int(v["shiptype"]) if pd.notna(v.get("shiptype")) else None,
             "shipTypeDesc": v.get("shiptypedesc") if pd.notna(v.get("shiptypedesc")) else None,
             "latitude": float(v["curlatitude"]),

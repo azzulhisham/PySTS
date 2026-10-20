@@ -17,6 +17,7 @@ from sqlalchemy.engine import Engine
 from api_timestamps import format_last_seen_at
 from pg_engine import get_pg_engine
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from ais_identity import clean_ship_name
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -121,7 +122,9 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
         records.append({
             "loiterId": int(row["loiter_id"]),
             "mmsi": int(row["mmsi"]),
-            "shipName": row.get("shipname") if pd.notna(row.get("shipname")) else None,
+            "shipName": clean_ship_name(
+                row.get("shipname") if pd.notna(row.get("shipname")) else None
+            ),
             "shipType": int(row["shiptype"]) if pd.notna(row.get("shiptype")) else None,
             "shipTypeDesc": row.get("shiptypedesc") if pd.notna(row.get("shiptypedesc")) else None,
             "latitude": float(row["centre_latitude"]),

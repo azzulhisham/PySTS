@@ -18,6 +18,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.engine import Engine
 
+from ais_identity import clean_ship_name
 from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
@@ -409,7 +410,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
             "firstDetectedAt": _fmt_ts(p.get("first_detected_at")),
             "vesselA": {
                 "mmsi": int(p["mmsi_a"]),
-                "shipName": p.get("shipname_a"),
+                "shipName": clean_ship_name(p.get("shipname_a")),
                 "latitude": float(p["lat_a"]),
                 "longitude": float(p["lon_a"]),
                 "sog": float(p["sog_a"]) if pd.notna(p.get("sog_a")) else None,
@@ -422,7 +423,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
             },
             "vesselB": {
                 "mmsi": int(p["mmsi_b"]),
-                "shipName": p.get("shipname_b"),
+                "shipName": clean_ship_name(p.get("shipname_b")),
                 "latitude": float(p["lat_b"]),
                 "longitude": float(p["lon_b"]),
                 "sog": float(p["sog_b"]) if pd.notna(p.get("sog_b")) else None,
@@ -453,7 +454,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
         records.append({
             "observationId": int(v["observation_id"]),
             "mmsi": int(v["mmsi"]),
-            "shipName": v.get("shipname"),
+            "shipName": clean_ship_name(v.get("shipname")),
             "latitude": float(v["curlatitude"]),
             "longitude": float(v["curlongitude"]),
             "sog": float(v["sog"]) if pd.notna(v.get("sog")) else None,

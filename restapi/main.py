@@ -152,7 +152,7 @@ def get_mantis_overview():
 
     try:
         min_score = request.args.get("minSuspicionScore", type=float)
-        include_exit = request.args.get("includeCoverageExit", "true").lower() not in (
+        include_exit = request.args.get("includeCoverageExit", "false").lower() not in (
             "0",
             "false",
             "no",
@@ -409,7 +409,7 @@ def get_dark_vessels():
         return jsonify({"message": "Unauthorized"}), 401
 
     try:
-        include_exit = request.args.get("includeCoverageExit", "true").lower() not in (
+        include_exit = request.args.get("includeCoverageExit", "false").lower() not in (
             "0", "false", "no",
         )
         result = detect_dark_vessels(include_coverage_exit=include_exit)
@@ -418,6 +418,7 @@ def get_dark_vessels():
             "shipTypeFilter": result["ship_type_filter"],
             "minSilenceMinutes": result["min_silence_minutes"],
             "coverageExitDays": result["coverage_exit_days"],
+            "darkMaxDays": result.get("dark_max_days"),
             "includeCoverageExit": result["include_coverage_exit"],
             "candidateCount": result["candidate_count"],
             "byReason": result["by_reason"],
@@ -482,9 +483,13 @@ def get_spoofing():
         return jsonify({"message": "Unauthorized"}), 401
 
     try:
+        include_dq = request.args.get("includeDataQuality", "false").lower() not in (
+            "0", "false", "no",
+        )
         result = detect_spoofing(
             date_from=request.args.get("from"),
             date_to=request.args.get("to"),
+            include_data_quality=include_dq,
         )
         payload = {
             "ruleVersion": result["rule_version"],
@@ -499,9 +504,13 @@ def get_spoofing():
             "rangeCapped": result["range_meta"]["rangeCapped"],
             "maxRangeDays": result["range_meta"]["maxRangeDays"],
             "thresholds": result["thresholds"],
+            # anomalyCount is the page count. rawHitCount / filteredHitCount are
+            # pre-dedupe diagnostics (all reasons, including data quality).
             "rawHitCount": result["raw_hit_count"],
             "filteredHitCount": result["filtered_hit_count"],
             "anomalyCount": result["anomaly_count"],
+            "dataQualityCount": result["data_quality_count"],
+            "includeDataQuality": result["include_data_quality"],
             "byReason": result["by_reason"],
             "sanctionsMatchCount": result["sanctions_match_count"],
             "anomalies": result["anomalies_payload"],

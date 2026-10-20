@@ -666,6 +666,11 @@
             "type": "integer",
             "example": 3
           },
+          "darkMaxDays": {
+            "type": "integer",
+            "description": "Gaps at or above this many days are classified as possible_coverage_exit only (env DARK_MAX_DAYS, default 7).",
+            "example": 7
+          },
           "includeCoverageExit": {
             "type": "boolean"
           },
@@ -1133,7 +1138,15 @@
           },
           "anomalyCount": {
             "type": "integer",
-            "description": "Rows after dedupe (one per MMSI per UTC day)."
+            "description": "Page count after daily dedupe. Excludes data-quality reasons (bad_position_data, duplicate_mmsi) unless includeDataQuality is true."
+          },
+          "dataQualityCount": {
+            "type": "integer",
+            "description": "Data-quality rows after daily dedupe (one per MMSI per UTC day). Always returned; those rows are omitted from anomalies unless includeDataQuality is true."
+          },
+          "includeDataQuality": {
+            "type": "boolean",
+            "description": "Echo of the includeDataQuality query flag (default false)."
           },
           "byReason": {
             "type": "object",
@@ -1629,9 +1642,9 @@
             "required": false,
             "schema": {
               "type": "boolean",
-              "default": true
+              "default": false
             },
-            "description": "When false, exclude `possible_coverage_exit` rows (tighter ops list)."
+            "description": "When false (default), exclude `possible_coverage_exit` rows (tighter ops list). Set true for the previous full list."
           }
         ],
         "responses": {
@@ -1769,7 +1782,8 @@
             "name": "includeCoverageExit",
             "in": "query",
             "required": false,
-            "schema": { "type": "boolean", "default": true }
+            "schema": { "type": "boolean", "default": false },
+            "description": "Same as GET /mantis/darkvessels. Default false."
           },
           {
             "name": "includeSpoofing",
@@ -2122,7 +2136,7 @@
           "mantis"
         ],
         "summary": "Get position anomalies (spoofing) — Phase 1 teleport.",
-        "description": "Also referred to as **GET /mantis/position-anomaly** in product docs — that path is **not** served; use **`/mantis/spoofing`**.\n\nPhase 1 reads stored teleport hits from Postgres `ais_positionanomaly` (written by the spoofing store from ClickHouse). **Class-A cargo/tanker only** (`shipType` 70–89). Results are **one row per MMSI per UTC day** (worst implied speed that day). `detectedAt` / `lastSeenAt` are the AIS time of the anomaly fix.\n\nOptional `from` / `to` (ISO 8601 UTC) — same **3-day max** window as GET /mantis/vessel-track. OFAC labels attached; listed vessels sorted first.\n\n**This Swagger page:** `anomalies` is capped at 20 samples.",
+        "description": "Also referred to as **GET /mantis/position-anomaly** in product docs — that path is **not** served; use **`/mantis/spoofing`**.\n\nPhase 1 reads stored teleport hits from Postgres `ais_positionanomaly` (written by the spoofing store from ClickHouse). **Class-A cargo/tanker only** (`shipType` 70–89). Results are **one row per MMSI per UTC day**. `anomalyCount` is the page count (alert reasons only by default). `dataQualityCount` is per MMSI-day for `bad_position_data` / `duplicate_mmsi`. Pass `includeDataQuality=true` to include those rows in `anomalies` / `byReason`. `detectedAt` / `lastSeenAt` are the AIS time of the anomaly fix.\n\nOptional `from` / `to` (ISO 8601 UTC) — same **3-day max** window as GET /mantis/vessel-track. OFAC labels attached; listed vessels sorted first.\n\n**This Swagger page:** `anomalies` is capped at 20 samples.",
         "operationId": "getSpoofing",
         "security": [
           {
@@ -2149,6 +2163,16 @@
               "format": "date-time"
             },
             "description": "Window end (UTC). Default: now."
+          },
+          {
+            "name": "includeDataQuality",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false
+            },
+            "description": "When true, include `bad_position_data` and `duplicate_mmsi` rows in `anomalies` and `byReason`. Default false — they still contribute to `dataQualityCount`."
           }
         ],
         "responses": {
