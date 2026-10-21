@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS ofac_ingest_run (
 
 
 def ddl_for(prefix: str, list_name: str) -> str:
+    # No CREATE OR REPLACE VIEW: live ofac_sdn_vessel column order differs from
+    # ofac_cons_vessel; REPLACE fails when renaming columns. Views already exist;
+    # replace_tables refreshes rows via TRUNCATE+INSERT only.
     return (
         INGEST_RUN_DDL
         + f"""
@@ -131,11 +134,7 @@ CREATE INDEX IF NOT EXISTS idx_{prefix}_entry_imo ON {prefix}_entry (imo);
 CREATE INDEX IF NOT EXISTS idx_{prefix}_entry_mmsi ON {prefix}_entry (mmsi);
 CREATE INDEX IF NOT EXISTS idx_{prefix}_aka_last_name ON {prefix}_aka (last_name);
 CREATE INDEX IF NOT EXISTS idx_{prefix}_id_type_number ON {prefix}_identifier (id_type, id_number);
-CREATE INDEX IF NOT EXISTS idx_{prefix}_id_number ON {prefix}_identifier (id_number);
-
--- Do not CREATE OR REPLACE VIEW here: live ofac_*_vessel column order/names
--- already differ across SDN vs CONS, and REPLACE fails when renaming columns.
--- Views are assumed to exist (created once). Row refresh is TRUNCATE+INSERT only.
+CREATE INDEX IF NOT EXISTS idx_{prefix}_id_number ON {prefix}_identifier (id_number)
 """
     )
 
@@ -299,7 +298,13 @@ def apply_ddl(conn, ddl: str) -> None:
 
     for stmt in ddl.split(";"):
         stmt = stmt.strip()
-        if stmt:
+        if not stmt:
+            continue
+        # Ignore comment-only chunks left after splitting on ';'
+        actionable = "\n".join(
+            line for line in stmt.splitlines() if line.strip() and not line.strip().startswith("--")
+        )
+        if actionable.strip():
             conn.execute(text(stmt))
 
 
