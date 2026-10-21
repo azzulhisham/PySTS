@@ -29,8 +29,18 @@ LOG = logging.getLogger(__name__)
 MAX_PORT_KM2 = 50.0
 CONTAIN_FRAC = 0.95
 
-_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_POLY_DIR = _ROOT / "data" / "polygons" / "src"
+def _default_poly_dir() -> Path:
+    """Repo: <root>/restapi/port_areas.py → <root>/data/...; flat deploy: beside this file."""
+    here = Path(__file__).resolve().parent
+    for root in (here.parent, here):
+        candidate = root / "data" / "polygons" / "src"
+        if (candidate / "ports.geojson").is_file():
+            return candidate
+    return here.parent / "data" / "polygons" / "src"
+
+
+# Resolved at build time via _default_poly_dir() so deploy order (code then data) is safe.
+DEFAULT_POLY_DIR = Path(__file__).resolve().parents[1] / "data" / "polygons" / "src"
 
 _LOCK = threading.Lock()
 _CACHE: "PortAreaIndex | None" = None
@@ -120,7 +130,7 @@ def _geom_to_geojson(geom) -> str:
 
 
 def build_port_areas(poly_dir: Path | None = None) -> PortAreaIndex:
-    directory = Path(poly_dir) if poly_dir is not None else DEFAULT_POLY_DIR
+    directory = Path(poly_dir) if poly_dir is not None else _default_poly_dir()
     ports = _read_features(directory / "ports.geojson", "port")
     terminals = _read_features(directory / "terminals.geojson", "terminal")
     areas: list[PortArea] = []
