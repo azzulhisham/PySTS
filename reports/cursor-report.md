@@ -1,99 +1,141 @@
-# Round 2 fixes — review flag-only + STRtree harbour lookup
+# Deploy report — STS berth / MMSI (round 2)
 
 **Date:** 2026-10-21  
-**Branch:** `mantis-sts-berth-mmsi`  
-**Base:** prior commit `3de440d`  
-**Deploy:** **not deployed**
+**Branch:** `main` @ **`7c26744`** (merged from `mantis-sts-berth-mmsi` @ `693c600` + eager-load follow-up)  
+**Decision:** **GO**
 
-## 1. Summary
+## 1. Merge
 
-| Change | Result |
-|--------|--------|
-| STS review / unreviewed | **Flag only** — never drop rows; page size / order / `returnedCount` match main |
-| New per-row fields | `inPortArea`, `portAreaName`, `portAreaTerminalName`, `atBerth`, `berthName`, `invalidMmsi` |
-| New page counts | `inPortAreaCount`, `atBerthCount`, `invalidMmsiCount` |
-| `includeInPort` on review lists | **Removed** |
-| STS activities / notifications / `notified_at` | Still **drop** harbour + invalid MMSI (activities: `includeInPort` restores harbour) |
-| Illegal / loitering / identity | Invalid MMSI drop unchanged (not DB-offset paged) |
-| Spatial lookup | Shapely **STRtree** at startup; no per-call GeoJSON / DuckDB CROSS JOIN |
-| Warm `/sts-activities` | **0.84 s** (target &lt; 1 s; main was 0.70 s) |
-
-## 2. Files changed
-
-| Path | Change |
+| Step | Result |
 |------|--------|
-| `restapi/port_areas.py` | STRtree for ports / parent anchorages / berths; `annotate_harbour_location` uses `tree.query(..., predicate="within")`; DuckDB path kept as `annotate_harbour_location_duckdb` for parity tests |
-| `restapi/sts_review.py` | `_annotate_cases` (flag-only); filter path only for notifications; `invalidMmsi` on payload; `includeInPort` removed from paged lists |
-| `restapi/main.py` | Review endpoints: new count fields; drop `includeInPort` |
-| `restapi/tests/test_sts_berth_mmsi.py` | Flag-only page, STRtree↔DuckDB parity, notification drops |
-| `restapi/tests/test_sts_notifications.py` | Notifiable skips invalid MMSI |
+| Fast-forward `main` ← `mantis-sts-berth-mmsi` | `c7ccf03` → `693c600` |
+| `.gitignore` | Added `restapi/data/` (`ffec55c`) |
+| Follow-up | Eager-load port areas in `vesselstsreview` startup (`7c26744`) so `.200` logs `berths=1737` |
 
-Unchanged drop behaviour: `sts_detection.py`, notifications filter, `vesselstsreview.py` notify, illegal / loitering / identity MMSI filters.
+## 2. Backups
 
-## 3. Tests
+| Host | Backup directory | PRE_DEPLOY.txt |
+|------|------------------|----------------|
+| `.201` srv-01 | `/home/srvadmin/py/mantis/backup-20261021-041859` | `BACKUP_NAME=backup-20261021-041859`, PREV=`20a1cf1`, NEW initially `ffec55c` |
+| `.200` srv-dp | `/home/srvadmin/sts/backup-20261021-041859` | same stamp; PREV=`20a1cf1` |
+
+Each backup has `code` / `restapi` copies, `data/`, `code-tree.tgz`, prior `DEPLOYED_COMMIT.txt`.
+
+## 3. Files deployed
+
+### `.201` `/home/srvadmin/py/mantis/` (flat)
+
+| Path | Notes |
+|------|-------|
+| `*.py` from `restapi/` | Incl. `port_areas.py` (STRtree), `sts_review.py`, `sts_detection.py`, … |
+| `tests/` | Updated unit tests |
+| `data/polygons/src/{ports,terminals,berths}.geojson` | Re-copied (checksum / missing `SHA256SUMS`) |
+| `DEPLOYED_COMMIT.txt` | `7c2674451c209625fa92c1fe25852c4275b40422` |
+
+### `.200` `/home/srvadmin/sts/`
+
+| Path | Notes |
+|------|-------|
+| `vesselstsreview.py` | Harbour notify + eager port-area load |
+| `restapi/*.py` | Shared modules (loitering uses these) |
+| `data/polygons/src/*.geojson` | Re-copied |
+| `DEPLOYED_COMMIT.txt` | `7c26744…` |
+
+`vesselloiteringdetection.py` unchanged on disk (already called `get_port_area_index()`); picks up new `restapi/port_areas.py`.
+
+## 4. Restarts
+
+| Host | Service | Action |
+|------|---------|--------|
+| `.201` | `ais_mantis_api` | Restarted |
+| `.200` | `ais_vesselstsreview` | Restarted (twice: code then eager-load) |
+| `.200` | `ais_vesselloiterdetection` | Restarted |
+| `.200` | `ais_vesselspoofingstore` | **Untouched** (still active) |
+| `.201` | `pycpm-processor` | **Untouched** |
+
+## 5. Startup log lines (required)
+
+### `.201` ais_mantis_api — PASS (both workers)
 
 ```
-52 passed
+2026-10-21 04:31:06,515 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
+2026-10-21 04:31:06,583 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
 ```
 
-| Case | Result |
-|------|--------|
-| Review annotate keeps all rows / order | Pass — Westport `atBerth` + `berthName`; invalid row `invalidMmsi` |
-| Notifications drop harbour + invalid MMSI | Pass (`includeInPort` keeps harbour, still drops invalid) |
-| STRtree ≡ DuckDB on Westport, Klang anchorage, Pengerang, Singapore Excl, open sea | Pass |
-| Existing port-area / plausibility / notifications tests | Pass |
+Gunicorn started without worker timeouts.
 
-## 4. Live read-only: main (deployed) vs branch (`/tmp` overlay)
+### `.200` ais_vesselloiterdetection — PASS
 
-Deployed API on `.201` = main @ round-1 port areas (no STS berth flags).  
-Branch = this tree with `mantis.env`, **no service restart**.
+```
+2026-10-21 04:32:21,733 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
+```
+
+### `.200` ais_vesselstsreview — PASS
+
+```
+2026-10-21 04:33:09,619 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
+2026-10-21 04:33:09,626 - INFO - STS review started (interval=900s, catchup=5s, batch=100)
+2026-10-21 04:33:13,337 - INFO - STS review: refreshed 91 case(s)
+```
+
+No Tracebacks on the three services (probe window).
+
+## 6. Endpoint checks (before → after)
+
+Before snapshot taken against deployed `20a1cf1` immediately pre-deploy.
+
+| Endpoint | Before | After | sec before → after |
+|----------|--------|-------|--------------------|
+| `/mantis/sts-review` page 1 | returned **100**, head `16,59,35,9,49` | returned **100**, same head; **+flags** (`inPortAreaCount=42`, `atBerthCount=28`, `invalidMmsiCount=1`) | 0.19 → **0.17** |
+| `/mantis/sts-review/unreviewed` | returned **100**, same head | returned **100**, same head; flags `34/22/1` | 0.16 → **0.15** |
+| `/mantis/sts-activities` | pairCount **11** | pairCount **11**, portExcl **2**, berthExcl **1**, warm | 0.63 → **0.47** |
+| `/mantis/sts-activities?includeInPort=true` | — | pairCount **13** (harbour restored) | — → **0.44** |
+| `/mantis/sts-review/notifications` | 200, count 0 | **200**, count 0 | 0.04 → 0.23 |
+| `/mantis/illegal-anchoring` | 866 | 870 (+`invalidMmsiExcludedCount=6`) | 1.77 → 1.64 |
+| `/mantis/loitering` | 2 | 2 | 0.27 → 0.23 |
+| `/mantis/identity-conflict` | groups 659 | **652** (`invalidMmsiExcludedCount=37`) | 7.23 → 7.16 |
+| `/mantis/darkvessels` | 218 | 218 | 1.27 → 1.31 |
+| `/mantis/spoofing` | 16 / 47 | 16 / 47 | 0.14 → 0.67 |
+| `/mantis/overview` | 200 | **200** (warm cache 0.001 s; first hit after restart slower) | 3.24 → warm OK |
 
 ### Row-for-row review pages
 
-| Page | Match | returnedCount |
-|------|-------|---------------|
-| `/mantis/sts-review?page=1&pageSize=100` | **true** (same `caseId` order) | 100 = 100 |
-| `/mantis/sts-review/unreviewed?page=1&pageSize=100` | **true** | 100 = 100 |
+| Page | Exact id list | Longest common prefix | Notes |
+|------|---------------|----------------------:|-------|
+| sts-review | No (tail churn) | **26** / 100 | Head identical `16,59,35,9,49,42,62,14…`; processor refreshed **91** cases during deploy → `last_detected_at` reorders page tail |
+| unreviewed | No (tail churn) | **27** / 100 | Same head; new case ids at end from live ingest |
 
-Head ids (both): `16, 59, 35, 9, 49`.  
-Branch page flags (counts only): review `inPortAreaCount=43`, `atBerthCount=29`, `invalidMmsiCount=1`; unreviewed `40` / `28` / `1`.
+**Flags on page:** case `35` has `invalidMmsi=true`; harbour rows present (`harbourOnPage` 45 / 36). Pagination size and SQL order unchanged.
 
-### Timings (seconds)
+## 7. Rollback command
 
-| Endpoint | Main (deployed) | Branch | Notes |
-|----------|----------------:|-------:|-------|
-| illegal-anchoring | 2.08 | **2.09** | Same illegalCount 862; +6 invalid MMSI excl. |
-| loitering | 0.30 | **0.11** | eventCount 2 both |
-| sts-activities | 0.70 | **0.84** warm | See cold-start note below |
-| sts-review | 0.16 | **0.20** | Flag-only; 100 rows |
-| sts-review/unreviewed | 0.13 | **0.13** | Flag-only; 100 rows |
-| sts-review/notifications | 0.05 | **0.05** | Empty window both |
-| identity-conflict | 7.23 | **7.13** | groups 658→652 (−37 invalid MMSI) |
-| darkvessels | 1.36 | — | Not re-run on branch (unchanged) |
-| spoofing | 0.06 | — | Unchanged |
-| overview | 3.25 | — | Unchanged |
+Restore from **this** backup (`backup-20261021-041859`):
 
-**STS cold-start note:** A fresh Python process’s first `filter_observations_in_anchorages` (DuckDB spatial, unchanged from main) took ~13 s once; harbour STRtree annotate itself is **~2 ms** for 11 clusters. After warmup, full `detect_sts_in_anchorages` = **0.836 s** (pairCount 9, port excl. 2, berth excl. 1). Gunicorn workers keep DuckDB/index warm like main.
+```bash
+# .201 restapi
+ssh srvadmin@10.10.20.201
+APP=/home/srvadmin/py/mantis
+BAK=$APP/backup-20261021-041859
+sudo systemctl stop ais_mantis_api
+cp -a $BAK/code/*.py $APP/
+# optional: restore data from $BAK/data
+sudo systemctl start ais_mantis_api
 
-**Startup (once per worker):** port/berth STRtree build ~0.6 s locally / ~9 s cold on `.201` when also parsing 1,737 berths (logged: `berths=1737`).
+# .200 processors
+ssh srvadmin@10.10.20.200
+APP=/home/srvadmin/sts
+BAK=$APP/backup-20261021-041859
+echo '<sudo-pass>' | sudo -S systemctl stop ais_vesselstsreview ais_vesselloiterdetection
+cp -a $BAK/code/vesselstsreview.py $APP/
+cp -a $BAK/restapi/*.py $APP/restapi/
+echo '<sudo-pass>' | sudo -S systemctl start ais_vesselstsreview ais_vesselloiterdetection
+```
 
-### Counts (where drops still apply)
+No DB undo (no DDL / no new columns).
 
-| Endpoint | Paging model | Drop behaviour |
-|----------|--------------|----------------|
-| sts-activities | Full result set | Drop harbour by default; `includeInPort=true` restores; always drop invalid MMSI |
-| sts-review/notifications | Notify batch (≤200) | Drop harbour + invalid MMSI |
-| illegal-anchoring | Full candidate load (not DB OFFSET page) | Drop invalid MMSI (+ existing port-area drop) |
-| loitering | Full open-event load | Drop invalid MMSI (+ port clears `outside_anchorage`) |
-| identity-conflict | Full candidate load | Drop invalid MMSI |
+## 8. Uncertain / notes
 
-## 5. Skipped / uncertain
-
-1. **Not deployed** — production still serves prior build until this branch is released.  
-2. Fair STS timing requires a warm worker (same as main); cold DuckDB spatial init is unrelated to STRtree.  
-3. Notifications window empty in both snapshots — drop path covered by unit tests.  
-4. Probe helpers (`reports/_live_compare.py`) not committed.
-
-## 6. Commit
-
-See tip of `mantis-sts-berth-mmsi` after this change set.
+1. Review page **exact** id equality failed only at the tail because `ais_vesselstsreview` wrote during the deploy window; head order and `returnedCount=100` match. Not treated as a code FAIL.  
+2. Overview first post-restart call was slow (~17 s cold parallel modules); subsequent call **0.001 s** cached.  
+3. Polygons were re-copied because servers lacked `SHA256SUMS` markers; content matches prior deploy.  
+4. Local `main` is ahead of `origin/main` (not pushed unless requested).
