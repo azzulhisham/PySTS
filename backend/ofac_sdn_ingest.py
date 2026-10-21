@@ -133,24 +133,9 @@ CREATE INDEX IF NOT EXISTS idx_{prefix}_aka_last_name ON {prefix}_aka (last_name
 CREATE INDEX IF NOT EXISTS idx_{prefix}_id_type_number ON {prefix}_identifier (id_type, id_number);
 CREATE INDEX IF NOT EXISTS idx_{prefix}_id_number ON {prefix}_identifier (id_number);
 
-CREATE OR REPLACE VIEW {prefix}_vessel AS
-SELECT
-    e.uid,
-    e.list_name,
-    e.last_name AS vessel_name,
-    e.vessel_call_sign,
-    e.vessel_type,
-    e.vessel_flag,
-    e.vessel_owner,
-    e.tonnage,
-    e.gross_registered_tonnage,
-    e.programs,
-    e.remarks,
-    e.publish_date,
-    e.imo,
-    e.mmsi
-FROM {prefix}_entry e
-WHERE e.sdn_type = 'Vessel';
+-- Do not CREATE OR REPLACE VIEW here: live ofac_*_vessel column order/names
+-- already differ across SDN vs CONS, and REPLACE fails when renaming columns.
+-- Views are assumed to exist (created once). Row refresh is TRUNCATE+INSERT only.
 """
     )
 
