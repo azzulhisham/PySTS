@@ -1,141 +1,180 @@
-# Deploy report — STS berth / MMSI (round 2)
+# UN Security Council sanctions — Phase 2 deploy report
 
 **Date:** 2026-10-21  
-**Branch:** `main` @ **`7c26744`** (merged from `mantis-sts-berth-mmsi` @ `693c600` + eager-load follow-up)  
-**Decision:** **GO**
+**Commit:** `ec6ebd2` (`mantis-un-sanctions` → `main`)  
+**Backup stamp:** `backup-20261021-071811`  
+**Decision:** **GO** (no rollback)
 
-## 1. Merge
+---
+
+## 1. Fix: ship IMO vs company number
+
+| Rule | Behaviour |
+|------|-----------|
+| Ship IMO | Only `IMO: NNNNNNN` (colon), check digit OK → `un_entry.imo` / `un_vessel` |
+| Company IMO | `IMO number` / `IMO company` / `(IMO) Number` / `Company Number IMO` → `un_identifier` as `IMO company number` only |
+
+| Entry | Ref | Result |
+|-------|-----|--------|
+| AVAX | LYe.006 | **Included** — IMO `9058713` |
+| OCEAN MARITIME MANAGEMENT (OMM) | KPe.020 | **Excluded** — `1790183` stored as company number |
+
+Dry-run after fix:
+
+```
+Total entries: 1010
+Entries with an IMO (check digit OK): 1
+Sample vessels: AVAX imo=9058713 ref=LYe.006
+```
+
+Tests: `test_omm_excluded_avax_included` + full `restapi/tests` / related backend tests — **pass** before merge.
+
+---
+
+## 2. Git
 
 | Step | Result |
 |------|--------|
-| Fast-forward `main` ← `mantis-sts-berth-mmsi` | `c7ccf03` → `693c600` |
-| `.gitignore` | Added `restapi/data/` (`ffec55c`) |
-| Follow-up | Eager-load port areas in `vesselstsreview` startup (`7c26744`) so `.200` logs `berths=1737` |
+| Branch | `mantis-un-sanctions` |
+| Commit | `ec6ebd2` — Add UN Security Council sanctions ingest and API merge |
+| Merge | Fast-forward `main` ← branch |
+| Push | `origin/mantis-un-sanctions`, `origin/main` |
 
-## 2. Backups
+---
 
-| Host | Backup directory | PRE_DEPLOY.txt |
-|------|------------------|----------------|
-| `.201` srv-01 | `/home/srvadmin/py/mantis/backup-20261021-041859` | `BACKUP_NAME=backup-20261021-041859`, PREV=`20a1cf1`, NEW initially `ffec55c` |
-| `.200` srv-dp | `/home/srvadmin/sts/backup-20261021-041859` | same stamp; PREV=`20a1cf1` |
+## 3. DDL applied (approved only)
 
-Each backup has `code` / `restapi` copies, `data/`, `code-tree.tgz`, prior `DEPLOYED_COMMIT.txt`.
+Applied once via ingest `CREATE … IF NOT EXISTS` / `CREATE OR REPLACE VIEW` on pnav:
 
-## 3. Files deployed
+- `un_ingest_run`, `un_entry`, `un_aka`, `un_identifier` + indexes  
+- view `un_vessel`  
 
-### `.201` `/home/srvadmin/py/mantis/` (flat)
+**No other DDL.**
 
-| Path | Notes |
-|------|-------|
-| `*.py` from `restapi/` | Incl. `port_areas.py` (STRtree), `sts_review.py`, `sts_detection.py`, … |
-| `tests/` | Updated unit tests |
-| `data/polygons/src/{ports,terminals,berths}.geojson` | Re-copied (checksum / missing `SHA256SUMS`) |
-| `DEPLOYED_COMMIT.txt` | `7c2674451c209625fa92c1fe25852c4275b40422` |
+---
 
-### `.200` `/home/srvadmin/sts/`
+## 4. Ingest row counts (pnav)
 
-| Path | Notes |
-|------|-------|
-| `vesselstsreview.py` | Harbour notify + eager port-area load |
-| `restapi/*.py` | Shared modules (loitering uses these) |
-| `data/polygons/src/*.geojson` | Re-copied |
-| `DEPLOYED_COMMIT.txt` | `7c26744…` |
+| Object | Count / value |
+|--------|----------------|
+| `un_entry` | **1010** |
+| `un_vessel` | **1** — AVAX / `9058713` / LYe.006 |
+| `un_ingest_run` | **1** (`rows_loaded=1010`, `vessel_count=1`, publish `2026-10-20T23:00:05.952Z`) |
+| `un_aka` | 2766 |
+| `un_identifier` | 17 (`IMO`×1, `IMO company number`×16) |
 
-`vesselloiteringdetection.py` unchanged on disk (already called `get_port_area_index()`); picks up new `restapi/port_areas.py`.
+Host: srv-dp `.200` — `/home/srvadmin/sts/un_sanctions_ingest.py`  
+One-shot: `python3 un_sanctions_ingest.py --xml data/un_consolidated.xml`
 
-## 4. Restarts
+---
 
-| Host | Service | Action |
-|------|---------|--------|
-| `.201` | `ais_mantis_api` | Restarted |
-| `.200` | `ais_vesselstsreview` | Restarted (twice: code then eager-load) |
-| `.200` | `ais_vesselloiterdetection` | Restarted |
-| `.200` | `ais_vesselspoofingstore` | **Untouched** (still active) |
-| `.201` | `pycpm-processor` | **Untouched** |
+## 5. Cron (srv-dp `.200`)
 
-## 5. Startup log lines (required)
-
-### `.201` ais_mantis_api — PASS (both workers)
+OFAC cron was **not** present on the host (empty user/root crontab; no `ofac_sdn_ingest.py` on disk). UN cron added **5 minutes after** the documented OFAC time (`15 8`):
 
 ```
-2026-10-21 04:31:06,515 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
-2026-10-21 04:31:06,583 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
+20 8 * * * /usr/bin/python3 /home/srvadmin/sts/un_sanctions_ingest.py >> /var/log/un_ingest.log 2>&1
 ```
 
-Gunicorn started without worker timeouts.
+Log: `/var/log/un_ingest.log` (owned by `srvadmin`).
 
-### `.200` ais_vesselloiterdetection — PASS
+---
 
-```
-2026-10-21 04:32:21,733 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
-```
+## 6. Backups + restarts
 
-### `.200` ais_vesselstsreview — PASS
+| Host | Backup | `PRE_DEPLOY.txt` |
+|------|--------|------------------|
+| `.200` srv-dp `/home/srvadmin/sts` | `backup-20261021-071811` | `BACKUP_NAME=backup-20261021-071811`, PREV=`7c26744`, NEW=`ec6ebd2` |
+| `.201` srv-01 `/home/srvadmin/py/mantis` | `backup-20261021-071811` | same stamp / commits |
 
-```
-2026-10-21 04:33:09,619 - INFO - polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
-2026-10-21 04:33:09,626 - INFO - STS review started (interval=900s, catchup=5s, batch=100)
-2026-10-21 04:33:13,337 - INFO - STS review: refreshed 91 case(s)
-```
+| Restart | Service |
+|---------|---------|
+| `.201` | `ais_mantis_api` only → **active** |
+| `.200` | none (ingest script + cron only) |
 
-No Tracebacks on the three services (probe window).
+---
 
-## 6. Endpoint checks (before → after)
+## 7. Verification
 
-Before snapshot taken against deployed `20a1cf1` immediately pre-deploy.
+### Index / labels (live on `.201`)
 
-| Endpoint | Before | After | sec before → after |
-|----------|--------|-------|--------------------|
-| `/mantis/sts-review` page 1 | returned **100**, head `16,59,35,9,49` | returned **100**, same head; **+flags** (`inPortAreaCount=42`, `atBerthCount=28`, `invalidMmsiCount=1`) | 0.19 → **0.17** |
-| `/mantis/sts-review/unreviewed` | returned **100**, same head | returned **100**, same head; flags `34/22/1` | 0.16 → **0.15** |
-| `/mantis/sts-activities` | pairCount **11** | pairCount **11**, portExcl **2**, berthExcl **1**, warm | 0.63 → **0.47** |
-| `/mantis/sts-activities?includeInPort=true` | — | pairCount **13** (harbour restored) | — → **0.44** |
-| `/mantis/sts-review/notifications` | 200, count 0 | **200**, count 0 | 0.04 → 0.23 |
-| `/mantis/illegal-anchoring` | 866 | 870 (+`invalidMmsiExcludedCount=6`) | 1.77 → 1.64 |
-| `/mantis/loitering` | 2 | 2 | 0.27 → 0.23 |
-| `/mantis/identity-conflict` | groups 659 | **652** (`invalidMmsiExcludedCount=37`) | 7.23 → 7.16 |
-| `/mantis/darkvessels` | 218 | 218 | 1.27 → 1.31 |
-| `/mantis/spoofing` | 16 / 47 | 16 / 47 | 0.14 → 0.67 |
-| `/mantis/overview` | 200 | **200** (warm cache 0.001 s; first hit after restart slower) | 3.24 → warm OK |
+| Check | Result |
+|-------|--------|
+| Log | `Sanctions lookup: 1520 IMO keys, 790 MMSI keys` |
+| OFAC IMO keys | **1519** (unchanged set) + **1** UN → total **1520** |
+| MMSI keys | **790** (unchanged) |
+| UN IMO keys | **1** (`9058713`) |
+| `match_vessel(9058713)` | `sanctions_list=UN`, `list_names=['UN']`, confirmed |
 
-### Row-for-row review pages
+### Sanctions vessel list
 
-| Page | Exact id list | Longest common prefix | Notes |
-|------|---------------|----------------------:|-------|
-| sts-review | No (tail churn) | **26** / 100 | Head identical `16,59,35,9,49,42,62,14…`; processor refreshed **91** cases during deploy → `last_detected_at` reorders page tail |
-| unreviewed | No (tail churn) | **27** / 100 | Same head; new case ids at end from live ingest |
+| | Before | After |
+|--|-------:|------:|
+| Total vessels | 1524 | **1525** |
+| SDN | 1524 | **1524** |
+| UN | 0 | **1** (AVAX `9058713`) |
 
-**Flags on page:** case `35` has `invalidMmsi=true`; harbour rows present (`harbourOnPage` 45 / 36). Pagination size and SQL order unchanged.
+### AVAX in AIS (ClickHouse `56.69.44.39:8123`, last 7 days)
 
-## 7. Rollback command
+Bounded read-only:
 
-Restore from **this** backup (`backup-20261021-041859`):
+- Postgres `ais_static` for IMO `9058713`: **0** rows  
+- ClickHouse `pnav.ais_static` where `imo` matches `9058713` and `ts` ≥ 7d: **0** rows  
+
+**AVAX not seen in AIS in the last 7 days.** Label path verified via live index unit check above.
+
+### Endpoint health (all HTTP 200)
+
+| Endpoint | Before count | After count | Before s | After s (cold) | Warm s |
+|----------|-------------:|------------:|---------:|---------------:|-------:|
+| `/mantis/sanctions` | 1524 | 1525 (+1 UN) | 0.32 | 0.76 | — |
+| `/mantis/sts-activities` | pairCount 7 | 7 | 0.72 | 16.16* | **0.44–0.51** |
+| `/mantis/sts-review` | 17146 | 17146 | 0.17 | 0.17 | — |
+| `/mantis/illegal-anchoring` | 867 | 868† | 1.73 | 1.62 | — |
+| `/mantis/darkvessels` | 202 | 200† | 1.34 | 1.81 | — |
+| `/mantis/identity-conflict` | groups 653 | 653 | 7.29 | 7.19 | — |
+| `/mantis/overview` | OK | OK | 3.06 | 16.71* | **~0–3** |
+
+\* First call after API restart (cold cache).  
+† Live AIS churn (±2); not a sanctions regression.  
+Existing fields (`sanctionsMatch`, `matchConfidence`, `sanctionsList`) unchanged in shape; additive `listNames` when matched.
+
+---
+
+## 8. Rollback command (code only; leave UN tables)
+
+If needed, restore from this backup (do **not** drop `un_*`):
 
 ```bash
-# .201 restapi
-ssh srvadmin@10.10.20.201
+# .201
 APP=/home/srvadmin/py/mantis
-BAK=$APP/backup-20261021-041859
-sudo systemctl stop ais_mantis_api
-cp -a $BAK/code/*.py $APP/
-# optional: restore data from $BAK/data
-sudo systemctl start ais_mantis_api
+BAK=$APP/backup-20261021-071811
+cp -a "$BAK/code/"*.py "$APP/"
+sudo systemctl restart ais_mantis_api
 
-# .200 processors
-ssh srvadmin@10.10.20.200
+# .200
 APP=/home/srvadmin/sts
-BAK=$APP/backup-20261021-041859
-echo '<sudo-pass>' | sudo -S systemctl stop ais_vesselstsreview ais_vesselloiterdetection
-cp -a $BAK/code/vesselstsreview.py $APP/
-cp -a $BAK/restapi/*.py $APP/restapi/
-echo '<sudo-pass>' | sudo -S systemctl start ais_vesselstsreview ais_vesselloiterdetection
+BAK=$APP/backup-20261021-071811
+# remove new ingest if rolling back script only:
+# rm -f $APP/un_sanctions_ingest.py
+# crontab -l | grep -v un_sanctions_ingest.py | crontab -
+cp -a "$BAK/code/"*.py "$APP/" 2>/dev/null || true
 ```
 
-No DB undo (no DDL / no new columns).
+UN tables/view in pnav stay in place per deploy policy.
 
-## 8. Uncertain / notes
+---
 
-1. Review page **exact** id equality failed only at the tail because `ais_vesselstsreview` wrote during the deploy window; head order and `returnedCount=100` match. Not treated as a code FAIL.  
-2. Overview first post-restart call was slow (~17 s cold parallel modules); subsequent call **0.001 s** cached.  
-3. Polygons were re-copied because servers lacked `SHA256SUMS` markers; content matches prior deploy.  
-4. Local `main` is ahead of `origin/main` (not pushed unless requested).
+## 9. Files deployed
+
+| Host | Paths |
+|------|--------|
+| `.200` | `un_sanctions_ingest.py`, `data/un_consolidated.xml`, `DEPLOYED_COMMIT.txt` |
+| `.201` | `sanctions.py`, `tests/test_sanctions_un.py`, `DEPLOYED_COMMIT.txt` |
+
+---
+
+## 10. Notes
+
+- Documented OFAC cron (`15 8` → `/opt/PySTS/...`) was not installed on srv-dp; UN cron uses `/home/srvadmin/sts/un_sanctions_ingest.py` at `20 8`.
+- Helper snapshot script used for verify: `reports/_un_api_snapshot.py` (local/ops only).
