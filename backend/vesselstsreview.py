@@ -568,6 +568,13 @@ def run_once() -> int:
 
 def main() -> None:
     ensure_tables(get_engine())
+    # Eager-load harbour STRtree (same as API / loitering) so startup logs berths=.
+    try:
+        from port_areas import get_port_area_index
+
+        get_port_area_index()
+    except Exception:
+        logging.exception("port_areas load failed; notify harbour flags may be skipped")
     logging.info(
         "STS review started (interval=%ss, catchup=%ss, batch=%s)",
         LOOP_SECONDS, CATCHUP_PAUSE_SECONDS, BATCH_LIMIT,
