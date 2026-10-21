@@ -1,0 +1,7 @@
+pandas
+SQLAlchemy
+sqlmodel
+duckdb
+psycopg2-binary
+clickhouse-connect
+shapely==2.2.0

@@ -8,5 +8,5 @@ SQLAlchemy
 duckdb
 psycopg2-binary
 clickhouse-connect
-shapely
+shapely==2.2.0
 folium

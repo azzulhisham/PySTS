@@ -24,8 +24,13 @@ Thumbs.db
 .env.*
 !.env.example
 
-# Local data dumps (not source)
-data/
+# Local data dumps (not source). Keep published polygon GeoJSON tracked.
+data/*
+!data/polygons/
+data/polygons/*
+!data/polygons/src/
+data/polygons/src/*
+!data/polygons/src/*.geojson
 backend/data/
 
 # MCP local venv (also listed in mcp/.gitignore)
