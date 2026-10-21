@@ -1,129 +1,99 @@
-# Round 2 — STS berth / port exclusion + MMSI filter
+# Round 2 fixes — review flag-only + STRtree harbour lookup
 
 **Date:** 2026-10-21  
-**Branch:** `mantis-sts-berth-mmsi` (from `main` @ `c7ccf03`)  
-**Deploy:** **not deployed** (per request)
+**Branch:** `mantis-sts-berth-mmsi`  
+**Base:** prior commit `3de440d`  
+**Deploy:** **not deployed**
 
 ## 1. Summary
 
-| Item | Result |
-|------|--------|
-| Berths loaded at startup | **1,737** (logged with ports/terminals) |
-| STS harbour flags | `inPortArea` / `atBerth` (+ names) at API + review notify path |
-| Default STS / review / notifications | Drop `inPortArea` or `atBerth`; `includeInPort=true` restores |
-| `notified_at` stamping | Skips in-port / at-berth and invalid member MMSI |
-| MMSI filter | Same `is_valid_ship_mmsi` on illegal, STS, loitering, identity |
-| Additive response fields | `portAreaExcludedCount`, `atBerthExcludedCount`, `invalidMmsiExcludedCount` |
-| DDL / stored rows | **None** — no new columns; rows unchanged |
-| `/sts-review/unreviewed` | **0.70 s** after (page 100) |
+| Change | Result |
+|--------|--------|
+| STS review / unreviewed | **Flag only** — never drop rows; page size / order / `returnedCount` match main |
+| New per-row fields | `inPortArea`, `portAreaName`, `portAreaTerminalName`, `atBerth`, `berthName`, `invalidMmsi` |
+| New page counts | `inPortAreaCount`, `atBerthCount`, `invalidMmsiCount` |
+| `includeInPort` on review lists | **Removed** |
+| STS activities / notifications / `notified_at` | Still **drop** harbour + invalid MMSI (activities: `includeInPort` restores harbour) |
+| Illegal / loitering / identity | Invalid MMSI drop unchanged (not DB-offset paged) |
+| Spatial lookup | Shapely **STRtree** at startup; no per-call GeoJSON / DuckDB CROSS JOIN |
+| Warm `/sts-activities` | **0.84 s** (target &lt; 1 s; main was 0.70 s) |
 
 ## 2. Files changed
 
 | Path | Change |
 |------|--------|
-| `restapi/port_areas.py` | Load `berths.geojson`; `annotate_harbour_location`; `harbour_exclude_mask`; berth log line |
-| `restapi/ais_identity.py` | `filter_valid_ship_mmsi_frame` helper (rule unchanged) |
-| `restapi/sts_detection.py` | Harbour annotate + exclude; MMSI filter; additive counts; `includeInPort` |
-| `restapi/sts_review.py` | Harbour annotate/filter; `is_notifiable` skips port/berth; invalid MMSI; counts; `includeInPort` |
-| `restapi/illegal_anchoring.py` | MMSI filter + `invalidMmsiExcludedCount` |
-| `restapi/loitering.py` | MMSI filter + `invalidMmsiExcludedCount` |
-| `restapi/identity_conflict.py` | MMSI filter + `invalidMmsiExcludedCount` |
-| `restapi/main.py` | Wire `includeInPort` + new counts on STS/illegal/loiter/identity |
-| `restapi/mantis_overview.py` | Surface illegal `invalidMmsiExcludedCount` |
-| `backend/vesselstsreview.py` | Harbour flags after `label_anchorages`; notify=false if port/berth/invalid MMSI (not persisted) |
-| `restapi/tests/test_sts_berth_mmsi.py` | **New** — Westport berth, Klang anchorage, MMSI drops |
-| `restapi/tests/test_port_areas.py` | Assert 1737 berths |
-| `restapi/tests/test_sts_notifications.py` | Notifiable skips port/berth |
+| `restapi/port_areas.py` | STRtree for ports / parent anchorages / berths; `annotate_harbour_location` uses `tree.query(..., predicate="within")`; DuckDB path kept as `annotate_harbour_location_duckdb` for parity tests |
+| `restapi/sts_review.py` | `_annotate_cases` (flag-only); filter path only for notifications; `invalidMmsi` on payload; `includeInPort` removed from paged lists |
+| `restapi/main.py` | Review endpoints: new count fields; drop `includeInPort` |
+| `restapi/tests/test_sts_berth_mmsi.py` | Flag-only page, STRtree↔DuckDB parity, notification drops |
+| `restapi/tests/test_sts_notifications.py` | Notifiable skips invalid MMSI |
+
+Unchanged drop behaviour: `sts_detection.py`, notifications filter, `vesselstsreview.py` notify, illegal / loitering / identity MMSI filters.
 
 ## 3. Tests
 
 ```
-51 passed (restapi/tests + backend/tests/test_loiter_port_areas.py)
+52 passed
 ```
 
 | Case | Result |
 |------|--------|
-| STS centroid at Westport **Berth No.14** | Excluded by default; with `includeInPort=true` → `atBerth=true`, name `Berth No.14` |
-| STS centroid in Klang anchorage | Kept (`inPortArea=false`, `atBerth=false`) |
-| Invalid MMSI `0`, `111111111`, bad MID | Dropped via shared filter; valid kept |
+| Review annotate keeps all rows / order | Pass — Westport `atBerth` + `berthName`; invalid row `invalidMmsi` |
+| Notifications drop harbour + invalid MMSI | Pass (`includeInPort` keeps harbour, still drops invalid) |
+| STRtree ≡ DuckDB on Westport, Klang anchorage, Pengerang, Singapore Excl, open sea | Pass |
 | Existing port-area / plausibility / notifications tests | Pass |
 
-## 4. Before / after (live, read-only)
+## 4. Live read-only: main (deployed) vs branch (`/tmp` overlay)
 
-**Before** = deployed API on `.201` @ `20a1cf1` / `c7ccf03` (round 1, no STS berth / no MMSI on these endpoints).  
-**After** = round-2 code run once from `/tmp/mantis-round2` with `mantis.env` (no service restart, no deploy).
+Deployed API on `.201` = main @ round-1 port areas (no STS berth flags).  
+Branch = this tree with `mantis.env`, **no service restart**.
 
-Live AIS churn means absolute counts can move between the two snapshots; exclusion splits below are from the after run.
+### Row-for-row review pages
 
-### Counts
+| Page | Match | returnedCount |
+|------|-------|---------------|
+| `/mantis/sts-review?page=1&pageSize=100` | **true** (same `caseId` order) | 100 = 100 |
+| `/mantis/sts-review/unreviewed?page=1&pageSize=100` | **true** | 100 = 100 |
 
-| Endpoint | Before | After (default) | Port excl. | Berth excl. | Invalid MMSI excl. | sec before → after |
-|----------|--------|-----------------|-----------:|------------:|-------------------:|--------------------|
-| `/mantis/illegal-anchoring` | illegalCount **864** | **868** | 0 | — | **6** | 1.77 → 2.43 |
-| `/mantis/loitering` | eventCount **1** | **3** | 0 | — | **0** | 0.26 → 0.30 |
-| `/mantis/sts-activities` | pairCount **12** | **10** | **3** | **2** | **0** | 0.65 → ~9* |
-| `/mantis/sts-review` (page 100) | returned **100** / total 17122 | returned **54** / total 17122 | **43** | **29** | **1** | 0.21 → 0.78 |
-| `/mantis/sts-review/unreviewed` | returned **100** / total 324410 | returned **60** / total 324410 | **38** | **24** | **1** | 0.13 → 0.70 |
-| `/mantis/sts-review/notifications` | notificationCount **0** | **0** | 0 | 0 | 0 | 0.04 → 0.15 |
-| `/mantis/identity-conflict` | groups **658** / identities **1340** | **652** / **1318** | — | — | **37** | 7.02 → 6.93 |
+Head ids (both): `16, 59, 35, 9, 49`.  
+Branch page flags (counts only): review `inPortAreaCount=43`, `atBerthCount=29`, `invalidMmsiCount=1`; unreviewed `40` / `28` / `1`.
 
-\*After STS timed two detect passes (`includeInPort` false+true) in the probe (~18 s total); single default call is roughly half.
+### Timings (seconds)
 
-`includeInPort=true` (STS activities): pairCount **13** (harbour exclusions cleared).  
-STS review / unreviewed with `includeInPort=true`: returnedCount **99** on the same page window.
+| Endpoint | Main (deployed) | Branch | Notes |
+|----------|----------------:|-------:|-------|
+| illegal-anchoring | 2.08 | **2.09** | Same illegalCount 862; +6 invalid MMSI excl. |
+| loitering | 0.30 | **0.11** | eventCount 2 both |
+| sts-activities | 0.70 | **0.84** warm | See cold-start note below |
+| sts-review | 0.16 | **0.20** | Flag-only; 100 rows |
+| sts-review/unreviewed | 0.13 | **0.13** | Flag-only; 100 rows |
+| sts-review/notifications | 0.05 | **0.05** | Empty window both |
+| identity-conflict | 7.23 | **7.13** | groups 658→652 (−37 invalid MMSI) |
+| darkvessels | 1.36 | — | Not re-run on branch (unchanged) |
+| spoofing | 0.06 | — | Unchanged |
+| overview | 3.25 | — | Unchanged |
 
-### Startup log (after probe)
+**STS cold-start note:** A fresh Python process’s first `filter_observations_in_anchorages` (DuckDB spatial, unchanged from main) took ~13 s once; harbour STRtree annotate itself is **~2 ms** for 11 clusters. After warmup, full `detect_sts_in_anchorages` = **0.836 s** (pairCount 9, port excl. 2, berth excl. 1). Gunicorn workers keep DuckDB/index warm like main.
 
-```
-polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90
-```
+**Startup (once per worker):** port/berth STRtree build ~0.6 s locally / ~9 s cold on `.201` when also parsing 1,737 berths (logged: `berths=1737`).
 
-### Excluded examples (up to 10)
+### Counts (where drops still apply)
 
-**STS harbour / berth (activities clusters excluded by default)**
-
-| observationId | MMSIs | Port | Berth | Flags |
-|--------------:|-------|------|-------|-------|
-| 322380 | 357387000, 574000590 | Kota Kinabalu, Sabah | Berth No.7 | inPort + atBerth |
-| 324196 | 533016000, 533735000 | Pengerang / Pengerang Terminal | Berth West | inPort + atBerth |
-| 324249 | 219030706, 414155000 | Pengerang / Pengerang Terminal | — | inPort |
-
-**STS review page — port/berth (shown with `includeInPort=true`)**
-
-| observationId | MMSIs | Port | Berth |
-|--------------:|-------|------|-------|
-| 308568 | 352006547, 563079400 | Port Klang (Pelabuhan Klang) | Berth No.2 |
-| 317021 | 351462000, 538005619 | Port Klang (Pelabuhan Klang) | Berth No.3 |
-| 310119 | 341973000, 354912000, 566716000, 636024498 | Phuket Port | Phuket Berth No.1 |
-| 308535 | 371846000, 566690000 | Johor, Pasir Gudang | MMHE Berth 3 |
-| 189986 | 574013747, 574014605 | Duyen Hai | — |
-| 196925 | 533132754, 677029100 | Sibu, Sarawak | — |
-| 301411 | 525400275, 525500147 | Tanjung Ru | — |
-| 315828 | 525003328, 525210123 | Tanjung Uncang | — |
-| 312294 | 303582000, 369344000 | Singapore | — |
-| 315453 | 312747000, 533133921 | Tanjung Uncang | — |
-
-**Invalid MMSI**
-
-| Endpoint | Count | Example MMSIs |
-|----------|------:|---------------|
-| Illegal anchoring | 6 | 1193046, 9290775, 50862783, 56312345, 567000000, 832718046 |
-| STS review (sample window) | 1+ | obs 248848 → 56312345, 567000000 (with 562111000) |
-| Identity conflict | 37 | 13, 907912, 1193046, 5631102, 9290775, 12062552, 50862783, 53726285, 56312345, 61954928 |
-| Loitering | 0 | — |
-| STS activities (this snapshot) | 0 | — |
-
-Before STS review/unreviewed page samples still included **56312345** and **567000000**; after they are dropped from the default page.
+| Endpoint | Paging model | Drop behaviour |
+|----------|--------------|----------------|
+| sts-activities | Full result set | Drop harbour by default; `includeInPort=true` restores; always drop invalid MMSI |
+| sts-review/notifications | Notify batch (≤200) | Drop harbour + invalid MMSI |
+| illegal-anchoring | Full candidate load (not DB OFFSET page) | Drop invalid MMSI (+ existing port-area drop) |
+| loitering | Full open-event load | Drop invalid MMSI (+ port clears `outside_anchorage`) |
+| identity-conflict | Full candidate load | Drop invalid MMSI |
 
 ## 5. Skipped / uncertain
 
-1. **No deploy** — production still serves round 1 until this branch is merged/deployed.
-2. **Pagination vs filters** — harbour/MMSI filters run on the fetched page, so `returnedCount` can be &lt; `pageSize` while `caseCount` stays the DB total. No new columns (as required).
-3. **Illegal `portAreaExcludedCount`** still **0** on live stopped candidates (same as round 1).
-4. **Notifications** window was empty in both snapshots (`notificationCount=0`); harbour/MMSI gates are wired but not exercised by live notify traffic here.
-5. **Live churn** — illegal/loitering absolute counts moved between before and after snapshots; use exclusion columns for the round-2 effect.
-6. Helper probes (`reports/_live_before.py`, `reports/_live_after.py`) used for this report were **not** committed.
+1. **Not deployed** — production still serves prior build until this branch is released.  
+2. Fair STS timing requires a warm worker (same as main); cold DuckDB spatial init is unrelated to STRtree.  
+3. Notifications window empty in both snapshots — drop path covered by unit tests.  
+4. Probe helpers (`reports/_live_compare.py`) not committed.
 
 ## 6. Commit
 
-Branch `mantis-sts-berth-mmsi` — see git log for the commit hash after push of this change set.
+See tip of `mantis-sts-berth-mmsi` after this change set.

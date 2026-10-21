@@ -276,21 +276,18 @@ def get_sts_review():
     try:
         min_score = request.args.get("minSuspicionScore", type=float)
         page, page_size = _page_args()
-        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
         result = list_unexplained(
             min_suspicion_score=min_score if min_score is not None else MIN_SUSPICION_SCORE,
             page=page,
             page_size=page_size,
-            include_in_port=include_in_port,
         )
         payload = {
             "minSuspicionScore": result["min_suspicion_score"],
             "caseCount": result["case_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
-            "includeInPort": result["include_in_port"],
-            "portAreaExcludedCount": result["port_area_excluded_count"],
-            "atBerthExcludedCount": result["at_berth_excluded_count"],
-            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
+            "inPortAreaCount": result["in_port_area_count"],
+            "atBerthCount": result["at_berth_count"],
+            "invalidMmsiCount": result["invalid_mmsi_count"],
             **_page_payload(result),
             "cases": result["cases"],
         }
@@ -322,22 +319,19 @@ def get_sts_review_unreviewed():
 
     try:
         page, page_size = _page_args()
-        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
         result = list_unreviewed(
             date_from=_when("from"),
             date_to=_when("to"),
             page=page,
             page_size=page_size,
-            include_in_port=include_in_port,
         )
         payload = {
             "dateFrom": result["date_from"],
             "dateTo": result["date_to"],
             "caseCount": result["case_count"],
-            "includeInPort": result["include_in_port"],
-            "portAreaExcludedCount": result["port_area_excluded_count"],
-            "atBerthExcludedCount": result["at_berth_excluded_count"],
-            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
+            "inPortAreaCount": result["in_port_area_count"],
+            "atBerthCount": result["at_berth_count"],
+            "invalidMmsiCount": result["invalid_mmsi_count"],
             **_page_payload(result),
             "cases": result["cases"],
         }
