@@ -32,6 +32,7 @@ data/polygons/*
 data/polygons/src/*
 !data/polygons/src/*.geojson
 backend/data/
+restapi/data/
 
 # MCP local venv (also listed in mcp/.gitignore)
 mcp/venv/
