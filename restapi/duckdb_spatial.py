@@ -37,15 +37,31 @@ def duckdb_spatial_connection() -> Iterator[duckdb.DuckDBPyConnection]:
         conn.close()
 
 
+def _duckdb_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Coerce pandas StringDtype ('str') columns to object for DuckDB 1.4."""
+    if frame is None or frame.empty:
+        return frame
+    out = frame
+    str_cols = [
+        col for col in out.columns
+        if str(out[col].dtype) == "str" or str(out[col].dtype).startswith("string")
+    ]
+    if str_cols:
+        out = out.copy()
+        for col in str_cols:
+            out[col] = out[col].astype(object)
+    return out
+
+
 def spatial_df(sql: str, tables: dict[str, pd.DataFrame]) -> pd.DataFrame:
     with duckdb_spatial_connection() as conn:
         for name, frame in tables.items():
-            conn.register(name, frame)
+            conn.register(name, _duckdb_frame(frame))
         return conn.sql(sql).df()
 
 
 def spatial_fetchone(sql: str, tables: dict[str, pd.DataFrame]) -> tuple[Any, ...] | None:
     with duckdb_spatial_connection() as conn:
         for name, frame in tables.items():
-            conn.register(name, frame)
+            conn.register(name, _duckdb_frame(frame))
         return conn.sql(sql).fetchone()

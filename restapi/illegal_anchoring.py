@@ -25,6 +25,7 @@ from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from ais_identity import clean_ship_name
 from polygons import anchorage_areas, is_excl_name, restricted_limit
+from port_areas import annotate_in_port_area, get_port_area_index
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
@@ -261,6 +262,36 @@ def classify_illegal_anchoring(stopped: pd.DataFrame) -> pd.DataFrame:
     return located.loc[keep].reset_index(drop=True)
 
 
+def drop_port_area_candidates(
+    candidates: pd.DataFrame,
+) -> tuple[pd.DataFrame, int, list[dict[str, Any]]]:
+    """
+    After restricted/watch/Excl filtering, drop ships whose last position is
+    inside a port area. Anchorage wins (those stay). Returns kept frame,
+    excluded count, and up to 10 example dicts for reporting.
+    """
+    if candidates.empty:
+        return candidates, 0, []
+    annotated = annotate_in_port_area(
+        candidates,
+        lon_col="curlongitude",
+        lat_col="curlatitude",
+    )
+    mask = annotated["in_port_area"].fillna(False).astype(bool)
+    excluded = annotated.loc[mask]
+    examples: list[dict[str, Any]] = []
+    for _, row in excluded.head(10).iterrows():
+        examples.append({
+            "mmsi": int(row["mmsi"]),
+            "portName": row.get("port_area_name"),
+            "terminalName": row.get("port_area_terminal_name"),
+            "latitude": float(row["curlatitude"]),
+            "longitude": float(row["curlongitude"]),
+        })
+    kept = annotated.loc[~mask].reset_index(drop=True)
+    return kept, int(mask.sum()), examples
+
+
 def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if vessels.empty:
@@ -311,8 +342,13 @@ def detect_illegal_anchoring(
     summary_only: bool = False,
 ) -> dict[str, Any]:
     engine = engine or get_pg_engine()
+    # Ensure port polygons are loaded (and startup logs emitted) once.
+    get_port_area_index()
     stopped = load_stopped_vessels(engine)
     illegal = classify_illegal_anchoring(stopped)
+    illegal, port_area_excluded_count, port_area_excluded_examples = drop_port_area_candidates(
+        illegal
+    )
     illegal = attach_sanctions(illegal, engine)
     if not summary_only:
         illegal = sort_listed_first(illegal)
@@ -326,10 +362,14 @@ def detect_illegal_anchoring(
 
     watch = watch_polygons()
     port = port_limit_polygons()
+    port_index = get_port_area_index()
 
     return {
         "stopped_candidate_count": int(len(stopped)),
         "illegal_count": int(len(illegal)),
+        "port_area_excluded_count": port_area_excluded_count,
+        "port_area_excluded_examples": port_area_excluded_examples,
+        "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
         "by_reason": by_reason,
         "watch_polygon_count": len(watch),
@@ -337,5 +377,5 @@ def detect_illegal_anchoring(
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
         "vessels": illegal if not summary_only else illegal.iloc[0:0],
         "vessels_payload": [] if summary_only else vessels_to_payload(illegal),
-        "rule_version": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label",
+        "rule_version": "v3.2-in-restricted-or-watch-exclude-excl-holes-port-areas-ofac-label",
     }

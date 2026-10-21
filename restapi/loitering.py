@@ -16,13 +16,18 @@ from sqlalchemy.engine import Engine
 
 from api_timestamps import format_last_seen_at
 from pg_engine import get_pg_engine
+from port_areas import (
+    annotate_in_port_area,
+    apply_port_area_to_outside_anchorage,
+    get_port_area_index,
+)
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from ais_identity import clean_ship_name
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-RULE_VERSION = "v1.1-loiter-circle-6nm"
+RULE_VERSION = "v1.2-loiter-circle-6nm-port-areas"
 SHIP_TYPE_FILTER = "70-89 (cargo/tanker/container Class-A large vessels)"
 NM_M = 1852.0
 HULL_RADIUS_M = (
@@ -108,6 +113,8 @@ def _flags(row) -> list[str]:
         flags.append("near_restricted")
     if bool(row.get("before_sts")):
         flags.append("before_sts")
+    if bool(row.get("in_port_area")):
+        flags.append("in_port_area")
     return flags
 
 
@@ -119,6 +126,12 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
         anchorage = row.get("anchorage_name")
         if anchorage is not None and pd.isna(anchorage):
             anchorage = None
+        port_name = row.get("port_area_name")
+        if port_name is not None and pd.isna(port_name):
+            port_name = None
+        terminal_name = row.get("port_area_terminal_name")
+        if terminal_name is not None and pd.isna(terminal_name):
+            terminal_name = None
         records.append({
             "loiterId": int(row["loiter_id"]),
             "mmsi": int(row["mmsi"]),
@@ -140,6 +153,9 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
             "outsideAnchorage": bool(row.get("outside_anchorage")),
             "nearRestricted": bool(row.get("near_restricted")),
             "beforeSts": bool(row.get("before_sts")),
+            "inPortArea": bool(row.get("in_port_area")),
+            "portAreaName": port_name,
+            "portAreaTerminalName": terminal_name,
             "flags": _flags(row),
             "anchorageName": anchorage,
             "restrictedDistanceM": (
@@ -154,6 +170,33 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
             **payload_fields(row),
         })
     return records
+
+
+def _matches_flag_filter(
+    row,
+    *,
+    outside_anchorage: bool | None,
+    near_restricted: bool | None,
+    before_sts: bool | None,
+    pattern: str | None,
+) -> bool:
+    """Re-apply the SQL flag filter after port-area clears outside_anchorage."""
+    if outside_anchorage or near_restricted or before_sts:
+        ok = False
+        if outside_anchorage and bool(row.get("outside_anchorage")):
+            ok = True
+        if near_restricted and bool(row.get("near_restricted")):
+            ok = True
+        if before_sts and bool(row.get("before_sts")):
+            ok = True
+        return ok
+    if pattern:
+        return True
+    return (
+        bool(row.get("outside_anchorage"))
+        or bool(row.get("near_restricted"))
+        or bool(row.get("before_sts"))
+    )
 
 
 def _net_over_path(net_m: Any, path_m: Any) -> float | None:
@@ -291,11 +334,47 @@ def detect_loitering(
         max_radius_m=max_radius_m,
     )
     geo_filter, params = _geo_filter(chosen)
+    get_port_area_index()
     events = pd.read_sql(
         LOITER_SQL.format(flag_filter=flag_filter, geo_filter=geo_filter),
         con=engine,
         params=params or None,
     )
+    port_area_excluded_count = 0
+    port_area_excluded_examples: list[dict[str, Any]] = []
+    if not events.empty:
+        before_n = len(events)
+        events = annotate_in_port_area(
+            events,
+            lon_col="centre_longitude",
+            lat_col="centre_latitude",
+        )
+        # Capture examples that lose the default outside-anchorage listing.
+        would_drop = events["in_port_area"].fillna(False).astype(bool) & events[
+            "outside_anchorage"
+        ].fillna(False).astype(bool)
+        for _, row in events.loc[would_drop].head(10).iterrows():
+            port_area_excluded_examples.append({
+                "mmsi": int(row["mmsi"]),
+                "portName": row.get("port_area_name"),
+                "terminalName": row.get("port_area_terminal_name"),
+                "latitude": float(row["centre_latitude"]),
+                "longitude": float(row["centre_longitude"]),
+            })
+        events = apply_port_area_to_outside_anchorage(events)
+        keep = events.apply(
+            lambda r: _matches_flag_filter(
+                r,
+                outside_anchorage=outside_anchorage,
+                near_restricted=near_restricted,
+                before_sts=before_sts,
+                pattern=pattern,
+            ),
+            axis=1,
+        )
+        events = events.loc[keep].reset_index(drop=True)
+        port_area_excluded_count = before_n - len(events)
+
     events = attach_sanctions(events, engine)
     events = sort_listed_first(events)
 
@@ -303,14 +382,21 @@ def detect_loitering(
         "outside_anchorage": int(events["outside_anchorage"].sum()) if not events.empty else 0,
         "near_restricted": int(events["near_restricted"].sum()) if not events.empty else 0,
         "before_sts": int(events["before_sts"].sum()) if not events.empty else 0,
+        "in_port_area": int(events["in_port_area"].sum()) if (
+            not events.empty and "in_port_area" in events.columns
+        ) else 0,
     }
     sanctions_match_count = int(events["sanctions_match"].sum()) if not events.empty else 0
+    port_index = get_port_area_index()
     return {
         "rule_version": RULE_VERSION,
         "ship_type_filter": SHIP_TYPE_FILTER,
         "filters": _filters_payload(chosen),
         "event_count": int(len(events)),
         "by_flag": by_flag,
+        "port_area_excluded_count": port_area_excluded_count,
+        "port_area_excluded_examples": port_area_excluded_examples,
+        "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
         "events_payload": events_to_payload(events),
     }

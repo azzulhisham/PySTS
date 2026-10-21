@@ -65,6 +65,17 @@ except ImportError:  # pragma: no cover - deployed layout with restapi beside st
             and 201 <= int(text[:3]) <= 775
         )
 
+try:
+    from port_areas import (  # noqa: E402
+        annotate_in_port_area,
+        apply_port_area_to_outside_anchorage,
+        get_port_area_index,
+    )
+except ImportError:  # pragma: no cover
+    annotate_in_port_area = None  # type: ignore[assignment]
+    apply_port_area_to_outside_anchorage = None  # type: ignore[assignment]
+    get_port_area_index = None  # type: ignore[assignment]
+
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -253,6 +264,22 @@ def _spatial():
     return conn
 
 
+def _duckdb_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Coerce pandas StringDtype ('str') columns to object for DuckDB 1.4."""
+    if frame is None or frame.empty:
+        return frame
+    str_cols = [
+        col for col in frame.columns
+        if str(frame[col].dtype) == "str" or str(frame[col].dtype).startswith("string")
+    ]
+    if not str_cols:
+        return frame
+    out = frame.copy()
+    for col in str_cols:
+        out[col] = out[col].astype(object)
+    return out
+
+
 def detect_loiters(samples: pd.DataFrame) -> pd.DataFrame:
     empty_cols = [
         "mmsi", "started_at", "ended_at", "centre_latitude", "centre_longitude",
@@ -263,7 +290,7 @@ def detect_loiters(samples: pd.DataFrame) -> pd.DataFrame:
 
     conn = _spatial()
     try:
-        conn.register("samples", samples)
+        conn.register("samples", _duckdb_frame(samples))
         found = conn.sql(
             f"""
             WITH stats AS (
@@ -437,8 +464,11 @@ def label_geography(loiters: pd.DataFrame) -> pd.DataFrame:
     parents = _parent_polygons()
     conn = _spatial()
     try:
-        conn.register("loiters", out[["mmsi", "centre_longitude", "centre_latitude"]])
-        conn.register("parents", parents)
+        conn.register(
+            "loiters",
+            _duckdb_frame(out[["mmsi", "centre_longitude", "centre_latitude"]]),
+        )
+        conn.register("parents", _duckdb_frame(parents))
         named = conn.sql(
             """
             SELECT l.mmsi, min(p.anchorage_name) AS anchorage_name
@@ -465,6 +495,18 @@ def label_geography(loiters: pd.DataFrame) -> pd.DataFrame:
     ]
     out["restricted_distance_m"] = distances
     out["near_restricted"] = [d <= RESTRICTED_BUFFER_M for d in distances]
+
+    # Port-area centres are not "outside anchorage" for the default list.
+    # No new DB column — only clears outside_anchorage when in a port area.
+    if annotate_in_port_area is not None and apply_port_area_to_outside_anchorage is not None:
+        if get_port_area_index is not None:
+            get_port_area_index()
+        out = annotate_in_port_area(
+            out,
+            lon_col="centre_longitude",
+            lat_col="centre_latitude",
+        )
+        out = apply_port_area_to_outside_anchorage(out)
     return out
 
 
@@ -500,8 +542,8 @@ def refresh_before_sts(engine: Engine) -> int:
 
     conn = _spatial()
     try:
-        conn.register("loiters", loiters)
-        conn.register("sts", sts)
+        conn.register("loiters", _duckdb_frame(loiters))
+        conn.register("sts", _duckdb_frame(sts))
         matched = conn.sql(
             f"""
             SELECT loiter_id, sts_observation_id

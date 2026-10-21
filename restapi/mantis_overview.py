@@ -90,6 +90,8 @@ def _illegal_anchoring_summary(result: dict[str, Any]) -> dict[str, Any]:
         "shipTypeFilter": result["ship_type_filter"],
         "stoppedCandidateCount": result["stopped_candidate_count"],
         "illegalCount": result["illegal_count"],
+        "portAreaExcludedCount": result.get("port_area_excluded_count", 0),
+        "portAreaCount": result.get("port_area_count"),
         "byReason": by_reason,
         "inRestrictedZoneCount": _reason_contains(by_reason, "in_restricted_zone"),
         "inWatchPolygonCount": _reason_contains(by_reason, "in_watch_polygon"),

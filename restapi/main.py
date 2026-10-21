@@ -432,6 +432,8 @@ def get_loitering():
             "filters": result["filters"],
             "eventCount": result["event_count"],
             "byFlag": result["by_flag"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "portAreaCount": result["port_area_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
             "events": result["events_payload"],
         }
@@ -461,6 +463,8 @@ def get_illegal_anchoring():
             "shipTypeFilter": result["ship_type_filter"],
             "stoppedCandidateCount": result["stopped_candidate_count"],
             "illegalCount": result["illegal_count"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "portAreaCount": result["port_area_count"],
             "byReason": result["by_reason"],
             "watchPolygonCount": result["watch_polygon_count"],
             "portLimitPolygonCount": result["port_limit_polygon_count"],
