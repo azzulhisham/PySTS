@@ -29,9 +29,12 @@ NO_MATCH = {
     "sanctions_match": False,
     "match_confidence": "none",
     "sanctions_list": None,
+    "list_names": None,
 }
 
 CONFIDENCE_RANK = {"confirmed": 0, "possible": 1, "none": 2}
+# Primary label when the same IMO/MMSI appears on multiple lists.
+LIST_PRIORITY = {"SDN": 0, "CONS": 1, "UN": 2}
 
 SWAGGER_SAMPLE_LIMIT = 20
 SWAGGER_SAMPLE_MESSAGE = (
@@ -78,6 +81,50 @@ def normalize_mmsi(value: Any) -> str | None:
     return match.group(1) if match else None
 
 
+def _list_names_of(hit: dict[str, Any]) -> list[str]:
+    names = hit.get("list_names")
+    if isinstance(names, (list, tuple)) and names:
+        return [str(n) for n in names if n]
+    primary = hit.get("list_name")
+    return [str(primary)] if primary else []
+
+
+def _pick_primary_list(current: str | None, incoming: str) -> str:
+    if not current:
+        return incoming
+    cur_rank = LIST_PRIORITY.get(current, 99)
+    new_rank = LIST_PRIORITY.get(incoming, 99)
+    return current if cur_rank <= new_rank else incoming
+
+
+def _merge_index_hit(
+    index: dict[str, dict[str, Any]],
+    key: str,
+    rec: dict[str, Any],
+) -> None:
+    """Merge list membership; SDN remains the preferred primary label."""
+    incoming_list = str(rec.get("list_name") or "UN")
+    existing = index.get(key)
+    if existing is None:
+        index[key] = {
+            "list_name": incoming_list,
+            "list_names": [incoming_list],
+            "uid": rec.get("uid"),
+            "vessel_name": rec.get("vessel_name"),
+        }
+        return
+    names = list(dict.fromkeys(_list_names_of(existing) + [incoming_list]))
+    primary = _pick_primary_list(existing.get("list_name"), incoming_list)
+    # Prefer OFAC (esp. SDN) identity fields when SDN/CONS wins primary.
+    use_incoming = primary == incoming_list and primary != existing.get("list_name")
+    index[key] = {
+        "list_name": primary,
+        "list_names": names,
+        "uid": rec.get("uid") if use_incoming else existing.get("uid"),
+        "vessel_name": rec.get("vessel_name") if use_incoming else existing.get("vessel_name"),
+    }
+
+
 def match_vessel(
     imo: Any,
     mmsi: Any,
@@ -92,10 +139,12 @@ def match_vessel(
     if imo_key:
         hit = by_imo.get(imo_key)
         if hit:
+            names = _list_names_of(hit)
             return {
                 "sanctions_match": True,
                 "match_confidence": "confirmed",
                 "sanctions_list": hit.get("list_name"),
+                "list_names": names or None,
             }
         return dict(NO_MATCH)
 
@@ -103,10 +152,12 @@ def match_vessel(
     if mmsi_key:
         hit = by_mmsi.get(mmsi_key)
         if hit:
+            names = _list_names_of(hit)
             return {
                 "sanctions_match": True,
                 "match_confidence": "possible",
                 "sanctions_list": hit.get("list_name"),
+                "list_names": names or None,
             }
     return dict(NO_MATCH)
 
@@ -117,9 +168,13 @@ def _view_exists(engine: Engine, view_name: str) -> bool:
     return found is not None
 
 
-def _load_view(engine: Engine, view_name: str) -> pd.DataFrame:
+def _load_view(engine: Engine, view_name: str, list_name: str) -> pd.DataFrame:
     if not _view_exists(engine, view_name):
-        logger.warning("OFAC view %s is missing — sanctions labels will be none", view_name)
+        logger.warning(
+            "%s view %s is missing — that source will not contribute sanctions labels",
+            list_name,
+            view_name,
+        )
         return pd.DataFrame()
     df = pd.read_sql(
         f"""
@@ -131,7 +186,7 @@ def _load_view(engine: Engine, view_name: str) -> pd.DataFrame:
     )
     if df.empty:
         return df
-    df["list_name"] = "CONS" if "cons" in view_name else "SDN"
+    df["list_name"] = list_name
     return df
 
 
@@ -142,10 +197,16 @@ OFAC_INDEX_CACHE_TTL_S = int(os.environ.get("mantis_ofac_cache_ttl_s", "300"))
 
 
 def _build_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """SDN overwrites CONS on the same IMO/MMSI so SDN wins."""
+    """
+    Build IMO/MMSI indexes from CONS, UN, then SDN.
+
+    Same key may appear on multiple lists: primary label prefers SDN, then CONS,
+    then UN; list_names keeps the full membership set.
+    """
     frames = [
-        _load_view(engine, "ofac_cons_vessel"),
-        _load_view(engine, "ofac_sdn_vessel"),
+        _load_view(engine, "ofac_cons_vessel", "CONS"),
+        _load_view(engine, "un_vessel", "UN"),
+        _load_view(engine, "ofac_sdn_vessel", "SDN"),
     ]
     by_imo: dict[str, dict[str, Any]] = {}
     by_mmsi: dict[str, dict[str, Any]] = {}
@@ -160,16 +221,16 @@ def _build_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict
             }
             imo_key = normalize_imo(row.get("imo"))
             if imo_key:
-                by_imo[imo_key] = rec
+                _merge_index_hit(by_imo, imo_key, rec)
             mmsi_key = normalize_mmsi(row.get("mmsi"))
             if mmsi_key:
-                by_mmsi[mmsi_key] = rec
-    logger.info("OFAC lookup: %s IMO keys, %s MMSI keys", len(by_imo), len(by_mmsi))
+                _merge_index_hit(by_mmsi, mmsi_key, rec)
+    logger.info("Sanctions lookup: %s IMO keys, %s MMSI keys", len(by_imo), len(by_mmsi))
     return by_imo, by_mmsi
 
 
 def load_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    """In-process cache so STS/dark/etc. do not re-scan OFAC views on every attach call."""
+    """In-process cache so STS/dark/etc. do not re-scan sanctions views on every attach call."""
     global _ofac_index_cache, _ofac_index_cache_at
     now = time.monotonic()
     with _ofac_index_cache_lock:
@@ -184,6 +245,14 @@ def load_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[s
     return by_imo, by_mmsi
 
 
+def clear_ofac_index_cache() -> None:
+    """Test helper: drop the in-process sanctions index cache."""
+    global _ofac_index_cache, _ofac_index_cache_at
+    with _ofac_index_cache_lock:
+        _ofac_index_cache = None
+        _ofac_index_cache_at = 0.0
+
+
 def attach_sanctions(
     df: pd.DataFrame,
     engine: Engine,
@@ -196,6 +265,7 @@ def attach_sanctions(
         out["sanctions_match"] = pd.Series(dtype="bool")
         out["match_confidence"] = pd.Series(dtype="object")
         out["sanctions_list"] = pd.Series(dtype="object")
+        out["list_names"] = pd.Series(dtype="object")
         return out
 
     by_imo, by_mmsi = load_ofac_indexes(engine)
@@ -209,6 +279,7 @@ def attach_sanctions(
     out["sanctions_match"] = [m["sanctions_match"] for m in matches]
     out["match_confidence"] = [m["match_confidence"] for m in matches]
     out["sanctions_list"] = [m["sanctions_list"] for m in matches]
+    out["list_names"] = [m["list_names"] for m in matches]
     return out
 
 
@@ -222,12 +293,15 @@ def attach_sanctions_pair_sides(
         out["sanctions_match"] = pd.Series(dtype="bool")
         out["match_confidence"] = pd.Series(dtype="object")
         out["sanctions_list"] = pd.Series(dtype="object")
+        out["list_names"] = pd.Series(dtype="object")
         out["sanctions_match_a"] = pd.Series(dtype="bool")
         out["match_confidence_a"] = pd.Series(dtype="object")
         out["sanctions_list_a"] = pd.Series(dtype="object")
+        out["list_names_a"] = pd.Series(dtype="object")
         out["sanctions_match_b"] = pd.Series(dtype="bool")
         out["match_confidence_b"] = pd.Series(dtype="object")
         out["sanctions_list_b"] = pd.Series(dtype="object")
+        out["list_names_b"] = pd.Series(dtype="object")
         return out
 
     by_imo, by_mmsi = load_ofac_indexes(engine)
@@ -248,9 +322,11 @@ def attach_sanctions_pair_sides(
     out["sanctions_match_a"] = [m["sanctions_match"] for m in match_a]
     out["match_confidence_a"] = [m["match_confidence"] for m in match_a]
     out["sanctions_list_a"] = [m["sanctions_list"] for m in match_a]
+    out["list_names_a"] = [m["list_names"] for m in match_a]
     out["sanctions_match_b"] = [m["sanctions_match"] for m in match_b]
     out["match_confidence_b"] = [m["match_confidence"] for m in match_b]
     out["sanctions_list_b"] = [m["sanctions_list"] for m in match_b]
+    out["list_names_b"] = [m["list_names"] for m in match_b]
     out["sanctions_match"] = [
         bool(a["sanctions_match"] or b["sanctions_match"]) for a, b in zip(match_a, match_b)
     ]
@@ -261,7 +337,21 @@ def attach_sanctions_pair_sides(
     out["sanctions_list"] = [
         a["sanctions_list"] or b["sanctions_list"] for a, b in zip(match_a, match_b)
     ]
+    out["list_names"] = [
+        _merge_list_names(a["list_names"], b["list_names"]) for a, b in zip(match_a, match_b)
+    ]
     return out
+
+
+def _merge_list_names(a: list[str] | None, b: list[str] | None) -> list[str] | None:
+    merged: list[str] = []
+    for names in (a, b):
+        if not names:
+            continue
+        for name in names:
+            if name and name not in merged:
+                merged.append(name)
+    return merged or None
 
 
 def _best_confidence(a: str, b: str) -> str:
@@ -291,10 +381,12 @@ def payload_fields(row: Any, *, imo_col: str = "imo", side: str | None = None) -
         match_col = f"sanctions_match_{side}"
         conf_col = f"match_confidence_{side}"
         list_col = f"sanctions_list_{side}"
+        names_col = f"list_names_{side}"
     else:
         match_col = "sanctions_match"
         conf_col = "match_confidence"
         list_col = "sanctions_list"
+        names_col = "list_names"
 
     imo_raw = row.get(imo_col) if hasattr(row, "get") else None
     imo = normalize_imo(imo_raw)
@@ -305,11 +397,17 @@ def payload_fields(row: Any, *, imo_col: str = "imo", side: str | None = None) -
     slist = row.get(list_col) if hasattr(row, "get") else None
     if slist is not None and isinstance(slist, float) and pd.isna(slist):
         slist = None
+    names = row.get(names_col) if hasattr(row, "get") else None
+    if names is not None and isinstance(names, float) and pd.isna(names):
+        names = None
+    if match and not names and slist:
+        names = [slist]
     return {
         "imo": imo,
         "sanctionsMatch": match,
         "matchConfidence": str(conf),
         "sanctionsList": slist if match else None,
+        "listNames": names if match else None,
     }
 
 
@@ -372,12 +470,75 @@ def _load_ofac_vessel_table(engine: Engine, table_name: str, fallback_list: str)
     return df
 
 
+def _load_un_vessel_table(engine: Engine) -> pd.DataFrame:
+    """UN vessel rows shaped like the OFAC sanctions-list payload."""
+    if not _view_exists(engine, "un_vessel"):
+        logger.warning("UN view un_vessel is missing — skipped in sanctions list")
+        return pd.DataFrame()
+    df = pd.read_sql(
+        """
+        SELECT
+            uid,
+            vessel_name,
+            imo,
+            mmsi,
+            regime,
+            listed_on,
+            publish_date,
+            reference_number,
+            comments
+        FROM un_vessel
+        """,
+        con=engine,
+    )
+    if df.empty:
+        return df
+    df["list_name"] = "UN"
+    df["vessel_call_sign"] = None
+    df["vessel_type"] = None
+    df["vessel_flag"] = None
+    df["vessel_owner"] = None
+    # Map regime into programs so the existing list payload can carry it.
+    df["programs"] = df["regime"].map(lambda r: [str(r)] if r is not None and str(r).strip() else None)
+    remarks = []
+    for _, row in df.iterrows():
+        bits = []
+        ref = row.get("reference_number")
+        listed = row.get("listed_on")
+        comments = row.get("comments")
+        if ref is not None and not (isinstance(ref, float) and pd.isna(ref)):
+            bits.append(f"UN ref {ref}")
+        if listed is not None and not (isinstance(listed, float) and pd.isna(listed)):
+            bits.append(f"listed_on {listed}")
+        if comments is not None and not (isinstance(comments, float) and pd.isna(comments)):
+            bits.append(str(comments))
+        remarks.append("; ".join(bits) if bits else None)
+    df["remarks"] = remarks
+    return df[
+        [
+            "uid",
+            "vessel_name",
+            "vessel_call_sign",
+            "vessel_type",
+            "vessel_flag",
+            "vessel_owner",
+            "imo",
+            "mmsi",
+            "programs",
+            "remarks",
+            "publish_date",
+            "list_name",
+        ]
+    ]
+
+
 def load_ofac_vessel_list(engine: Engine | None = None) -> pd.DataFrame:
     engine = engine or get_pg_engine()
     frames = [
         _load_ofac_vessel_table(engine, table, list_name)
         for table, list_name in OFAC_VESSEL_TABLES
     ]
+    frames.append(_load_un_vessel_table(engine))
     frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame()
