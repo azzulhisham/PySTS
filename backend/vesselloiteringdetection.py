@@ -79,6 +79,14 @@ except ImportError:  # pragma: no cover
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Eager-load port areas so the startup log line is visible (and import fallback is obvious).
+if get_port_area_index is not None:
+    get_port_area_index()
+else:
+    logging.error(
+        "port_areas import failed; loitering will not apply harbour exclusions"
+    )
+
 DETECTION_VERSION = "1.1-loiter-circle-6nm"
 LOOP_INTERVAL_SECONDS = int(os.environ.get("loiter_loop_seconds", "900"))
 LOOKBACK_HOURS = 2

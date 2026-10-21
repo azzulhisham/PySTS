@@ -40,6 +40,14 @@ from swagger_sample import apply_swagger_sample, is_swagger_referer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
+# Eager-load harbour polygons so each gunicorn worker logs the port-area summary.
+try:
+    from port_areas import get_port_area_index
+
+    get_port_area_index()
+except Exception as e:  # pragma: no cover
+    logging.error("port_areas startup load failed: %s", e)
+
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "*"}})
 
