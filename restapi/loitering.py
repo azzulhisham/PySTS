@@ -22,7 +22,7 @@ from port_areas import (
     get_port_area_index,
 )
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
-from ais_identity import clean_ship_name
+from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -341,8 +341,10 @@ def detect_loitering(
         params=params or None,
     )
     port_area_excluded_count = 0
+    invalid_mmsi_excluded_count = 0
     port_area_excluded_examples: list[dict[str, Any]] = []
     if not events.empty:
+        events, invalid_mmsi_excluded_count = filter_valid_ship_mmsi_frame(events, "mmsi")
         before_n = len(events)
         events = annotate_in_port_area(
             events,
@@ -396,6 +398,7 @@ def detect_loitering(
         "by_flag": by_flag,
         "port_area_excluded_count": port_area_excluded_count,
         "port_area_excluded_examples": port_area_excluded_examples,
+        "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
         "events_payload": events_to_payload(events),

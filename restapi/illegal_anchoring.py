@@ -23,7 +23,7 @@ from sqlalchemy.engine import Engine
 
 from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
-from ais_identity import clean_ship_name
+from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from port_areas import annotate_in_port_area, get_port_area_index
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
@@ -345,6 +345,7 @@ def detect_illegal_anchoring(
     # Ensure port polygons are loaded (and startup logs emitted) once.
     get_port_area_index()
     stopped = load_stopped_vessels(engine)
+    stopped, invalid_mmsi_excluded_count = filter_valid_ship_mmsi_frame(stopped, "mmsi")
     illegal = classify_illegal_anchoring(stopped)
     illegal, port_area_excluded_count, port_area_excluded_examples = drop_port_area_candidates(
         illegal
@@ -365,10 +366,11 @@ def detect_illegal_anchoring(
     port_index = get_port_area_index()
 
     return {
-        "stopped_candidate_count": int(len(stopped)),
+        "stopped_candidate_count": int(len(stopped)) + invalid_mmsi_excluded_count,
         "illegal_count": int(len(illegal)),
         "port_area_excluded_count": port_area_excluded_count,
         "port_area_excluded_examples": port_area_excluded_examples,
+        "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
         "by_reason": by_reason,

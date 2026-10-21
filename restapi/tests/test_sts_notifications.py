@@ -91,6 +91,8 @@ class TestNotifiedAtStampOnce:
             "dark_overlap": False,
             "illegal_anchor_overlap": False,
         }) is False
+        assert is_notifiable_case({**base, "in_port_area": True}) is False
+        assert is_notifiable_case({**base, "at_berth": True}) is False
 
     def test_stamp_once_never_overwrites(self):
         now = datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc)

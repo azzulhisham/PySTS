@@ -1,10 +1,9 @@
 """
-Port / terminal areas used to suppress illegal-anchoring and loitering hits
-inside harbour footprints (same 50 km² rule as PyVAM).
+Port / terminal / berth areas for MANTIS harbour exclusions.
 
-Loaded once from data/polygons/src/{ports,terminals}.geojson and cached in
-memory. Spatial point tests for API/backend use DuckDB (vectorised); the
-startup build uses Shapely for area and containment.
+Loaded once from data/polygons/src/{ports,terminals,berths}.geojson and cached
+in memory. Spatial point tests use DuckDB (vectorised); the startup build uses
+Shapely for area and containment (same 50 km² rule as PyVAM).
 """
 
 from __future__ import annotations
@@ -13,7 +12,7 @@ import json
 import logging
 import math
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +28,7 @@ LOG = logging.getLogger(__name__)
 MAX_PORT_KM2 = 50.0
 CONTAIN_FRAC = 0.95
 
+
 def _default_poly_dir() -> Path:
     """Repo: <root>/restapi/port_areas.py → <root>/data/...; flat deploy: beside this file."""
     here = Path(__file__).resolve().parent
@@ -39,7 +39,7 @@ def _default_poly_dir() -> Path:
     return here.parent / "data" / "polygons" / "src"
 
 
-# Resolved at build time via _default_poly_dir() so deploy order (code then data) is safe.
+# Fallback path when geojson is not yet on disk at import time.
 DEFAULT_POLY_DIR = Path(__file__).resolve().parents[1] / "data" / "polygons" / "src"
 
 _LOCK = threading.Lock()
@@ -54,13 +54,21 @@ class PortArea:
     area_km2: float
 
 
+@dataclass(frozen=True)
+class BerthArea:
+    berth_name: str
+    geojson: str
+
+
 @dataclass
 class PortAreaIndex:
     areas: list[PortArea]
-    ports_loaded: int
-    terminals_loaded: int
-    ports_skipped: list[str]
-    poly_dir: Path
+    berths: list[BerthArea] = field(default_factory=list)
+    ports_loaded: int = 0
+    terminals_loaded: int = 0
+    berths_loaded: int = 0
+    ports_skipped: list[str] = field(default_factory=list)
+    poly_dir: Path = DEFAULT_POLY_DIR
 
 
 def area_km2(geom) -> float:
@@ -133,6 +141,7 @@ def build_port_areas(poly_dir: Path | None = None) -> PortAreaIndex:
     directory = Path(poly_dir) if poly_dir is not None else _default_poly_dir()
     ports = _read_features(directory / "ports.geojson", "port")
     terminals = _read_features(directory / "terminals.geojson", "terminal")
+    berth_feats = _read_features(directory / "berths.geojson", "berth")
     areas: list[PortArea] = []
     skipped: list[str] = []
 
@@ -147,7 +156,6 @@ def build_port_areas(poly_dir: Path | None = None) -> PortAreaIndex:
 
         port_km2 = area_km2(port["geom"])
         if port_km2 > MAX_PORT_KM2:
-            # One area per terminal so the payload can carry a terminal name.
             for child in children:
                 areas.append(
                     PortArea(
@@ -167,10 +175,19 @@ def build_port_areas(poly_dir: Path | None = None) -> PortAreaIndex:
                 )
             )
 
+    berths = [
+        BerthArea(
+            berth_name=b["name"] or f"berth:{b['poly_id']}",
+            geojson=_geom_to_geojson(b["geom"]),
+        )
+        for b in berth_feats
+    ]
+
     LOG.info(
-        "polygons loaded ports=%d terminals=%d; port areas built=%d; ports skipped=%d",
+        "polygons loaded ports=%d terminals=%d berths=%d; port areas built=%d; ports skipped=%d",
         len(ports),
         len(terminals),
+        len(berths),
         len(areas),
         len(skipped),
     )
@@ -178,8 +195,10 @@ def build_port_areas(poly_dir: Path | None = None) -> PortAreaIndex:
         LOG.info("skipped names (first 20): %s", ", ".join(skipped[:20]))
     return PortAreaIndex(
         areas=areas,
+        berths=berths,
         ports_loaded=len(ports),
         terminals_loaded=len(terminals),
+        berths_loaded=len(berths),
         ports_skipped=skipped,
         poly_dir=directory,
     )
@@ -221,6 +240,15 @@ def port_areas_frame(index: PortAreaIndex | None = None) -> pd.DataFrame:
     )
 
 
+def berths_frame(index: PortAreaIndex | None = None) -> pd.DataFrame:
+    index = index or get_port_area_index()
+    if not index.berths:
+        return pd.DataFrame(columns=["berth_name", "geojson"])
+    return pd.DataFrame(
+        [{"berth_name": b.berth_name, "geojson": b.geojson} for b in index.berths]
+    )
+
+
 def _parent_anchorage_frame() -> pd.DataFrame:
     rows = []
     for area in anchorage_areas:
@@ -252,15 +280,37 @@ def annotate_in_port_area(
     A point inside both a parent anchorage and a port area counts as anchorage
     (in_port_area=False), matching PyVAM.
     """
+    return annotate_harbour_location(
+        frame, lon_col=lon_col, lat_col=lat_col, index=index, include_berths=False
+    )
+
+
+def annotate_harbour_location(
+    frame: pd.DataFrame,
+    *,
+    lon_col: str,
+    lat_col: str,
+    index: PortAreaIndex | None = None,
+    include_berths: bool = True,
+) -> pd.DataFrame:
+    """
+    Vectorised port (+ optional berth) annotation.
+
+    Anchorage wins over port area. Berth is independent (at_berth if inside a
+    berth polygon regardless of anchorage).
+    """
     out = frame.copy()
     out["in_port_area"] = False
     out["port_area_name"] = None
     out["port_area_terminal_name"] = None
+    out["at_berth"] = False
+    out["berth_name"] = None
     if out.empty:
         return out
 
     areas = port_areas_frame(index)
-    if areas.empty:
+    berths = berths_frame(index) if include_berths else pd.DataFrame(columns=["berth_name", "geojson"])
+    if areas.empty and berths.empty:
         return out
 
     work = out.reset_index(drop=True)
@@ -269,14 +319,14 @@ def annotate_in_port_area(
         columns={lon_col: "longitude", lat_col: "latitude"}
     )
     anchorages = _parent_anchorage_frame()
+    empty_port = pd.DataFrame(columns=["port_name", "terminal_name", "geojson"])
+    empty_berth = pd.DataFrame(columns=["berth_name", "geojson"])
+    empty_anch = pd.DataFrame(columns=["anchorage_name", "geojson"])
 
     hit = spatial_df(
         """
         WITH base AS (
-            SELECT
-                _pa_row,
-                longitude,
-                latitude
+            SELECT _pa_row, longitude, latitude
             FROM points
             WHERE longitude IS NOT NULL AND latitude IS NOT NULL
         ),
@@ -294,8 +344,7 @@ def annotate_in_port_area(
             GROUP BY b._pa_row
         ),
         anch_hit AS (
-            SELECT
-                b._pa_row
+            SELECT b._pa_row
             FROM base b
             CROSS JOIN anchorages a
             WHERE ST_Within(
@@ -303,39 +352,52 @@ def annotate_in_port_area(
                 ST_GeomFromGeoJSON(a.geojson)
             )
             GROUP BY b._pa_row
+        ),
+        berth_hit AS (
+            SELECT
+                b._pa_row,
+                MIN(br.berth_name) AS berth_name
+            FROM base b
+            CROSS JOIN berths br
+            WHERE ST_Within(
+                ST_Point(b.longitude, b.latitude),
+                ST_GeomFromGeoJSON(br.geojson)
+            )
+            GROUP BY b._pa_row
         )
         SELECT
             b._pa_row,
             (ph._pa_row IS NOT NULL AND ah._pa_row IS NULL) AS in_port_area,
-            CASE
-                WHEN ah._pa_row IS NULL THEN ph.port_area_name
-                ELSE NULL
-            END AS port_area_name,
-            CASE
-                WHEN ah._pa_row IS NULL THEN ph.port_area_terminal_name
-                ELSE NULL
-            END AS port_area_terminal_name
+            CASE WHEN ah._pa_row IS NULL THEN ph.port_area_name END AS port_area_name,
+            CASE WHEN ah._pa_row IS NULL THEN ph.port_area_terminal_name END AS port_area_terminal_name,
+            (bh._pa_row IS NOT NULL) AS at_berth,
+            bh.berth_name AS berth_name
         FROM base b
         LEFT JOIN port_hit ph ON ph._pa_row = b._pa_row
         LEFT JOIN anch_hit ah ON ah._pa_row = b._pa_row
+        LEFT JOIN berth_hit bh ON bh._pa_row = b._pa_row
         """,
         {
             "points": points,
-            "port_areas": areas,
-            "anchorages": anchorages if not anchorages.empty else pd.DataFrame(
-                columns=["anchorage_name", "geojson"]
-            ),
+            "port_areas": areas if not areas.empty else empty_port,
+            "anchorages": anchorages if not anchorages.empty else empty_anch,
+            "berths": berths if not berths.empty else empty_berth,
         },
     )
 
     if hit.empty:
         return out
 
-    merged = work.drop(
-        columns=["in_port_area", "port_area_name", "port_area_terminal_name"],
-        errors="ignore",
-    ).merge(hit, on="_pa_row", how="left")
+    drop_cols = [
+        "in_port_area",
+        "port_area_name",
+        "port_area_terminal_name",
+        "at_berth",
+        "berth_name",
+    ]
+    merged = work.drop(columns=drop_cols, errors="ignore").merge(hit, on="_pa_row", how="left")
     merged["in_port_area"] = merged["in_port_area"].fillna(False).astype(bool)
+    merged["at_berth"] = merged["at_berth"].fillna(False).astype(bool)
     merged = merged.drop(columns=["_pa_row"])
     return merged
 
@@ -353,3 +415,12 @@ def apply_port_area_to_outside_anchorage(frame: pd.DataFrame) -> pd.DataFrame:
         return out
     out.loc[mask.fillna(False).astype(bool), "outside_anchorage"] = False
     return out
+
+
+def harbour_exclude_mask(frame: pd.DataFrame) -> pd.Series:
+    """True when the row should leave the default list (in port area or at berth)."""
+    if frame.empty:
+        return pd.Series(dtype=bool)
+    in_port = frame["in_port_area"].fillna(False).astype(bool) if "in_port_area" in frame.columns else False
+    at_berth = frame["at_berth"].fillna(False).astype(bool) if "at_berth" in frame.columns else False
+    return in_port | at_berth

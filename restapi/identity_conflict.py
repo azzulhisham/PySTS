@@ -412,8 +412,11 @@ def detect_identity_conflicts(
     static.ts). max_distance_m, when set, keeps only groups whose last
     positions are still that close (groups without two positions are dropped).
     """
+    from ais_identity import filter_valid_ship_mmsi_frame
+
     engine = engine or get_pg_engine()
     candidates = load_identity_candidates(engine)
+    candidates, invalid_mmsi_excluded_count = filter_valid_ship_mmsi_frame(candidates, "mmsi")
     candidates = attach_sanctions(candidates, engine)
 
     identities = {int(row["mmsi"]): vessel_identity(row) for _, row in candidates.iterrows()}
@@ -481,11 +484,12 @@ def detect_identity_conflicts(
         "ship_type_filter": SHIP_TYPE_FILTER,
         "match_rule": MATCH_RULE,
         "max_distance_m": max_distance_m,
-        "candidate_count": int(len(candidates)),
+        "candidate_count": int(len(candidates)) + invalid_mmsi_excluded_count,
         "group_count": len(groups),
         "identity_count": len(identities_payload),
         "sanctions_match_group_count": sanctions_match_group_count,
         "sanctions_match_identity_count": sanctions_match_identity_count,
+        "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "groups_payload": groups_to_payload(groups),
         "identities_payload": identities_payload,
     }

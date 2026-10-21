@@ -18,10 +18,11 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.engine import Engine
 
-from ais_identity import clean_ship_name
+from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame, is_valid_ship_mmsi
 from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
+from port_areas import annotate_harbour_location, get_port_area_index, harbour_exclude_mask
 from sanctions import (
     attach_sanctions,
     attach_sanctions_pair_sides,
@@ -390,6 +391,38 @@ def paired_vessels_only(pairs: pd.DataFrame, members: pd.DataFrame) -> pd.DataFr
     return out.drop_duplicates(subset=["observation_id", "mmsi"], keep="first")
 
 
+def _clean_opt_str(value: Any) -> str | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    return str(value)
+
+
+def _flag(value: Any) -> bool:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(value)
+
+
+def _harbour_fields(row) -> dict[str, Any]:
+    return {
+        "inPortArea": _flag(row.get("in_port_area")),
+        "portAreaName": _clean_opt_str(row.get("port_area_name")),
+        "portAreaTerminalName": _clean_opt_str(row.get("port_area_terminal_name")),
+        "atBerth": _flag(row.get("at_berth")),
+        "berthName": _clean_opt_str(row.get("berth_name")),
+    }
+
+
 def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
     """API-shaped pair records with the fields requested for visualization/clients."""
     records: list[dict[str, Any]] = []
@@ -408,6 +441,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
             "durationLabel": duration["durationLabel"],
             "pairedAt": _fmt_ts(p.get("last_detected_at")),
             "firstDetectedAt": _fmt_ts(p.get("first_detected_at")),
+            **_harbour_fields(p),
             "vesselA": {
                 "mmsi": int(p["mmsi_a"]),
                 "shipName": clean_ship_name(p.get("shipname_a")),
@@ -469,6 +503,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "lastSeenAt": format_last_seen_at(
                 v.get("last_seen_at") if pd.notna(v.get("last_seen_at")) else v.get("tscurrent")
             ),
+            **_harbour_fields(v),
             **dimension_fields(v),
             **payload_fields(v),
         })
@@ -481,6 +516,7 @@ def detect_sts_in_anchorages(
     max_distance_m: float = MAX_DISTANCE_M,
     *,
     summary_only: bool = False,
+    include_in_port: bool = False,
 ) -> dict[str, Any]:
     """
     Active high-suspicion proximity clusters inside anchorage polygons.
@@ -488,12 +524,58 @@ def detect_sts_in_anchorages(
     Returns only pairing vessels (not all vessels in the anchorage).
     """
     engine = engine or get_pg_engine()
+    get_port_area_index()
     observations = load_active_high_score_observations(engine, min_suspicion_score)
     in_anchorage = filter_observations_in_anchorages(observations)
 
+    # Harbour flags on the observation centroid (anchorage wins for port area).
+    if not in_anchorage.empty:
+        in_anchorage = annotate_harbour_location(
+            in_anchorage,
+            lon_col="centroid_longitude",
+            lat_col="centroid_latitude",
+        )
+
+    port_area_excluded_count = 0
+    at_berth_excluded_count = 0
+    invalid_mmsi_excluded_count = 0
+    if not include_in_port and not in_anchorage.empty:
+        exclude = harbour_exclude_mask(in_anchorage)
+        port_area_excluded_count = int(in_anchorage.loc[exclude, "in_port_area"].fillna(False).sum())
+        at_berth_excluded_count = int(in_anchorage.loc[exclude, "at_berth"].fillna(False).sum())
+        in_anchorage = in_anchorage.loc[~exclude].reset_index(drop=True)
+
     obs_ids = in_anchorage["observation_id"].astype(int).tolist() if not in_anchorage.empty else []
     members = load_members(obs_ids, engine)
+    if not members.empty:
+        before_m = len(members)
+        members, invalid_mmsi_excluded_count = filter_valid_ship_mmsi_frame(members, "mmsi")
+        # Count unique invalid MMSIs dropped (filter_valid returns excluded row count).
+        invalid_mmsi_excluded_count = before_m - len(members)
+
     pairs = find_pairs_within_observations(in_anchorage, members, max_distance_m)
+    # Drop pairs that somehow still include an invalid MMSI.
+    if not pairs.empty:
+        valid_pair = pairs["mmsi_a"].map(is_valid_ship_mmsi) & pairs["mmsi_b"].map(is_valid_ship_mmsi)
+        invalid_mmsi_excluded_count += int((~valid_pair).sum())
+        pairs = pairs.loc[valid_pair].reset_index(drop=True)
+
+    # Carry harbour flags from observations onto pairs / vessels.
+    if not pairs.empty and not in_anchorage.empty:
+        harbour_cols = [
+            c for c in (
+                "observation_id",
+                "in_port_area",
+                "port_area_name",
+                "port_area_terminal_name",
+                "at_berth",
+                "berth_name",
+            )
+            if c in in_anchorage.columns
+        ]
+        meta = in_anchorage[harbour_cols].drop_duplicates("observation_id")
+        pairs = pairs.merge(meta, on="observation_id", how="left")
+
     pairs = attach_sanctions_pair_sides(pairs, engine)
     if not summary_only:
         extra_pair = [c for c in ("suspicion_score", "distance_m") if c in pairs.columns]
@@ -501,6 +583,20 @@ def detect_sts_in_anchorages(
         pairs = sort_listed_first(pairs, extra_sort=extra_pair, extra_ascending=extra_asc)
 
     paired_vessels = paired_vessels_only(pairs, members)
+    if not paired_vessels.empty and not in_anchorage.empty:
+        harbour_cols = [
+            c for c in (
+                "observation_id",
+                "in_port_area",
+                "port_area_name",
+                "port_area_terminal_name",
+                "at_berth",
+                "berth_name",
+            )
+            if c in in_anchorage.columns
+        ]
+        meta = in_anchorage[harbour_cols].drop_duplicates("observation_id")
+        paired_vessels = paired_vessels.merge(meta, on="observation_id", how="left")
     paired_vessels = attach_sanctions(paired_vessels, engine)
     if not summary_only:
         extra_v = ["suspicion_score"] if "suspicion_score" in paired_vessels.columns else []
@@ -513,6 +609,7 @@ def detect_sts_in_anchorages(
     sanctions_match_vessel_count = (
         int(paired_vessels["sanctions_match"].sum()) if not paired_vessels.empty else 0
     )
+    port_index = get_port_area_index()
 
     return {
         "open_high_score_count": int(len(observations)),
@@ -524,6 +621,12 @@ def detect_sts_in_anchorages(
         "max_distance_m": float(max_distance_m),
         "min_suspicion_score": float(min_suspicion_score),
         "anchorage_buffer_m": ANCHORAGE_BUFFER_M,
+        "include_in_port": include_in_port,
+        "port_area_excluded_count": port_area_excluded_count,
+        "at_berth_excluded_count": at_berth_excluded_count,
+        "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
+        "port_area_count": len(port_index.areas),
+        "berth_count": port_index.berths_loaded,
         "observations": in_anchorage if not summary_only else in_anchorage.iloc[0:0],
         "pairs": pairs,
         "paired_vessels": paired_vessels,

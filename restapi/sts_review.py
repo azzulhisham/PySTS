@@ -17,7 +17,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
-from ais_identity import clean_ship_name
+from ais_identity import clean_ship_name, is_valid_ship_mmsi
 from pg_engine import get_pg_engine
 
 MIN_SUSPICION_SCORE = 4.5
@@ -32,6 +32,8 @@ REVIEW_CLASSES = frozenset({
 
 def is_notifiable_case(row: dict) -> bool:
     """Same queue rule as GET /mantis/sts-review. bunker_list_match is ignored here."""
+    if row.get("in_port_area") or row.get("at_berth"):
+        return False
     score = row.get("suspicion_score")
     return (
         score is not None
@@ -44,6 +46,29 @@ def is_notifiable_case(row: dict) -> bool:
             or row.get("illegal_anchor_overlap")
         )
     )
+
+
+def case_has_invalid_mmsi(row) -> bool:
+    """True when any member MMSI fails is_valid_ship_mmsi."""
+    members = row.get("members") if hasattr(row, "get") else None
+    if members is None and hasattr(row, "__getitem__"):
+        try:
+            members = row["members"]
+        except Exception:
+            members = None
+    if isinstance(members, str):
+        try:
+            members = json.loads(members)
+        except Exception:
+            return False
+    if not members:
+        return False
+    for member in members:
+        if not isinstance(member, dict):
+            continue
+        if not is_valid_ship_mmsi(member.get("mmsi")):
+            return True
+    return False
 
 
 def notified_at_on_upsert(*, existing_notified_at, should_notify, now):
@@ -140,6 +165,9 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
                 item["shipName"] = clean_ship_name(item.get("shipName"))
             cleaned_members.append(item)
         members = cleaned_members
+        port_name = _clean(row.get("port_area_name"))
+        terminal_name = _clean(row.get("port_area_terminal_name"))
+        berth_name = _clean(row.get("berth_name"))
         records.append({
             "caseId": int(row["id"]),
             "observationId": int(row["observation_id"]),
@@ -160,6 +188,11 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "inAnchorage": None if _clean(row.get("in_anchorage")) is None else bool(row["in_anchorage"]),
             "anchorageName": _clean(row.get("anchorage_name")),
             "outsideAnchorage": None if _clean(row.get("outside_anchorage")) is None else bool(row["outside_anchorage"]),
+            "inPortArea": bool(row.get("in_port_area")) if "in_port_area" in row.index else False,
+            "portAreaName": port_name,
+            "portAreaTerminalName": terminal_name,
+            "atBerth": bool(row.get("at_berth")) if "at_berth" in row.index else False,
+            "berthName": berth_name,
             "sanctionsMatch": bool(_clean(row.get("sanctions_match"))),
             "dredgeLicenceMatch": bool(_clean(row.get("dredge_licence_match"))),
             "bunkerListMatch": bool(_clean(row.get("bunker_list_match"))),
@@ -171,6 +204,52 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "members": members or [],
         })
     return records
+
+
+def _annotate_and_filter_cases(
+    frame: pd.DataFrame,
+    *,
+    include_in_port: bool,
+) -> tuple[pd.DataFrame, dict[str, int], list[dict[str, Any]]]:
+    """Annotate harbour flags, drop invalid MMSI / in-port/at-berth unless included."""
+    from port_areas import annotate_harbour_location, harbour_exclude_mask
+
+    stats = {
+        "port_area_excluded_count": 0,
+        "at_berth_excluded_count": 0,
+        "invalid_mmsi_excluded_count": 0,
+    }
+    examples: list[dict[str, Any]] = []
+    if frame.empty:
+        return frame, stats, examples
+
+    annotated = annotate_harbour_location(
+        frame,
+        lon_col="centroid_longitude",
+        lat_col="centroid_latitude",
+    )
+    invalid_mask = annotated.apply(case_has_invalid_mmsi, axis=1)
+    stats["invalid_mmsi_excluded_count"] = int(invalid_mask.sum())
+    kept = annotated.loc[~invalid_mask].copy()
+
+    if not include_in_port and not kept.empty:
+        exclude = harbour_exclude_mask(kept)
+        dropped = kept.loc[exclude]
+        stats["port_area_excluded_count"] = int(dropped["in_port_area"].fillna(False).sum())
+        stats["at_berth_excluded_count"] = int(dropped["at_berth"].fillna(False).sum())
+        for _, row in dropped.head(10).iterrows():
+            examples.append({
+                "observationId": int(row["observation_id"]),
+                "portName": row.get("port_area_name"),
+                "terminalName": row.get("port_area_terminal_name"),
+                "berthName": row.get("berth_name"),
+                "inPortArea": bool(row.get("in_port_area")),
+                "atBerth": bool(row.get("at_berth")),
+            })
+        kept = kept.loc[~exclude].reset_index(drop=True)
+    else:
+        kept = kept.reset_index(drop=True)
+    return kept, stats, examples
 
 
 DEFAULT_PAGE_SIZE = 100
@@ -277,6 +356,8 @@ def list_notifications(
     since: datetime | None = None,
     area: str = "anchorage",
     engine: Engine | None = None,
+    *,
+    include_in_port: bool = False,
 ) -> dict[str, Any]:
     """
     Cases that entered the review queue after `since`, oldest first. Pass the
@@ -317,6 +398,7 @@ def list_notifications(
     scanned = len(frame)
     if area == "anchorage" and not frame.empty:
         frame = _in_anchorage_screen(frame)
+    frame, harbour_stats, _ = _annotate_and_filter_cases(frame, include_in_port=include_in_port)
     cases = cases_to_payload(frame)
     return {
         "area": area,
@@ -327,6 +409,8 @@ def list_notifications(
         "scanned_count": scanned,
         "notification_count": len(cases),
         "sanctions_match_count": sum(1 for case in cases if case["sanctionsMatch"]),
+        "include_in_port": include_in_port,
+        **harbour_stats,
         "cases": cases,
     }
 
@@ -353,6 +437,8 @@ def list_unreviewed(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     engine: Engine | None = None,
+    *,
+    include_in_port: bool = False,
 ) -> dict[str, Any]:
     """One page of unreviewed cases. Optional window overlaps the pair's open interval."""
     if date_from is not None and date_to is not None and date_from > date_to:
@@ -367,11 +453,14 @@ def list_unreviewed(
             con=conn,
             params={**window, "limit": page_size, "offset": (page - 1) * page_size},
         )
+    frame, harbour_stats, _ = _annotate_and_filter_cases(frame, include_in_port=include_in_port)
     cases = cases_to_payload(frame)
     return {
         "date_from": None if date_from is None else date_from.astimezone(timezone.utc).isoformat(),
         "date_to": None if date_to is None else date_to.astimezone(timezone.utc).isoformat(),
         "case_count": total,
+        "include_in_port": include_in_port,
+        **harbour_stats,
         **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,
     }
@@ -382,6 +471,8 @@ def list_unexplained(
     page: int = 1,
     page_size: int = DEFAULT_PAGE_SIZE,
     engine: Engine | None = None,
+    *,
+    include_in_port: bool = False,
 ) -> dict[str, Any]:
     """One page of the notification queue. Counts cover every matching case."""
     _check_page(page, page_size)
@@ -394,12 +485,15 @@ def list_unexplained(
             con=conn,
             params={**score, "limit": page_size, "offset": (page - 1) * page_size},
         )
+    frame, harbour_stats, _ = _annotate_and_filter_cases(frame, include_in_port=include_in_port)
     cases = cases_to_payload(frame)
     total = int(counts["case_count"])
     return {
         "min_suspicion_score": float(min_suspicion_score),
         "case_count": total,
         "sanctions_match_count": int(counts["sanctions_match_count"]),
+        "include_in_port": include_in_port,
+        **harbour_stats,
         **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,
     }

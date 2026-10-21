@@ -228,7 +228,8 @@ def get_sts_activities():
 
     try:
         min_score = request.args.get("minSuspicionScore", type=float)
-        kwargs = {}
+        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
+        kwargs = {"include_in_port": include_in_port}
 
         if min_score is not None:
             kwargs["min_suspicion_score"] = min_score
@@ -243,6 +244,12 @@ def get_sts_activities():
             "inAnchorageClusterCount": result["in_anchorage_cluster_count"],
             "pairCount": result["pair_count"],
             "pairedVesselCount": result["paired_vessel_count"],
+            "includeInPort": result["include_in_port"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "atBerthExcludedCount": result["at_berth_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
+            "portAreaCount": result["port_area_count"],
+            "berthCount": result["berth_count"],
             "pairedVessels": result["paired_vessels_payload"],
             "pairs": result["pairs_payload"],
             "sanctionsMatchPairCount": result["sanctions_match_pair_count"],
@@ -269,15 +276,21 @@ def get_sts_review():
     try:
         min_score = request.args.get("minSuspicionScore", type=float)
         page, page_size = _page_args()
+        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
         result = list_unexplained(
             min_suspicion_score=min_score if min_score is not None else MIN_SUSPICION_SCORE,
             page=page,
             page_size=page_size,
+            include_in_port=include_in_port,
         )
         payload = {
             "minSuspicionScore": result["min_suspicion_score"],
             "caseCount": result["case_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "includeInPort": result["include_in_port"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "atBerthExcludedCount": result["at_berth_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             **_page_payload(result),
             "cases": result["cases"],
         }
@@ -309,16 +322,22 @@ def get_sts_review_unreviewed():
 
     try:
         page, page_size = _page_args()
+        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
         result = list_unreviewed(
             date_from=_when("from"),
             date_to=_when("to"),
             page=page,
             page_size=page_size,
+            include_in_port=include_in_port,
         )
         payload = {
             "dateFrom": result["date_from"],
             "dateTo": result["date_to"],
             "caseCount": result["case_count"],
+            "includeInPort": result["include_in_port"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "atBerthExcludedCount": result["at_berth_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             **_page_payload(result),
             "cases": result["cases"],
         }
@@ -346,7 +365,12 @@ def get_sts_review_notifications():
     try:
         raw_since = request.args.get("since")
         since = parse_datetime(raw_since) if raw_since and raw_since.strip() else None
-        result = list_notifications(since=since, area=request.args.get("area") or "anchorage")
+        include_in_port = (request.args.get("includeInPort") or "").lower() in ("1", "true", "yes")
+        result = list_notifications(
+            since=since,
+            area=request.args.get("area") or "anchorage",
+            include_in_port=include_in_port,
+        )
         payload = {
             "area": result["area"],
             "since": result["since"],
@@ -356,6 +380,10 @@ def get_sts_review_notifications():
             "scannedCount": result["scanned_count"],
             "notificationCount": result["notification_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "includeInPort": result["include_in_port"],
+            "portAreaExcludedCount": result["port_area_excluded_count"],
+            "atBerthExcludedCount": result["at_berth_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             "cases": result["cases"],
         }
         return jsonify(json_for_client(payload, ["cases"])), 200
@@ -441,6 +469,7 @@ def get_loitering():
             "eventCount": result["event_count"],
             "byFlag": result["by_flag"],
             "portAreaExcludedCount": result["port_area_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             "portAreaCount": result["port_area_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
             "events": result["events_payload"],
@@ -472,6 +501,7 @@ def get_illegal_anchoring():
             "stoppedCandidateCount": result["stopped_candidate_count"],
             "illegalCount": result["illegal_count"],
             "portAreaExcludedCount": result["port_area_excluded_count"],
+            "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             "portAreaCount": result["port_area_count"],
             "byReason": result["by_reason"],
             "watchPolygonCount": result["watch_polygon_count"],
@@ -551,6 +581,7 @@ def get_identity_conflict():
             "identityCount": result["identity_count"],
             "sanctionsMatchGroupCount": result["sanctions_match_group_count"],
             "sanctionsMatchIdentityCount": result["sanctions_match_identity_count"],
+            "invalidMmsiExcludedCount": result.get("invalid_mmsi_excluded_count", 0),
             "groups": result["groups_payload"],
             "identities": result["identities_payload"],
         }

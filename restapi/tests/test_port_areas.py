@@ -83,6 +83,7 @@ def test_port_klang_westport_uses_terminals():
         a.terminal_name and "Westport Container" in a.terminal_name
         for a in west_areas
     )
+    assert index.berths_loaded == 1737
 
 
 def test_westport_berth_in_port_area_klang_anchorage_not():

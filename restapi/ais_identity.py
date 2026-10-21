@@ -73,6 +73,23 @@ def is_valid_ship_mmsi(mmsi: Any) -> bool:
     return MID_MIN <= mid <= MID_MAX
 
 
+def filter_valid_ship_mmsi_frame(frame, mmsi_col: str = "mmsi"):
+    """
+    Keep rows with a valid ship MMSI. Returns (kept_frame, excluded_count).
+
+    Does not change the validity rule — only applies is_valid_ship_mmsi.
+    """
+    import pandas as pd
+
+    if frame is None or getattr(frame, "empty", True):
+        return frame, 0
+    if mmsi_col not in frame.columns:
+        return frame, 0
+    mask = frame[mmsi_col].map(is_valid_ship_mmsi)
+    excluded = int((~mask).sum())
+    return frame.loc[mask].reset_index(drop=True), excluded
+
+
 def clean_ship_name(value: Any) -> str | None:
     """Strip AIS '@' padding, trim, and collapse repeated spaces. Keeps case."""
     if value is None:

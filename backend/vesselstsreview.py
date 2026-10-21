@@ -40,7 +40,7 @@ from illegal_anchoring import classify_illegal_anchoring  # noqa: E402
 from mantis_tables import ensure_tables  # noqa: E402
 from polygons import anchorage_areas, is_excl_name  # noqa: E402
 from sanctions import load_ofac_indexes, match_vessel  # noqa: E402
-from sts_review import is_notifiable_case  # noqa: E402
+from sts_review import case_has_invalid_mmsi, is_notifiable_case  # noqa: E402
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
@@ -122,6 +122,11 @@ def label_anchorages(observations: pd.DataFrame) -> pd.DataFrame:
     out["in_anchorage"] = False
     out["anchorage_name"] = None
     out["outside_anchorage"] = True
+    out["in_port_area"] = False
+    out["at_berth"] = False
+    out["port_area_name"] = None
+    out["port_area_terminal_name"] = None
+    out["berth_name"] = None
     if out.empty:
         return out
     located = out.dropna(subset=["centroid_longitude", "centroid_latitude"])
@@ -143,32 +148,53 @@ def label_anchorages(observations: pd.DataFrame) -> pd.DataFrame:
         """,
         {"observations": located, "parents": parents},
     )
-    if named.empty:
-        return out
-    excl_ids: set[int] = set()
-    if not holes.empty:
-        excluded = spatial_df(
-            """
-            SELECT DISTINCT o.id AS observation_id
-            FROM observations o
-            CROSS JOIN holes h
-            WHERE ST_Within(
-                ST_Point(o.centroid_longitude, o.centroid_latitude),
-                ST_GeomFromGeoJSON(h.geojson)
+    if not named.empty:
+        excl_ids: set[int] = set()
+        if not holes.empty:
+            excluded = spatial_df(
+                """
+                SELECT DISTINCT o.id AS observation_id
+                FROM observations o
+                CROSS JOIN holes h
+                WHERE ST_Within(
+                    ST_Point(o.centroid_longitude, o.centroid_latitude),
+                    ST_GeomFromGeoJSON(h.geojson)
+                )
+                """,
+                {"observations": located, "holes": holes},
             )
-            """,
-            {"observations": located, "holes": holes},
+            if not excluded.empty:
+                excl_ids = set(excluded["observation_id"].astype(int))
+        names = {
+            int(row["observation_id"]): row["anchorage_name"]
+            for _, row in named.iterrows()
+            if int(row["observation_id"]) not in excl_ids
+        }
+        out["in_anchorage"] = out["id"].astype(int).map(lambda item: item in names)
+        out["anchorage_name"] = out["id"].astype(int).map(names.get)
+        out["outside_anchorage"] = ~out["in_anchorage"]
+
+    # Harbour / berth flags for notify decisions (not persisted — no new columns).
+    try:
+        from port_areas import annotate_harbour_location, get_port_area_index
+
+        get_port_area_index()
+        harbour = annotate_harbour_location(
+            out,
+            lon_col="centroid_longitude",
+            lat_col="centroid_latitude",
         )
-        if not excluded.empty:
-            excl_ids = set(excluded["observation_id"].astype(int))
-    names = {
-        int(row["observation_id"]): row["anchorage_name"]
-        for _, row in named.iterrows()
-        if int(row["observation_id"]) not in excl_ids
-    }
-    out["in_anchorage"] = out["id"].astype(int).map(lambda item: item in names)
-    out["anchorage_name"] = out["id"].astype(int).map(names.get)
-    out["outside_anchorage"] = ~out["in_anchorage"]
+        for col in (
+            "in_port_area",
+            "at_berth",
+            "port_area_name",
+            "port_area_terminal_name",
+            "berth_name",
+        ):
+            if col in harbour.columns:
+                out[col] = harbour[col].values
+    except ImportError:
+        pass
     return out
 
 
@@ -294,7 +320,9 @@ UPSERT = text(
 
 
 def _notifiable(row: dict) -> bool:
-    """Same test as the GET /mantis/sts-review queue. bunker_list_match is always false here."""
+    """Same test as the GET /mantis/sts-review queue. Skip in-port/at-berth and invalid MMSI."""
+    if case_has_invalid_mmsi(row):
+        return False
     return is_notifiable_case(row)
 
 
@@ -506,6 +534,11 @@ def run_once() -> int:
             "in_anchorage": bool(obs.get("in_anchorage")),
             "anchorage_name": obs.get("anchorage_name"),
             "outside_anchorage": bool(obs.get("outside_anchorage")),
+            "in_port_area": bool(obs.get("in_port_area")),
+            "at_berth": bool(obs.get("at_berth")),
+            "port_area_name": obs.get("port_area_name"),
+            "port_area_terminal_name": obs.get("port_area_terminal_name"),
+            "berth_name": obs.get("berth_name"),
             "sanctions_match": sanctions,
             "dredge_licence_match": dredge,
             "dark_overlap": dark,
@@ -517,7 +550,16 @@ def run_once() -> int:
         })
 
     for row in rows:
+        # notify uses harbour flags + MMSI validity; those keys are not in UPSERT.
         row["notify"] = _notifiable(row)
+        for key in (
+            "in_port_area",
+            "at_berth",
+            "port_area_name",
+            "port_area_terminal_name",
+            "berth_name",
+        ):
+            row.pop(key, None)
     with engine.begin() as conn:
         conn.execute(UPSERT, rows)
     logging.info("STS review: refreshed %s case(s)", len(rows))
