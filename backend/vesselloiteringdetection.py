@@ -40,10 +40,13 @@ from sqlmodel import Field, SQLModel, create_engine
 from ais_static_sql import CURRENT_STATIC_ROW_ORDER
 from polygons import anchorage_areas, is_excl_name, restricted_limit  # noqa: E402
 
-# Shared MMSI plausibility (restapi helper). Prefer local restapi copy when present.
-_RESTAPI = Path(__file__).resolve().parent.parent / "restapi"
-if _RESTAPI.is_dir() and str(_RESTAPI) not in sys.path:
-    sys.path.insert(0, str(_RESTAPI))
+# Shared restapi helpers. Repo: <root>/backend/… → <root>/restapi; deploy: …/sts/restapi.
+_HERE = Path(__file__).resolve().parent
+for _restapi in (_HERE / "restapi", _HERE.parent / "restapi"):
+    if _restapi.is_dir():
+        if str(_restapi) not in sys.path:
+            sys.path.insert(0, str(_restapi))
+        break
 try:
     from ais_identity import VALID_SHIP_MMSI_SQL, is_valid_ship_mmsi  # noqa: E402
 except ImportError:  # pragma: no cover - deployed layout with restapi beside sts/
