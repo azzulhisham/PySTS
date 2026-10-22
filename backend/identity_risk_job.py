@@ -25,7 +25,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 
 BACKEND = Path(__file__).resolve().parent
 ROOT = BACKEND.parent
-RESTAPI = ROOT / "restapi"
+# Laptop: PySTS/backend/job.py → PySTS/restapi
+# srv-dp: /home/srvadmin/sts/job.py → /home/srvadmin/sts/restapi
+_RESTAPI_CANDIDATES = (ROOT / "restapi", BACKEND / "restapi")
+RESTAPI = next((p for p in _RESTAPI_CANDIDATES if p.is_dir()), _RESTAPI_CANDIDATES[0])
 if str(RESTAPI) not in sys.path:
     sys.path.insert(0, str(RESTAPI))
 if str(BACKEND) not in sys.path:
