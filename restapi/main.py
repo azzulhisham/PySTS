@@ -24,6 +24,7 @@ from illegal_anchoring import detect_illegal_anchoring
 from loitering import detect_loitering
 from dark_vessels import detect_dark_vessels
 from identity_conflict import detect_identity_conflicts
+from identity_risk import query_identity_events, query_ship_risk
 from spoofing import detect_spoofing
 from spoofing_vessel_analysis import detect_vessel_spoofing_analysis
 from mantis_overview import detect_mantis_overview
@@ -582,6 +583,60 @@ def get_identity_conflict():
         return jsonify(json_for_client(payload, ["groups", "identities"])), 200
     except Exception as e:
         logging.error(f"[get_identity_conflict] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/ship-risk", methods=["GET"])
+@cross_origin()
+def get_ship_risk():
+    """
+    Ship identity risk rating (Lloyd's List-style MMSI misuse + sanctions).
+
+    Pass imo and/or mmsi. lookbackMonths defaults to 24; older events are
+    returned in infoEvents and do not drive the rating.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+    try:
+        payload = query_ship_risk(
+            imo=request.args.get("imo"),
+            mmsi=request.args.get("mmsi"),
+            lookback_months=request.args.get("lookbackMonths", default=24, type=int),
+        )
+        return jsonify(json_for_client(payload, ["events", "infoEvents"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_ship_risk] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/identity-events", methods=["GET"])
+@cross_origin()
+def get_identity_events():
+    """Browse persisted ais_identity_event rows (filters optional)."""
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+    try:
+        from_ts = parse_datetime(request.args.get("from")) if request.args.get("from") else None
+        to_ts = parse_datetime(request.args.get("to")) if request.args.get("to") else None
+        sanctions_only = str(request.args.get("sanctionsOnly", "")).lower() in {
+            "1",
+            "true",
+            "yes",
+        }
+        payload = query_identity_events(
+            from_ts=from_ts,
+            to_ts=to_ts,
+            event_type=request.args.get("eventType"),
+            sanctions_only=sanctions_only,
+            limit=request.args.get("limit", default=100, type=int),
+        )
+        return jsonify(json_for_client(payload, ["events"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_identity_events] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 

@@ -1508,6 +1508,39 @@
           }
         }
       },
+      "ShipRiskResponse": {
+        "type": "object",
+        "properties": {
+          "imo": { "type": "string", "nullable": true },
+          "mmsi": { "type": "integer", "nullable": true },
+          "shipName": { "type": "string", "nullable": true },
+          "shipKey": { "type": "string", "nullable": true },
+          "rating": { "type": "string", "enum": ["RED", "AMBER", "GREEN"] },
+          "score": { "type": "integer" },
+          "lookbackMonths": { "type": "integer" },
+          "mmsiMisuse": { "type": "boolean" },
+          "sanctionsMatch": { "type": "boolean" },
+          "sanctionsLists": {
+            "type": "array",
+            "nullable": true,
+            "items": { "type": "string" }
+          },
+          "factors": { "type": "object" },
+          "events": { "type": "array", "items": { "type": "object" } },
+          "infoEvents": { "type": "array", "items": { "type": "object" } },
+          "ruleVersion": { "type": "string" },
+          "computedAt": { "type": "string", "nullable": true }
+        }
+      },
+      "IdentityEventsResponse": {
+        "type": "object",
+        "properties": {
+          "totalCount": { "type": "integer" },
+          "returnedCount": { "type": "integer" },
+          "events": { "type": "array", "items": { "type": "object" } },
+          "ruleVersion": { "type": "string" }
+        }
+      },
       "StsReviewMember": {
         "type": "object",
         "description": "One vessel in the reviewed cluster, as captured by the STS review pipeline.",
@@ -2624,6 +2657,125 @@
           },
           "401": {
             "description": "Unauthorized \u2014 missing or invalid Bearer token.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          }
+        }
+      }
+    },
+    "/mantis/ship-risk": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "Ship identity risk rating (MMSI misuse + sanctions).",
+        "description": "Lloyd's List-style rating from persisted `ais_ship_risk_rating` / `ais_identity_event`. Pass `imo` and/or `mmsi`. Events older than `lookbackMonths` (default 24) are returned in `infoEvents` only.",
+        "operationId": "getShipRisk",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "imo",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "example": "9224805" }
+          },
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "example": "613612000" }
+          },
+          {
+            "name": "lookbackMonths",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 24 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ship risk rating.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/ShipRiskResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Missing imo/mmsi.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
+          "401": {
+            "description": "Unauthorized.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          }
+        }
+      }
+    },
+    "/mantis/identity-events": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "Browse persisted identity risk events.",
+        "description": "Reads `ais_identity_event`. Optional filters: `from`, `to`, `eventType`, `sanctionsOnly`, `limit` (max 500).",
+        "operationId": "getIdentityEvents",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "format": "date-time" }
+          },
+          {
+            "name": "eventType",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "dual_track_mmsi",
+                "lloyds_mmsi_imo_conflict",
+                "mmsi_multi_imo_static",
+                "mmsi_reused_static_evt",
+                "reflag_dual_mmsi"
+              ]
+            }
+          },
+          {
+            "name": "sanctionsOnly",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "boolean", "default": false }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 100 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Identity events.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/IdentityEventsResponse" }
+              }
+            }
+          },
+          "401": {
+            "description": "Unauthorized.",
             "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
           },
           "500": {
