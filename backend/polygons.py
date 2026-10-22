@@ -138,10 +138,13 @@ restrictedlimit_db = {
     "coordinates": [[[lng, lat] for lat, lng in restrictedlimit]]
 }
 
-restricted_limit = [{
-    "polygon": [[[lng, lat] for lat, lng in restrictedlimit]],
-    "name": "restricted-limit"
-}]
+# Dict form (lon/lat rings) — required by vesselloiteringdetection / restapi imports.
+# Legacy list wrapper kept for any layer code that still expects a one-element list.
+restricted_limit = {
+    "name": "Restricted Limit",
+    "polygon": [[lng, lat] for lat, lng in restrictedlimit],
+}
+restricted_limit_areas = [restricted_limit]
 
 
 sector1limit = [
@@ -380,4 +383,27 @@ def get_outter_restricted_region_setting():
             [min(lng_list)-0.3, min(lat_list)-0.3], 
             [min(lng_list)-0.3, max(lat_list)+0.3]
         ]]
-    }        
+    }
+
+
+def is_excl_name(name: str | None) -> bool:
+    """Excl polygons are carve-outs (holes) inside a parent polygon."""
+    return "excl" in (name or "").lower()
+
+
+def _load_restapi_anchorage_areas():
+    """Canonical anchorage catalogue lives in restapi/polygons.py."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parent.parent / "restapi" / "polygons.py"
+    spec = importlib.util.spec_from_file_location("_pysts_restapi_polygons", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load anchorage areas from {path}")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return list(mod.anchorage_areas)
+
+
+anchorage_areas = _load_restapi_anchorage_areas()
+all_polygons = anchorage_areas + [restricted_limit]

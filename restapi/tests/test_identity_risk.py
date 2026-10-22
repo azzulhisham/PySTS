@@ -15,10 +15,11 @@ for p in (RESTAPI, BACKEND):
         sys.path.insert(0, str(p))
 
 from identity_risk import (  # noqa: E402
+    classify_lloyds_conflict,
     normalize_imo_text,
     score_ship,
 )
-from identity_risk_job import dedupe_static_evt_mmsi_rows  # noqa: E402
+from identity_risk_job import dedupe_static_evt_mmsi_rows, primary_event_ship_key  # noqa: E402
 from ais_identity import is_valid_ship_mmsi  # noqa: E402
 
 
@@ -68,7 +69,7 @@ def test_rating_red_sanctions():
     events = [
         {
             "event_type": "reflag_dual_mmsi",
-            "confidence": "high",
+            "confidence": "reflag",
             "ts_start": now - timedelta(days=1),
             "sanctions_match": True,
             "sanctions_lists": ["SDN"],
@@ -85,7 +86,7 @@ def test_rating_amber_reflag_only():
     events = [
         {
             "event_type": "reflag_dual_mmsi",
-            "confidence": "high",
+            "confidence": "reflag",
             "ts_start": now - timedelta(days=1),
             "sanctions_match": False,
             "sanctions_lists": None,
@@ -94,6 +95,68 @@ def test_rating_amber_reflag_only():
     scored = score_ship(events, lookback_months=24, is_cargo_tanker=True, now=now)
     assert scored["rating"] == "AMBER"
     assert scored["score"] == 60
+    assert scored["factors"]["reflagCount"] == 1
+    assert scored["factors"]["highMisuseCount"] == 0
+
+
+def test_stale_lloyds_conflict_not_red():
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    assert (
+        classify_lloyds_conflict(
+            mmsi=205396000,
+            ais_imo="1029314",
+            lloyds_imo="9280392",
+            agree_row_exists=True,
+            ais_imo_lloyds_mmsi=205396000,
+            lloyds_imo_live_mmsi=None,
+            lloyds_imo_status="In Service/Commission",
+            ais_imo_lloyds_mmsi_live=True,
+        )
+        == "stale_registry"
+    )
+    assert (
+        classify_lloyds_conflict(
+            mmsi=240542000,
+            ais_imo="1029912",
+            lloyds_imo="9312145",
+            agree_row_exists=False,
+            ais_imo_lloyds_mmsi=None,
+            lloyds_imo_live_mmsi=None,
+            lloyds_imo_status="In Casualty Or Repairing",
+            ais_imo_lloyds_mmsi_live=False,
+        )
+        == "stale_registry"
+    )
+    assert (
+        classify_lloyds_conflict(
+            mmsi=352003715,
+            ais_imo="9245249",
+            lloyds_imo="9224673",
+            agree_row_exists=False,
+            ais_imo_lloyds_mmsi=352003771,
+            lloyds_imo_live_mmsi=352003771,
+            lloyds_imo_status="In Service/Commission",
+            ais_imo_lloyds_mmsi_live=True,
+        )
+        == "true_conflict"
+    )
+    events = [
+        {
+            "event_type": "lloyds_mmsi_imo_conflict",
+            "confidence": "low",
+            "ts_start": now - timedelta(days=1),
+            "sanctions_match": False,
+            "sanctions_lists": None,
+        }
+    ]
+    scored = score_ship(events, lookback_months=24, is_cargo_tanker=True, now=now)
+    assert scored["rating"] == "AMBER"
+    assert scored["score"] == 30
+
+
+def test_primary_ship_key_prefers_imo():
+    assert primary_event_ship_key({"imo": "1029314", "mmsi": 205396000}) == "imo:1029314"
+    assert primary_event_ship_key({"imo": "", "mmsi": 205396000}) == "mmsi:205396000"
 
 
 def test_out_of_window_info_only():

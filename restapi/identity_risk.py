@@ -21,7 +21,7 @@ from pg_engine import get_pg_engine
 
 logger = logging.getLogger(__name__)
 
-RULE_VERSION = "v1.0-identity-risk-ll-mmsi"
+RULE_VERSION = "v1.1-identity-risk-ll-mmsi"
 DEFAULT_LOOKBACK_MONTHS = 24
 PLACEHOLDER_IMOS = frozenset({1234567, 7654321, 9999999, 1111111, 533456789})
 MISUSE_EVENT_TYPES = frozenset(
@@ -33,6 +33,74 @@ MISUSE_EVENT_TYPES = frozenset(
     }
 )
 HIGH_MISUSE_TYPES = frozenset({"dual_track_mmsi", "lloyds_mmsi_imo_conflict"})
+# Lloyd's statuses that mean the registry ship is not a live peer claimant.
+_DEAD_STATUS_FRAGMENTS = (
+    "broken up",
+    "to be broken up",
+    "total loss",
+    "no longer a ship",
+    "hull exists",
+    "laid up",
+    "deleted",
+    "in casualty",
+    "continued existence in doubt",
+)
+
+
+def lloyds_status_inactive(status: Any) -> bool:
+    text_value = str(status or "").strip().lower()
+    if not text_value:
+        return False
+    return any(frag in text_value for frag in _DEAD_STATUS_FRAGMENTS)
+
+
+def classify_lloyds_conflict(
+    *,
+    mmsi: int,
+    ais_imo: str,
+    lloyds_imo: str,
+    agree_row_exists: bool,
+    ais_imo_lloyds_mmsi: int | None,
+    lloyds_imo_live_mmsi: int | None,
+    lloyds_imo_status: Any = None,
+    ais_imo_lloyds_mmsi_live: bool = False,
+) -> str:
+    """
+    Classify a Lloyd's MMSI↔IMO mismatch.
+
+    Returns:
+      'stale_registry' — AIS IMO's own Lloyd's row agrees with the broadcast MMSI,
+        or the registry "other" ship has moved / is inactive (sale, reflag, newbuild).
+      'true_conflict' — two live ships claim the MMSI, or the broadcast IMO is tied
+        by Lloyd's to a different MMSI that is still transmitting.
+    """
+    own_agrees = agree_row_exists or (
+        ais_imo_lloyds_mmsi is not None and int(ais_imo_lloyds_mmsi) == int(mmsi)
+    )
+    other_moved = (
+        lloyds_imo_live_mmsi is not None and int(lloyds_imo_live_mmsi) != int(mmsi)
+    )
+    other_dead = lloyds_status_inactive(lloyds_imo_status)
+    two_live_same_mmsi = (
+        lloyds_imo_live_mmsi is not None and int(lloyds_imo_live_mmsi) == int(mmsi)
+    )
+    ais_imo_tied_elsewhere_live = (
+        ais_imo_lloyds_mmsi is not None
+        and int(ais_imo_lloyds_mmsi) != int(mmsi)
+        and bool(ais_imo_lloyds_mmsi_live)
+    )
+
+    # Agreeing registry always wins (new delivery alongside stale Lloyd's row).
+    if own_agrees:
+        return "stale_registry"
+    # Live corroboration of misuse / identity swap.
+    if ais_imo_tied_elsewhere_live or two_live_same_mmsi:
+        return "true_conflict"
+    # Other ship moved away or inactive — MMSI still pointing at old Lloyd's IMO.
+    if other_moved or other_dead:
+        return "stale_registry"
+    # Registry disagrees but no live corroboration of theft → info only.
+    return "stale_registry"
 
 
 def imo_check_digit_ok(imo: str) -> bool:
@@ -170,6 +238,7 @@ def score_ship(
         for ev in in_window
         if ev.get("event_type") in MISUSE_EVENT_TYPES and str(ev.get("confidence") or "") == "low"
     ]
+    # Re-flag is not MMSI misuse; confidence is 'reflag' (legacy 'high' still matches by type).
     reflag = [ev for ev in in_window if ev.get("event_type") == "reflag_dual_mmsi"]
 
     mmsi_misuse = bool(high_misuse or medium_misuse or low_misuse)

@@ -35,6 +35,7 @@ from ais_identity import is_valid_ship_mmsi  # noqa: E402
 from identity_risk import (  # noqa: E402
     DEFAULT_LOOKBACK_MONTHS,
     RULE_VERSION,
+    classify_lloyds_conflict,
     is_cargo_tanker_type,
     names_agree,
     normalize_imo_text,
@@ -144,6 +145,15 @@ def sanctions_for(
 
 
 def snapshot_lloyds_mismatches(engine, snap_day: date) -> list[dict[str, Any]]:
+    """
+    Snapshot ais_static vs ais_lloyds MMSI mismatches and classify each as
+    stale_registry (low) or true_conflict (high).
+
+    ais_lloyds may hold multiple rows per MMSI (old + new delivery). An agreeing
+    row for the AIS IMO means the disagreeing row is a stale registry hold.
+    """
+    from collections import defaultdict
+
     from sqlalchemy import text
 
     sql = """
@@ -155,7 +165,9 @@ def snapshot_lloyds_mismatches(engine, snap_day: date) -> list[dict[str, Any]]:
         ORDER BY mmsi, ts DESC NULLS LAST
     )
     SELECT s.mmsi, s.imo AS ais_imo, s.shipname AS ais_name, s.shiptype,
-           l.imoshipno AS lloyds_imo, l.shipname AS lloyds_name
+           l.imoshipno AS lloyds_imo, l.shipname AS lloyds_name,
+           l.shipstatus AS lloyds_status, l.flagname AS lloyds_flag,
+           l.updated AS lloyds_updated
     FROM s
     JOIN ais_lloyds l
       ON l.maritimemobileserviceidentitymmsinumber = s.mmsi
@@ -165,7 +177,9 @@ def snapshot_lloyds_mismatches(engine, snap_day: date) -> list[dict[str, Any]]:
     with engine.connect() as conn:
         rows = conn.execute(text(sql)).mappings().all()
 
-    snaps: list[dict[str, Any]] = []
+    candidates: list[dict[str, Any]] = []
+    mmsis: set[int] = set()
+    imos: set[int] = set()
     for r in rows:
         mmsi = int(r["mmsi"])
         if not is_valid_ship_mmsi(mmsi):
@@ -174,8 +188,7 @@ def snapshot_lloyds_mismatches(engine, snap_day: date) -> list[dict[str, Any]]:
         lloyds_imo = normalize_imo_text(r["lloyds_imo"])
         if not ais_imo or not lloyds_imo or ais_imo == lloyds_imo:
             continue
-        agree = names_agree(r["ais_name"], r["lloyds_name"])
-        snaps.append(
+        candidates.append(
             {
                 "snap_date": snap_day,
                 "mmsi": mmsi,
@@ -183,10 +196,112 @@ def snapshot_lloyds_mismatches(engine, snap_day: date) -> list[dict[str, Any]]:
                 "lloyds_imo": lloyds_imo,
                 "ais_name": normalize_name(r["ais_name"]),
                 "lloyds_name": normalize_name(r["lloyds_name"]),
-                "name_agree": agree,
+                "name_agree": names_agree(r["ais_name"], r["lloyds_name"]),
                 "shiptype": r.get("shiptype"),
+                "lloyds_status": r.get("lloyds_status"),
+                "lloyds_flag": r.get("lloyds_flag"),
+                "lloyds_updated": r.get("lloyds_updated"),
             }
         )
+        mmsis.add(mmsi)
+        imos.add(int(ais_imo))
+        imos.add(int(lloyds_imo))
+
+    if not candidates:
+        return []
+
+    lloyds_by_mmsi: dict[int, list[int]] = defaultdict(list)
+    lloyds_by_imo: dict[int, dict[str, Any]] = {}
+    live_by_imo: dict[int, int] = {}
+    live_mmsi_set: set[int] = set()
+
+    with engine.connect() as conn:
+        for r in conn.execute(
+            text(
+                """
+                SELECT maritimemobileserviceidentitymmsinumber AS mmsi,
+                       imoshipno AS imo
+                FROM ais_lloyds
+                WHERE maritimemobileserviceidentitymmsinumber = ANY(:m)
+                  AND imoshipno IS NOT NULL
+                """
+            ),
+            {"m": sorted(mmsis)},
+        ).mappings():
+            lloyds_by_mmsi[int(r["mmsi"])].append(int(r["imo"]))
+
+        for r in conn.execute(
+            text(
+                """
+                SELECT imoshipno AS imo,
+                       maritimemobileserviceidentitymmsinumber AS mmsi,
+                       shipstatus, shipname, updated, flagname
+                FROM ais_lloyds
+                WHERE imoshipno = ANY(:imos)
+                """
+            ),
+            {"imos": sorted(imos)},
+        ).mappings():
+            lloyds_by_imo[int(r["imo"])] = dict(r)
+
+        for r in conn.execute(
+            text(
+                """
+                SELECT DISTINCT ON (imo) imo, mmsi
+                FROM ais_static
+                WHERE imo = ANY(:imos)
+                ORDER BY imo, ts DESC NULLS LAST
+                """
+            ),
+            {"imos": sorted(imos)},
+        ).mappings():
+            if r.get("mmsi") is not None:
+                live_by_imo[int(r["imo"])] = int(r["mmsi"])
+
+        own_mmsis = sorted(
+            {
+                int(lloyds_by_imo[i]["mmsi"])
+                for i in imos
+                if i in lloyds_by_imo and lloyds_by_imo[i].get("mmsi") is not None
+            }
+        )
+        if own_mmsis:
+            for m in conn.execute(
+                text("SELECT DISTINCT mmsi FROM ais_static WHERE mmsi = ANY(:m)"),
+                {"m": own_mmsis},
+            ).scalars():
+                live_mmsi_set.add(int(m))
+
+    snaps: list[dict[str, Any]] = []
+    # Emit every disagreeing Lloyd's row so prior high-confidence rows get
+    # reclassified on upsert; duplicates per MMSI are ok (ratings key by AIS IMO).
+    for c in candidates:
+        mmsi = c["mmsi"]
+        ais_imo = c["ais_imo"]
+        lloyds_imo = c["lloyds_imo"]
+        imos_on_mmsi = lloyds_by_mmsi.get(mmsi, [])
+        agree_row = int(ais_imo) in imos_on_mmsi
+        own = lloyds_by_imo.get(int(ais_imo))
+        other = lloyds_by_imo.get(int(lloyds_imo))
+        own_mmsi = int(own["mmsi"]) if own and own.get("mmsi") is not None else None
+        other_live = live_by_imo.get(int(lloyds_imo))
+        own_live = own_mmsi is not None and own_mmsi in live_mmsi_set
+        conflict_class = classify_lloyds_conflict(
+            mmsi=mmsi,
+            ais_imo=ais_imo,
+            lloyds_imo=lloyds_imo,
+            agree_row_exists=agree_row,
+            ais_imo_lloyds_mmsi=own_mmsi,
+            lloyds_imo_live_mmsi=other_live,
+            lloyds_imo_status=(other or {}).get("shipstatus") or c.get("lloyds_status"),
+            ais_imo_lloyds_mmsi_live=own_live,
+        )
+        row = dict(c)
+        row["conflict_class"] = conflict_class
+        row["ais_imo_lloyds_mmsi"] = own_mmsi
+        row["lloyds_imo_live_mmsi"] = other_live
+        row["agree_row_exists"] = agree_row
+        snaps.append(row)
     return snaps
 
 
@@ -276,12 +391,18 @@ def collect_lloyds_events(snaps: list[dict[str, Any]], by_imo, by_mmsi) -> list[
     events = []
     for s in snaps:
         agree = bool(s["name_agree"])
-        conf = "low" if agree else "high"
+        conflict_class = s.get("conflict_class") or "stale_registry"
+        # HIGH only for live true conflicts; stale registry / same-name → low (info).
+        if conflict_class == "true_conflict" and not agree:
+            conf = "high"
+        else:
+            conf = "low"
         match, lists = sanctions_for(
             by_imo, by_mmsi, imos=[s["ais_imo"], s["lloyds_imo"]], mmsi=s["mmsi"]
         )
         # Anchor event time at start of snap day UTC for idempotent key.
         ts = datetime(s["snap_date"].year, s["snap_date"].month, s["snap_date"].day, tzinfo=timezone.utc)
+        updated = s.get("lloyds_updated")
         events.append(
             {
                 "event_type": "lloyds_mmsi_imo_conflict",
@@ -296,6 +417,13 @@ def collect_lloyds_events(snaps: list[dict[str, Any]], by_imo, by_mmsi) -> list[
                 "distance_m": None,
                 "evidence": {
                     "nameAgree": agree,
+                    "conflictClass": conflict_class,
+                    "agreeRowExists": bool(s.get("agree_row_exists")),
+                    "aisImoLloydsMmsi": s.get("ais_imo_lloyds_mmsi"),
+                    "lloydsImoLiveMmsi": s.get("lloyds_imo_live_mmsi"),
+                    "lloydsFlag": s.get("lloyds_flag"),
+                    "lloydsStatus": s.get("lloyds_status"),
+                    "lloydsUpdated": updated.isoformat() if hasattr(updated, "isoformat") else (str(updated) if updated else None),
                     "snapDate": s["snap_date"].isoformat(),
                     "shipType": s.get("shiptype"),
                 },
@@ -498,7 +626,8 @@ def collect_reflag_events(engine, by_imo, by_mmsi) -> list[dict[str, Any]]:
         events.append(
             {
                 "event_type": "reflag_dual_mmsi",
-                "confidence": "high",
+                # Distinct from high MMSI-misuse confidence so re-flag is never "high misuse".
+                "confidence": "reflag",
                 "mmsi": mmsi,
                 "imo": _norm_key_text(imo),
                 "imo_other": _norm_key_text(imo_other),
@@ -510,6 +639,7 @@ def collect_reflag_events(engine, by_imo, by_mmsi) -> list[dict[str, Any]]:
                 "evidence": {
                     "mmsis": mmsis,
                     "imos": imos,
+                    "category": "reflag_dual_mmsi",
                     "clusterSignature": group.get("clusterSignature"),
                     "matchReasons": group.get("matchReasons"),
                 },
@@ -599,7 +729,18 @@ def load_ship_types(engine) -> dict[int, Any]:
     return {int(r["mmsi"]): r.get("shiptype") for r in rows}
 
 
-def recompute_ratings(engine, conn, *, lookback_months: int) -> int:
+def primary_event_ship_key(ev: dict[str, Any]) -> str | None:
+    """One ship key per event: IMO when known (AIS/primary), else MMSI."""
+    imo = normalize_imo_text(ev.get("imo"))
+    mmsi = int(ev["mmsi"]) if ev.get("mmsi") is not None else None
+    return ship_key(imo, mmsi)
+
+
+def recompute_ratings(engine, conn, *, lookback_months: int) -> dict[str, int]:
+    """
+    Recompute ratings: one row per ship (IMO key when known, else MMSI).
+    Drops previous lookback rows so legacy mmsi:/imo_other duplicates disappear.
+    """
     from sqlalchemy import text
 
     events = conn.execute(text("SELECT * FROM ais_identity_event")).mappings().all()
@@ -607,39 +748,41 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> int:
     meta: dict[str, dict[str, Any]] = {}
     ship_types = load_ship_types(engine)
 
+    legacy_key_count = 0
     for r in events:
         ev = dict(r)
-        # Restore empty unique keys to None for scoring display
         if ev.get("imo") == "":
             ev["imo"] = None
         if ev.get("imo_other") == "":
             ev["imo_other"] = None
-        keys = set()
-        imo = normalize_imo_text(ev.get("imo")) or normalize_imo_text(ev.get("imo_other"))
+        # Count how many extra keys the v1.0 logic would have created.
+        imo = normalize_imo_text(ev.get("imo"))
         mmsi = int(ev["mmsi"]) if ev.get("mmsi") is not None else None
-        k = ship_key(imo, mmsi)
-        if k:
-            keys.add(k)
-        # Also rate each IMO mentioned
-        for cand in (ev.get("imo"), ev.get("imo_other")):
-            ci = normalize_imo_text(cand)
-            if ci:
-                keys.add(f"imo:{ci}")
+        legacy_keys = set()
+        if imo:
+            legacy_keys.add(f"imo:{imo}")
+        other = normalize_imo_text(ev.get("imo_other"))
+        if other:
+            legacy_keys.add(f"imo:{other}")
         if mmsi is not None:
-            keys.add(f"mmsi:{mmsi}")
-        for k in keys:
-            by_ship[k].append(ev)
-            meta.setdefault(k, {"imo": None, "mmsi": None, "ship_name": None})
-            if k.startswith("imo:"):
-                meta[k]["imo"] = k.split(":", 1)[1]
-            if k.startswith("mmsi:"):
-                meta[k]["mmsi"] = int(k.split(":", 1)[1])
-            if ev.get("ship_name") and not meta[k]["ship_name"]:
-                meta[k]["ship_name"] = ev.get("ship_name")
-            if mmsi is not None and meta[k]["mmsi"] is None:
-                meta[k]["mmsi"] = mmsi
-            if imo and meta[k]["imo"] is None:
-                meta[k]["imo"] = imo
+            legacy_keys.add(f"mmsi:{mmsi}")
+        primary = primary_event_ship_key(ev)
+        if primary:
+            legacy_key_count += max(0, len(legacy_keys) - 1)
+        if not primary:
+            continue
+        by_ship[primary].append(ev)
+        meta.setdefault(primary, {"imo": None, "mmsi": None, "ship_name": None})
+        if primary.startswith("imo:"):
+            meta[primary]["imo"] = primary.split(":", 1)[1]
+        if primary.startswith("mmsi:"):
+            meta[primary]["mmsi"] = int(primary.split(":", 1)[1])
+        if ev.get("ship_name") and not meta[primary]["ship_name"]:
+            meta[primary]["ship_name"] = ev.get("ship_name")
+        if mmsi is not None and meta[primary]["mmsi"] is None:
+            meta[primary]["mmsi"] = mmsi
+        if imo and meta[primary]["imo"] is None:
+            meta[primary]["imo"] = imo
 
     rating_rows = []
     now = datetime.now(timezone.utc)
@@ -674,6 +817,11 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> int:
             )
         )
 
+    # Replace lookback slice so removed duplicate keys do not linger.
+    conn.execute(
+        text("DELETE FROM ais_ship_risk_rating WHERE lookback_months = :lb"),
+        {"lb": lookback_months},
+    )
     _execute_values(
         conn,
         """
@@ -683,25 +831,13 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> int:
             event_count_window, event_count_total, latest_event_at,
             factors, rule_version, computed_at
         ) VALUES %s
-        ON CONFLICT (ship_key, lookback_months) DO UPDATE SET
-            imo = EXCLUDED.imo,
-            mmsi = EXCLUDED.mmsi,
-            ship_name = EXCLUDED.ship_name,
-            rating = EXCLUDED.rating,
-            score = EXCLUDED.score,
-            mmsi_misuse = EXCLUDED.mmsi_misuse,
-            sanctions_match = EXCLUDED.sanctions_match,
-            sanctions_lists = EXCLUDED.sanctions_lists,
-            event_count_window = EXCLUDED.event_count_window,
-            event_count_total = EXCLUDED.event_count_total,
-            latest_event_at = EXCLUDED.latest_event_at,
-            factors = EXCLUDED.factors,
-            rule_version = EXCLUDED.rule_version,
-            computed_at = EXCLUDED.computed_at
         """,
         rating_rows,
     )
-    return len(rating_rows)
+    return {
+        "ratings_upserted": len(rating_rows),
+        "legacy_duplicate_keys_avoided": legacy_key_count,
+    }
 
 
 def run_once(*, lookback_months: int = DEFAULT_LOOKBACK_MONTHS) -> dict[str, Any]:
@@ -733,20 +869,26 @@ def run_once(*, lookback_months: int = DEFAULT_LOOKBACK_MONTHS) -> dict[str, Any
         by_type[e["event_type"]] += 1
         by_conf[e["confidence"]] += 1
 
+    lloyds_class_counts: dict[str, int] = defaultdict(int)
+    for s in snaps:
+        lloyds_class_counts[s.get("conflict_class") or "unknown"] += 1
+
     with write_engine.begin() as conn:
         conn.execute(text(f"SET LOCAL statement_timeout = '{INGEST_TIMEOUT_MS}'"))
         snap_n = persist_lloyds_snap(conn, snaps)
         ev_n = upsert_events(conn, events)
-        rating_n = recompute_ratings(query_engine, conn, lookback_months=lookback_months)
+        rating_stats = recompute_ratings(query_engine, conn, lookback_months=lookback_months)
 
     elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
     stats = {
         "snap_date": snap_day.isoformat(),
         "lloyds_snap_rows": snap_n,
+        "lloyds_by_conflict_class": dict(lloyds_class_counts),
         "events_upserted": ev_n,
         "events_by_type": dict(by_type),
         "events_by_confidence": dict(by_conf),
-        "ratings_upserted": rating_n,
+        "ratings_upserted": rating_stats["ratings_upserted"],
+        "legacy_duplicate_keys_avoided": rating_stats["legacy_duplicate_keys_avoided"],
         "lookback_months": lookback_months,
         "elapsed_sec": round(elapsed, 3),
         "rule_version": RULE_VERSION,

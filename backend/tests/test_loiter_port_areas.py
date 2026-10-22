@@ -11,7 +11,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 RESTAPI = ROOT / "restapi"
 BACKEND = ROOT / "backend"
-for path in (RESTAPI, BACKEND):
+# RESTAPI last so it wins on sys.path (canonical anchorage_areas / restricted_limit).
+for path in (BACKEND, RESTAPI):
     if str(path) not in sys.path:
         sys.path.insert(0, str(path))
 
