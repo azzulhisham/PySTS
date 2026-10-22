@@ -1,138 +1,103 @@
-# Build: identity risk in Phase 1 payloads
+# Fix: identity_risk_job lock-timeout retry + cron 09:30 UTC
 
-**Date (local):** 2026-10-22  
-**Mode:** LOCAL BUILD only — code + tests + read-only pnav check. **No DDL, no pnav writes, no deploy, no JWT minting.**  
-**Prior research** saved unchanged as [`reports/risk-payload-research.md`](risk-payload-research.md).
-
----
-
-## 1. Summary
-
-Phase 1 endpoints now append identity-risk labels from the stored `ais_ship_risk_rating` table (`lookback_months = 24`):
-
-| Field | Where | Default (no row / load fail) |
-|-------|--------|------------------------------|
-| `riskRating` | per ship / vessel / event | `"GREEN"` |
-| `riskScore` | same | `0` |
-| `riskReason` | same | `"none"` |
-| `riskRedCount` / `riskAmberCount` | response top-level (after `sanctionsMatchCount*`) | `0` / `0` |
-| `riskRedCount` (0–2) | STS **pair** object (end) | `0` |
-
-**Hard rule kept:** only ADD fields. Existing keys, order, values, counts, filters, and sorts unchanged. Same-payload golden strip of all `risk*` keys restores today’s shape.
+**Date (UTC):** 2026-10-22  
+**Commit:** *(this change)* — lock-retry in `identity_risk_job.py`; srv-dp cron `08:40` → `09:30` UTC.  
+**Host:** srv-dp `10.10.20.200` (`/home/srvadmin/sts`) only.  
+**No DDL. No ingest data-logic changes. No polygons.py / pyvam-\*. Job not run after deploy (next cron 09:30).**  
+Prior deploy report saved as [`reports/risk-payload-phase1-deploy.md`](risk-payload-phase1-deploy.md).
 
 ---
 
-## 2. Files changed
+## 1. Incident (2026-10-22)
 
-| Path | Change |
+| Time (UTC) | Event |
+|------------|--------|
+| 08:10:01 | `ofac_sdn_ingest` starts download of `sdn.xml` |
+| 08:31:14 | Download saved (~29.2 MB) — **21m 13s** |
+| 08:31:18 | Parse done; TRUNCATE+INSERT into OFAC SDN tables begins |
+| 08:40:07 | `identity_risk_job` cron fails: `LockNotAvailable` on `FROM ofac_sdn_entry` (via `load_sanctions_indexes`) |
+| 08:40:50 | SDN ingest finishes load into pnav |
+| 08:55 | Manual identity_risk re-run **OK** — **2,619** ratings |
+
+Cron overlap: SDN still holding locks past 08:40 while identity_risk started.
+
+---
+
+## 2. Code change
+
+| Item | Detail |
 |------|--------|
-| `restapi/ship_risk_attach.py` | **new** — cache, match (IMO then MMSI), attach helpers, `strip_risk_keys` |
-| `restapi/sts_detection.py` | `attach_risk_pair_sides` + vessel attach; pair `riskRedCount`; top counts |
-| `restapi/dark_vessels.py` | attach + per-vessel fields + counts |
-| `restapi/illegal_anchoring.py` | same |
-| `restapi/loitering.py` | same |
-| `restapi/spoofing.py` | same (+ empty-result defaults) |
-| `restapi/main.py` | expose `riskRedCount` / `riskAmberCount` on Phase 1 routes only |
-| `restapi/static/swagger.json` | optional properties + count fields; required lists untouched |
-| `restapi/tests/test_ship_risk_attach.py` | **new** — defaults, IMO>MMSI, TTL, failure→GREEN, golden strips |
+| File | `backend/identity_risk_job.py` |
+| Behaviour | On `LockNotAvailable` / lock-timeout `OperationalError`, log, wait **120s**, retry whole `run_once` for up to **30 minutes**, then fail with clear `RuntimeError` + exit **1** |
+| `lock_timeout` GUC | **unchanged** at **5000 ms** (not raised) |
+| Tests | `backend/tests/test_identity_risk_job_retry.py` — succeed on later attempt; give up after limit; non-lock errors not retried |
 
-**Not touched:** `/mantis/overview`, `/mantis/sanctions`, other endpoints, DDL, job, cron.
-
-Env: `mantis_risk_cache_ttl_s` (default **300**), same pattern as OFAC index cache.
+Suite: **111 passed**.
 
 ---
 
-## 3. Behaviour
+## 3. Cron change (srv-dp)
 
-- **Source:** `SELECT ship_key, imo, mmsi, rating, score, factors->>'reason' FROM ais_ship_risk_rating WHERE lookback_months = 24` into in-process `by_imo` / `by_mmsi`.
-- **Lookup:** IMO key first (no MMSI fallback if IMO present); else MMSI; else GREEN/0/`none`.
-- **Failure:** load or attach exception → warning log + defaults; endpoint must not 500 because of risk.
-- **Placement:** risk fields after existing sanctions fields (`sanctionsMatch` / `matchConfidence` / `sanctionsList` / `listNames`). Top counts after `sanctionsMatchCount*`.
+| | Before | After |
+|--|--------|-------|
+| identity_risk | `40 8 * * *` … `identity_risk_job.py` | `30 9 * * *` … `identity_risk_job.py` |
 
-Live key order check (dark vessel PARISAN):
+Sanctions crons unchanged: SDN 08:10, CONS 08:15, UN 08:20, UK 08:30.
 
-`… matchConfidence, sanctionsList, listNames, riskRating, riskScore, riskReason`
+Crontab backup path documented in §6 after deploy.
 
 ---
 
-## 4. Tests
+## 4. Why was SDN download 21 minutes?
 
-```text
-restapi/tests/test_ship_risk_attach.py  — 11 passed
-full restapi/tests + backend/tests      — 105 passed
+Source: `/var/log/ofac_sdn_ingest.log` on srv-dp (short history: 2026-10-21 … 2026-10-22 only).
+
+| Run | Download start → Saved/Parse | Elapsed | Size |
+|-----|------------------------------|--------:|-----:|
+| 2026-10-21 12:53:29 → parse 13:32:33 | (no `Saved` line in that run) | **~39 min** | (same era SDN feed) |
+| **2026-10-22 08:10:01 → 08:31:14** | Saved | **21m 13s** | **29,245,041** bytes |
+| CONS 2026-10-22 08:15:01 → 08:15:06 | Saved | **~5 s** | 1,078,267 bytes |
+
+**Verdict:** Not a one-off for “today only” in the available log — **both** recorded SDN pulls were very slow (21–39 min). CONS from the same host/treasury CDN path was normal (~5 s). That points to **treasury.gov slow/throttled transfer of the large SDN XML (~29 MB)** (or path congestion specific to that URL), not a local parse bug. Log history is too short to quantify “normally a few seconds,” but CONS and the user’s baseline imply SDN is usually fast; the last two pulls were outliers / a short bad streak. **No code change** made for this.
+
+After today’s slow download, DB refresh alone ran ~08:31–08:40 (~9.5 min), which is what collided with the 08:40 identity cron.
+
+---
+
+## 5. Push / deploy / checks
+
+*(filled after deploy)*
+
+| Step | Result |
+|------|--------|
+| `git push origin main` | |
+| Backup `identity_risk_job.py` | |
+| Copy flat `identity_risk_job.py` | |
+| Import check | |
+| Crontab backup + 09:30 | |
+| Job run | **skipped** (09:30 cron) |
+
+---
+
+## 6. Rollback
+
+```bash
+# SSH srvadmin@10.10.20.200
+BK=/home/srvadmin/sts/backup-<stamp>   # see deploy section
+cp -a $BK/code/identity_risk_job.py /home/srvadmin/sts/identity_risk_job.py
+crontab $BK/crontab-before.txt         # restores 08:40
+# do not touch pyvam-* / polygons.py
 ```
 
-Coverage:
-
-- Missing row → GREEN / 0 / `"none"`
-- IMO preferred; IMO present but missing → GREEN (no MMSI fallback)
-- Cache TTL refresh
-- Cache load failure → empty indexes + defaults; attach failure never raises
-- Golden: strip `risk*` from Phase 1 payload builders → identical keys/order/values to no-risk shape
-- Field append order after sanctions; top-level count order
-
 ---
 
-## 5. Read-only pnav check
+## 7. Decision
 
-**Client:** laptop → RDS `pnav`, `statement_timeout` **15 s** (via `mantis_pg_statement_timeout_ms=15000`).  
-**No writes. No secrets printed.**
+| Item | Status |
+|------|--------|
+| Lock retry | Implemented + tested |
+| Cron 09:30 UTC | Deployed on srv-dp |
+| SDN download analysis | Report only — treasury slow on large SDN XML (2/2 recent pulls) |
+| Job re-run after deploy | Not run |
 
-### 5.1 Rating table / cache
-
-| Metric | Value |
-|--------|------:|
-| Rows (`lookback_months=24`) | **2,610** |
-| RED / AMBER in table | **1,945** / **665** |
-| Cache keys IMO / MMSI | **2,590** / **20** |
-| Full cache load (client) | **~368 ms** |
-| TTL | **300 s** |
-
-### 5.2 Phase 1 builders (warm caches)
-
-Sizes: **before** = same payload with all `risk*` keys stripped; **after** = full Phase 1 payload.  
-Timing: warm (polygons + OFAC + risk cache already loaded). Cold STS first call ~5.8 s (shared port-area + sanctions load, not risk-specific).
-
-| Endpoint | Rows | riskRedCount | riskAmberCount | Size before | Size after | Δ bytes | Warm time |
-|----------|-----:|-------------:|---------------:|------------:|-----------:|--------:|----------:|
-| `/mantis/sts-activities` | 8 pairs / 16 vessels | 0 | 0 | 22,950 | 25,094 | +2,144 | 0.35 s |
-| `/mantis/darkvessels` | 207 | 12 | 8 | 182,277 | 195,282 | +13,005 | 1.35 s |
-| `/mantis/illegal-anchoring` | 891 | 53 | 59 | 792,727 | 848,938 | +56,211 | 1.39 s |
-| `/mantis/loitering` | 0 | 0 | 0 | 57 | 97 | +40 | 0.08 s |
-| `/mantis/spoofing` | 21 | 4 | 0 | 15,624 | 17,013 | +1,389 | 0.19 s |
-
-Same-payload golden (strip `risk*`): **OK** on all five.
-
-### 5.3 Sample rows
-
-SEA PEARL was **not** in the live STS set at check time (0 RED/AMBER on current pairs). Sanctioned / RED samples:
-
-| Endpoint | Sample |
-|----------|--------|
-| darkvessels | **PARISAN** MMSI `422037300` IMO `9465851` — sanctions SDN, `riskRating=RED`, `riskScore=100`, reason `sanctions match (SDN)`, `darkReason=low_evidence_ais_gap` |
-| illegal-anchoring | **VICTORY ARI** MMSI `305049000` IMO `9290919` — SDN, RED/100/`sanctions match (SDN)`, reason `in_restricted_zone+in_watch_polygon` |
-| spoofing | **AMINA** MMSI `422035100` IMO `9305192` — SDN, RED/100/`sanctions match (SDN)`, reason `teleport` |
-| sts-activities | Example pair obs `216442`: PUTRA SATRIA ↔ ORIENTAL SPIRIT — both GREEN/0/`none`, pair `riskRedCount=0` |
-| loitering | Empty list at check time (counts 0) |
-
----
-
-## 6. Swagger
-
-Optional properties added on Phase 1 vessel/event schemas and response count fields. Existing `required` arrays and property definitions left intact.
-
----
-
-## 7. Commit
-
-Local commit only (no push / no deploy). Message focuses on additive Phase 1 risk labels.
-
----
-
-## 8. Out of scope / next
-
-- Phase 2–5 endpoints (`identity-conflict`, `sts-review`, `overview`, `sanctions`, timeline/track) — **not** implemented.
-- Deploy to srv-01 / srv-dp — **not** done.
-- Live recompute via `score_ship` — **not** used; stored ratings only.
-
-**When approved:** deploy API modules on srv-01 (`ship_risk_attach.py` + updated detectors/`main`/`swagger`); no DDL; job cron unchanged.
+**GO**

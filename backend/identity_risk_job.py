@@ -15,6 +15,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from collections import defaultdict
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -58,6 +59,102 @@ DATABASE_URL = (
 
 QUERY_TIMEOUT_MS = 15_000
 INGEST_TIMEOUT_MS = 120_000
+
+# When OFAC/UK/UN ingest still holds table locks (TRUNCATE+INSERT), wait and retry.
+# lock_timeout GUC stays at 5s — we do not raise it; we retry the whole run.
+LOCK_RETRY_WAIT_S = 120
+LOCK_RETRY_MAX_S = 30 * 60
+
+
+def is_lock_timeout_error(exc: BaseException) -> bool:
+    """True for Postgres LockNotAvailable / lock_timeout OperationalErrors."""
+    try:
+        from psycopg2 import errors as pg_errors
+        from psycopg2 import OperationalError as PsycopgOperationalError
+    except ImportError:  # pragma: no cover
+        pg_errors = None  # type: ignore[assignment]
+        PsycopgOperationalError = ()  # type: ignore[misc, assignment]
+
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if pg_errors is not None and isinstance(cur, pg_errors.LockNotAvailable):
+            return True
+        name = type(cur).__name__
+        if name == "LockNotAvailable":
+            return True
+        msg = str(cur).lower()
+        if "lock timeout" in msg or "locknotavailable" in msg.lower():
+            return True
+        if isinstance(cur, PsycopgOperationalError) and "canceling statement due to lock timeout" in msg:
+            return True
+        # SQLAlchemy wraps driver errors
+        orig = getattr(cur, "orig", None)
+        if isinstance(orig, BaseException):
+            stack.append(orig)
+        cause = cur.__cause__
+        if isinstance(cause, BaseException):
+            stack.append(cause)
+        context = cur.__context__
+        if isinstance(context, BaseException):
+            stack.append(context)
+    return False
+
+
+def run_once_with_lock_retry(
+    *,
+    lookback_months: int = DEFAULT_LOOKBACK_MONTHS,
+    sleep_fn=time.sleep,
+    monotonic_fn=time.monotonic,
+    run_fn=None,
+) -> dict[str, Any]:
+    """
+    Call run_once; on lock timeout / LockNotAvailable, roll back (via exception
+    unwind), wait LOCK_RETRY_WAIT_S, and retry until LOCK_RETRY_MAX_S elapses.
+    """
+    run_fn = run_fn or run_once
+    deadline = monotonic_fn() + LOCK_RETRY_MAX_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            if attempt > 1:
+                logging.info(
+                    "identity_risk_job lock-retry attempt %s (lookback=%s)",
+                    attempt,
+                    lookback_months,
+                )
+            return run_fn(lookback_months=lookback_months)
+        except Exception as exc:
+            if not is_lock_timeout_error(exc):
+                raise
+            now = monotonic_fn()
+            if now >= deadline:
+                logging.error(
+                    "identity_risk_job giving up after %s lock-timeout attempt(s) "
+                    "over %ss: %s",
+                    attempt,
+                    LOCK_RETRY_MAX_S,
+                    exc,
+                )
+                raise RuntimeError(
+                    f"identity_risk_job failed: lock timeout after {attempt} attempt(s) "
+                    f"over {LOCK_RETRY_MAX_S}s"
+                ) from exc
+            wait_s = min(LOCK_RETRY_WAIT_S, max(0.0, deadline - now))
+            logging.warning(
+                "identity_risk_job lock timeout on attempt %s (%s); "
+                "rolling back and retrying in %ss (%.0fs of retry window left)",
+                attempt,
+                type(exc).__name__,
+                int(wait_s) if wait_s >= 1 else round(wait_s, 1),
+                max(0.0, deadline - now),
+            )
+            sleep_fn(wait_s)
 
 
 def get_engine(*, statement_timeout_ms: int = QUERY_TIMEOUT_MS):
@@ -1137,7 +1234,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--lookback-months", type=int, default=DEFAULT_LOOKBACK_MONTHS)
     args = parser.parse_args(argv)
     try:
-        run_once(lookback_months=args.lookback_months)
+        run_once_with_lock_retry(lookback_months=args.lookback_months)
         return 0
     except Exception:
         logging.exception("identity_risk_job failed")
