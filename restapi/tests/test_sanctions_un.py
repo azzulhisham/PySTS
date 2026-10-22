@@ -87,6 +87,7 @@ def test_build_indexes_merges_sources(monkeypatch):
             [{"uid": 1, "vessel_name": "AVAX", "imo": "9058713", "mmsi": None}],
             "UN",
         ),
+        "uk_vessel": _frame([], "UK"),
         "ofac_sdn_vessel": _frame(
             [{"uid": 9, "vessel_name": "AVAX SDN", "imo": "9058713", "mmsi": None}],
             "SDN",
@@ -182,6 +183,7 @@ def test_load_ofac_vessel_list_includes_un(monkeypatch):
         lambda engine, table, list_name: ofac if list_name == "SDN" else pd.DataFrame(),
     )
     monkeypatch.setattr(sanctions_mod, "_load_un_vessel_table", lambda engine: un)
+    monkeypatch.setattr(sanctions_mod, "_load_uk_vessel_table", lambda engine: pd.DataFrame())
 
     out = load_ofac_vessel_list(MagicMock())
     assert set(out["list_name"]) == {"SDN", "UN"}

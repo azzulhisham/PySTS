@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Designations>
+  <DateGenerated>16/10/2026</DateGenerated>
+  <Designation>
+    <UniqueID>DPR0075</UniqueID>
+    <OFSIGroupID>99901</OFSIGroupID>
+    <Names>
+      <Name>
+        <Name6>Petrel 8</Name6>
+        <NameType>Primary name</NameType>
+      </Name>
+      <Name>
+        <Name6>Jal Vahini</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+      <Name>
+        <Name6>Jal_Vahini</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+      <Name>
+        <Name6>Jal Vahini</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+    </Names>
+    <RegimeName>DPRK Test Regime</RegimeName>
+    <IndividualEntityShip>Ship</IndividualEntityShip>
+    <OtherInformation>Sample ship with valid IMO</OtherInformation>
+    <ShipDetails>
+      <Ship>
+        <IMONumbers>
+          <IMONumber>IMO9562233</IMONumber>
+        </IMONumbers>
+        <CurrentOwnerOperators>
+          <CurrentOwnerOperator>Sample Owner</CurrentOwnerOperator>
+        </CurrentOwnerOperators>
+        <CurrentBelievedFlagOfShips>
+          <CurrentBelievedFlagOfShip>Comoros</CurrentBelievedFlagOfShip>
+        </CurrentBelievedFlagOfShips>
+        <TypeOfShipDetails>
+          <TypeOfShip>Bulk Carrier</TypeOfShip>
+        </TypeOfShipDetails>
+      </Ship>
+    </ShipDetails>
+  </Designation>
+  <Designation>
+    <UniqueID>DPR0999</UniqueID>
+    <Names>
+      <Name>
+        <Name6>Bad Check Ship</Name6>
+        <NameType>Primary name</NameType>
+      </Name>
+    </Names>
+    <IndividualEntityShip>Ship</IndividualEntityShip>
+    <ShipDetails>
+      <Ship>
+        <IMONumbers>
+          <IMONumber>IMO5571322</IMONumber>
+        </IMONumbers>
+      </Ship>
+    </ShipDetails>
+  </Designation>
+  <Designation>
+    <UniqueID>AFG0001</UniqueID>
+    <OFSIGroupID>12703</OFSIGroupID>
+    <UNReferenceNumber>TAe.010</UNReferenceNumber>
+    <Names>
+      <Name>
+        <Name6>SAMPLE ENTITY</Name6>
+        <NameType>Primary Name</NameType>
+      </Name>
+      <Name>
+        <Name6>Entity Alias</Name6>
+        <NameType>Alias</NameType>
+      </Name>
+    </Names>
+    <IndividualEntityShip>Entity</IndividualEntityShip>
+    <OtherInformation>Entity must not take IMO from comments IMO9562233</OtherInformation>
+  </Designation>
+  <Designation>
+    <UniqueID>DPR0075</UniqueID>
+    <Names>
+      <Name>
+        <Name6>Duplicate UID ignored</Name6>
+        <NameType>Primary name</NameType>
+      </Name>
+    </Names>
+    <IndividualEntityShip>Ship</IndividualEntityShip>
+  </Designation>
+</Designations>

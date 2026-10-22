@@ -34,7 +34,7 @@ NO_MATCH = {
 
 CONFIDENCE_RANK = {"confirmed": 0, "possible": 1, "none": 2}
 # Primary label when the same IMO/MMSI appears on multiple lists.
-LIST_PRIORITY = {"SDN": 0, "CONS": 1, "UN": 2}
+LIST_PRIORITY = {"SDN": 0, "CONS": 1, "UN": 2, "UK": 3}
 
 SWAGGER_SAMPLE_LIMIT = 20
 SWAGGER_SAMPLE_MESSAGE = (
@@ -198,14 +198,15 @@ OFAC_INDEX_CACHE_TTL_S = int(os.environ.get("mantis_ofac_cache_ttl_s", "300"))
 
 def _build_ofac_indexes(engine: Engine) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
     """
-    Build IMO/MMSI indexes from CONS, UN, then SDN.
+    Build IMO/MMSI indexes from CONS, UN, UK, then SDN.
 
     Same key may appear on multiple lists: primary label prefers SDN, then CONS,
-    then UN; list_names keeps the full membership set.
+    then UN, then UK; list_names keeps the full membership set.
     """
     frames = [
         _load_view(engine, "ofac_cons_vessel", "CONS"),
         _load_view(engine, "un_vessel", "UN"),
+        _load_view(engine, "uk_vessel", "UK"),
         _load_view(engine, "ofac_sdn_vessel", "SDN"),
     ]
     by_imo: dict[str, dict[str, Any]] = {}
@@ -532,6 +533,67 @@ def _load_un_vessel_table(engine: Engine) -> pd.DataFrame:
     ]
 
 
+def _load_uk_vessel_table(engine: Engine) -> pd.DataFrame:
+    """UK vessel rows shaped like the OFAC sanctions-list payload."""
+    if not _view_exists(engine, "uk_vessel"):
+        logger.warning("UK view uk_vessel is missing — skipped in sanctions list")
+        return pd.DataFrame()
+    df = pd.read_sql(
+        """
+        SELECT
+            uid,
+            vessel_name,
+            imo,
+            mmsi,
+            regime,
+            listed_on,
+            publish_date,
+            reference_number,
+            comments,
+            vessel_flag,
+            vessel_type,
+            vessel_owner
+        FROM uk_vessel
+        """,
+        con=engine,
+    )
+    if df.empty:
+        return df
+    df["list_name"] = "UK"
+    df["vessel_call_sign"] = None
+    df["programs"] = df["regime"].map(lambda r: [str(r)] if r is not None and str(r).strip() else None)
+    remarks = []
+    for _, row in df.iterrows():
+        bits = []
+        ref = row.get("reference_number")
+        listed = row.get("listed_on")
+        comments = row.get("comments")
+        if ref is not None and not (isinstance(ref, float) and pd.isna(ref)):
+            bits.append(f"UK ref {ref}")
+        if listed is not None and not (isinstance(listed, float) and pd.isna(listed)):
+            bits.append(f"listed_on {listed}")
+        if comments is not None and not (isinstance(comments, float) and pd.isna(comments)):
+            bits.append(str(comments))
+        remarks.append("; ".join(bits) if bits else None)
+    df["remarks"] = remarks
+    return df[
+        [
+            "uid",
+            "vessel_name",
+            "vessel_call_sign",
+            "vessel_type",
+            "vessel_flag",
+            "vessel_owner",
+            "imo",
+            "mmsi",
+            "programs",
+            "remarks",
+            "publish_date",
+            "list_name",
+        ]
+    ]
+
+
 def load_ofac_vessel_list(engine: Engine | None = None) -> pd.DataFrame:
     engine = engine or get_pg_engine()
     frames = [
@@ -539,6 +601,7 @@ def load_ofac_vessel_list(engine: Engine | None = None) -> pd.DataFrame:
         for table, list_name in OFAC_VESSEL_TABLES
     ]
     frames.append(_load_un_vessel_table(engine))
+    frames.append(_load_uk_vessel_table(engine))
     frames = [f for f in frames if not f.empty]
     if not frames:
         return pd.DataFrame()
@@ -563,15 +626,37 @@ def _filter_ofac_vessels(df: pd.DataFrame, imo: Any, mmsi: Any) -> pd.DataFrame:
     return df.loc[mask].reset_index(drop=True)
 
 
+def _payload_uid(uid: Any) -> int | str | None:
+    """OFAC/UN uids stay int when numeric; UK UniqueID stays as text."""
+    if uid is None:
+        return None
+    try:
+        if pd.isna(uid):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if isinstance(uid, int) and not isinstance(uid, bool):
+        return uid
+    if isinstance(uid, float):
+        if uid.is_integer():
+            return int(uid)
+        return None
+    text_value = str(uid).strip()
+    if not text_value or text_value.lower() in {"nan", "none", "null"}:
+        return None
+    if text_value.isdigit():
+        return int(text_value)
+    return text_value
+
+
 def ofac_vessels_to_payload(df: pd.DataFrame) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if df.empty:
         return records
     for _, row in df.iterrows():
-        uid = row.get("uid")
         records.append(
             {
-                "uid": int(uid) if uid is not None and pd.notna(uid) else None,
+                "uid": _payload_uid(row.get("uid")),
                 "listName": None if pd.isna(row.get("list_name")) else row.get("list_name"),
                 "vesselName": None if pd.isna(row.get("vessel_name")) else row.get("vessel_name"),
                 "imo": normalize_imo(row.get("imo")),
