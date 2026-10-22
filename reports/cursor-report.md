@@ -1,8 +1,9 @@
 # Fix: identity_risk_job lock-timeout retry + cron 09:30 UTC
 
 **Date (UTC):** 2026-10-22  
-**Commit:** *(this change)* — lock-retry in `identity_risk_job.py`; srv-dp cron `08:40` → `09:30` UTC.  
+**Commit:** `1c5340a` — *Retry identity_risk_job on lock timeout; document cron move to 09:30.*  
 **Host:** srv-dp `10.10.20.200` (`/home/srvadmin/sts`) only.  
+**Backup stamp:** `backup-20261022-091146`  
 **No DDL. No ingest data-logic changes. No polygons.py / pyvam-\*. Job not run after deploy (next cron 09:30).**  
 Prior deploy report saved as [`reports/risk-payload-phase1-deploy.md`](risk-payload-phase1-deploy.md).
 
@@ -66,16 +67,37 @@ After today’s slow download, DB refresh alone ran ~08:31–08:40 (~9.5 min), w
 
 ## 5. Push / deploy / checks
 
-*(filled after deploy)*
-
 | Step | Result |
 |------|--------|
-| `git push origin main` | |
-| Backup `identity_risk_job.py` | |
-| Copy flat `identity_risk_job.py` | |
-| Import check | |
-| Crontab backup + 09:30 | |
-| Job run | **skipped** (09:30 cron) |
+| `git push origin main` | **OK** — `c7a5bd5..1c5340a` |
+| Pre-diff vs `972d1fa` | **MATCH** (safe to replace) |
+| Backup | `/home/srvadmin/sts/backup-20261022-091146/` (`code/identity_risk_job.py`, `crontab-before.txt`, `crontab-after.txt`, `PRE_DEPLOY.txt`) |
+| Copy | `/home/srvadmin/sts/identity_risk_job.py` (flat) |
+| Import check | **IMPORT_OK** `v1.1-identity-risk-ll-mmsi` wait=120 max=1800; `lock_timeout=5000` still present |
+| Crontab | see §3 before/after |
+| Job run | **skipped** — next automatic run **09:30 UTC** |
+
+### Crontab before / after
+
+**Before** (`crontab-before.txt`):
+
+```text
+20 8 * * * … un_sanctions_ingest.py …
+10 8 * * * … ofac_sdn_ingest.py …
+15 8 * * * … ofac_cons_ingest.py …
+30 8 * * * … uk_sanctions_ingest.py …
+40 8 * * * … identity_risk_job.py …
+```
+
+**After** (`crontab-after.txt`):
+
+```text
+20 8 * * * … un_sanctions_ingest.py …
+10 8 * * * … ofac_sdn_ingest.py …
+15 8 * * * … ofac_cons_ingest.py …
+30 8 * * * … uk_sanctions_ingest.py …
+30 9 * * * … identity_risk_job.py …
+```
 
 ---
 
@@ -83,7 +105,7 @@ After today’s slow download, DB refresh alone ran ~08:31–08:40 (~9.5 min), w
 
 ```bash
 # SSH srvadmin@10.10.20.200
-BK=/home/srvadmin/sts/backup-<stamp>   # see deploy section
+BK=/home/srvadmin/sts/backup-20261022-091146
 cp -a $BK/code/identity_risk_job.py /home/srvadmin/sts/identity_risk_job.py
 crontab $BK/crontab-before.txt         # restores 08:40
 # do not touch pyvam-* / polygons.py
@@ -95,9 +117,10 @@ crontab $BK/crontab-before.txt         # restores 08:40
 
 | Item | Status |
 |------|--------|
-| Lock retry | Implemented + tested |
-| Cron 09:30 UTC | Deployed on srv-dp |
-| SDN download analysis | Report only — treasury slow on large SDN XML (2/2 recent pulls) |
+| Push `1c5340a` | Done |
+| Lock retry | Deployed + import OK |
+| Cron 09:30 UTC | Deployed (backup has before/after) |
+| SDN download analysis | Report only — both recent SDN pulls slow (21–39 min); CONS ~5 s |
 | Job re-run after deploy | Not run |
 
 **GO**
