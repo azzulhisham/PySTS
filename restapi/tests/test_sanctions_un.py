@@ -186,5 +186,8 @@ def test_load_ofac_vessel_list_includes_un(monkeypatch):
     monkeypatch.setattr(sanctions_mod, "_load_uk_vessel_table", lambda engine: pd.DataFrame())
 
     out = load_ofac_vessel_list(MagicMock())
+    assert len(out) == 2
     assert set(out["list_name"]) == {"SDN", "UN"}
     assert "9058713" in set(out["imo"].map(str))
+    un_row = out.loc[out["list_name"] == "UN"].iloc[0]
+    assert un_row["list_names"] == ["UN"]

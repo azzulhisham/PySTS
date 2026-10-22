@@ -594,6 +594,105 @@ def _load_uk_vessel_table(engine: Engine) -> pd.DataFrame:
     ]
 
 
+def _is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text_value = str(value).strip()
+    return not text_value or text_value.lower() in {"nan", "none", "null"}
+
+
+def _sorted_list_names(names: list[str]) -> list[str]:
+    uniq = list(dict.fromkeys(n for n in names if n))
+    return sorted(uniq, key=lambda n: LIST_PRIORITY.get(n, 99))
+
+
+def _vessel_dedupe_key(row: dict[str, Any] | pd.Series) -> str:
+    """One ship key: IMO first, else MMSI; otherwise keep the source row unique."""
+    imo_key = normalize_imo(row.get("imo") if hasattr(row, "get") else None)
+    if imo_key:
+        return f"imo:{imo_key}"
+    mmsi_key = normalize_mmsi(row.get("mmsi") if hasattr(row, "get") else None)
+    if mmsi_key:
+        return f"mmsi:{mmsi_key}"
+    list_name = row.get("list_name") if hasattr(row, "get") else None
+    uid = row.get("uid") if hasattr(row, "get") else None
+    return f"row:{list_name}:{uid}"
+
+
+def _row_to_vessel_dict(row: pd.Series) -> dict[str, Any]:
+    list_name = row.get("list_name")
+    if list_name is None or (isinstance(list_name, float) and pd.isna(list_name)):
+        list_name = None
+    else:
+        list_name = str(list_name)
+    return {
+        "uid": row.get("uid"),
+        "vessel_name": row.get("vessel_name"),
+        "vessel_call_sign": row.get("vessel_call_sign"),
+        "vessel_type": row.get("vessel_type"),
+        "vessel_flag": row.get("vessel_flag"),
+        "vessel_owner": row.get("vessel_owner"),
+        "imo": row.get("imo"),
+        "mmsi": row.get("mmsi"),
+        "programs": row.get("programs"),
+        "remarks": row.get("remarks"),
+        "publish_date": row.get("publish_date"),
+        "list_name": list_name,
+        "list_names": [list_name] if list_name else [],
+    }
+
+
+def _merge_vessel_list_rows(existing: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    """
+    Same primary-list rules as screening indexes: LIST_PRIORITY picks list_name;
+    list_names accumulates membership. Empty flag/type/owner filled from the other row.
+    """
+    incoming_list = str(incoming.get("list_name") or "")
+    existing_list = str(existing.get("list_name") or "")
+    names = _sorted_list_names(
+        list(_list_names_of(existing)) + list(_list_names_of(incoming)) + [incoming_list, existing_list]
+    )
+    primary = _pick_primary_list(existing_list or None, incoming_list) if incoming_list else existing_list
+    use_incoming = bool(incoming_list) and primary == incoming_list and primary != existing_list
+    base = dict(incoming) if use_incoming else dict(existing)
+    donor = existing if use_incoming else incoming
+    for field in ("vessel_flag", "vessel_type", "vessel_owner"):
+        if _is_blank(base.get(field)) and not _is_blank(donor.get(field)):
+            base[field] = donor.get(field)
+    # Prefer a concrete IMO/MMSI if the primary row is missing one.
+    if _is_blank(base.get("imo")) and not _is_blank(donor.get("imo")):
+        base["imo"] = donor.get("imo")
+    if _is_blank(base.get("mmsi")) and not _is_blank(donor.get("mmsi")):
+        base["mmsi"] = donor.get("mmsi")
+    base["list_name"] = primary
+    base["list_names"] = names
+    return base
+
+
+def dedupe_vessel_list(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per ship (IMO, else MMSI) with merged listNames / primary listName."""
+    if df is None or df.empty:
+        return df if df is not None else pd.DataFrame()
+    merged: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        rec = _row_to_vessel_dict(row)
+        key = _vessel_dedupe_key(rec)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = rec
+        else:
+            merged[key] = _merge_vessel_list_rows(existing, rec)
+    out = pd.DataFrame(list(merged.values()))
+    if out.empty:
+        return out
+    return out.sort_values(["list_name", "vessel_name", "uid"], kind="stable").reset_index(drop=True)
+
+
 def load_ofac_vessel_list(engine: Engine | None = None) -> pd.DataFrame:
     engine = engine or get_pg_engine()
     frames = [
@@ -606,7 +705,7 @@ def load_ofac_vessel_list(engine: Engine | None = None) -> pd.DataFrame:
     if not frames:
         return pd.DataFrame()
     out = pd.concat(frames, ignore_index=True)
-    return out.sort_values(["list_name", "vessel_name", "uid"], kind="stable").reset_index(drop=True)
+    return dedupe_vessel_list(out)
 
 
 def _filter_ofac_vessels(df: pd.DataFrame, imo: Any, mmsi: Any) -> pd.DataFrame:
@@ -654,10 +753,15 @@ def ofac_vessels_to_payload(df: pd.DataFrame) -> list[dict[str, Any]]:
     if df.empty:
         return records
     for _, row in df.iterrows():
+        list_name = None if pd.isna(row.get("list_name")) else row.get("list_name")
+        list_names = _json_list(row.get("list_names")) if "list_names" in row.index else None
+        if not list_names and list_name:
+            list_names = [str(list_name)]
         records.append(
             {
                 "uid": _payload_uid(row.get("uid")),
-                "listName": None if pd.isna(row.get("list_name")) else row.get("list_name"),
+                "listName": list_name,
+                "listNames": list_names,
                 "vesselName": None if pd.isna(row.get("vessel_name")) else row.get("vessel_name"),
                 "imo": normalize_imo(row.get("imo")),
                 "mmsi": normalize_mmsi(row.get("mmsi")),

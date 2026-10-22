@@ -19,8 +19,10 @@ from sanctions import (  # noqa: E402
     _build_ofac_indexes,
     _merge_index_hit,
     clear_ofac_index_cache,
+    dedupe_vessel_list,
     load_ofac_vessel_list,
     match_vessel,
+    ofac_vessels_to_payload,
 )
 
 
@@ -173,5 +175,122 @@ def test_load_ofac_vessel_list_includes_uk(monkeypatch):
     monkeypatch.setattr(sanctions_mod, "_load_uk_vessel_table", lambda engine: uk)
 
     out = load_ofac_vessel_list(MagicMock())
+    assert len(out) == 2
     assert set(out["list_name"]) == {"SDN", "UK"}
-    assert "9562233" in set(out["imo"].map(str))
+    uk_row = out.loc[out["list_name"] == "UK"].iloc[0]
+    assert str(uk_row["imo"]) == "9562233"
+    assert uk_row["list_names"] == ["UK"]
+
+
+def test_dedupe_sdn_plus_uk_one_row_fills_flag():
+    df = pd.DataFrame(
+        [
+            {
+                "uid": 99,
+                "vessel_name": "PETREL SDN",
+                "vessel_call_sign": None,
+                "vessel_type": None,
+                "vessel_flag": None,
+                "vessel_owner": None,
+                "imo": "9562233",
+                "mmsi": None,
+                "programs": ["DPRK"],
+                "remarks": None,
+                "publish_date": "2024-01-01",
+                "list_name": "SDN",
+            },
+            {
+                "uid": "DPR0075",
+                "vessel_name": "Petrel 8",
+                "vessel_call_sign": None,
+                "vessel_type": "Bulk Carrier",
+                "vessel_flag": "Comoros",
+                "vessel_owner": "Sample Owner",
+                "imo": "9562233",
+                "mmsi": None,
+                "programs": ["DPRK regime"],
+                "remarks": "UK ref 99901",
+                "publish_date": "16/10/2026",
+                "list_name": "UK",
+            },
+        ]
+    )
+    out = dedupe_vessel_list(df)
+    assert len(out) == 1
+    row = out.iloc[0]
+    assert row["list_name"] == "SDN"
+    assert row["list_names"] == ["SDN", "UK"]
+    assert row["uid"] == 99
+    assert row["vessel_flag"] == "Comoros"
+    assert row["vessel_type"] == "Bulk Carrier"
+    assert row["vessel_owner"] == "Sample Owner"
+    payload = ofac_vessels_to_payload(out)[0]
+    assert payload["listName"] == "SDN"
+    assert payload["listNames"] == ["SDN", "UK"]
+
+
+def test_dedupe_uk_only_ship():
+    df = pd.DataFrame(
+        [
+            {
+                "uid": "DPR0075",
+                "vessel_name": "Petrel 8",
+                "vessel_call_sign": None,
+                "vessel_type": "Bulk Carrier",
+                "vessel_flag": "Comoros",
+                "vessel_owner": "Sample Owner",
+                "imo": "9562233",
+                "mmsi": None,
+                "programs": None,
+                "remarks": None,
+                "publish_date": "16/10/2026",
+                "list_name": "UK",
+            }
+        ]
+    )
+    out = dedupe_vessel_list(df)
+    assert len(out) == 1
+    assert out.iloc[0]["list_name"] == "UK"
+    assert out.iloc[0]["list_names"] == ["UK"]
+
+
+def test_dedupe_ofac_un_only_unchanged_shape():
+    """Distinct OFAC/UN IMOs stay one row each with single-list membership."""
+    df = pd.DataFrame(
+        [
+            {
+                "uid": 1,
+                "vessel_name": "OFAC SHIP",
+                "vessel_call_sign": None,
+                "vessel_type": None,
+                "vessel_flag": None,
+                "vessel_owner": None,
+                "imo": "9074729",
+                "mmsi": None,
+                "programs": ["SDNTK"],
+                "remarks": None,
+                "publish_date": "2024-01-01",
+                "list_name": "SDN",
+            },
+            {
+                "uid": 2,
+                "vessel_name": "AVAX",
+                "vessel_call_sign": None,
+                "vessel_type": None,
+                "vessel_flag": None,
+                "vessel_owner": None,
+                "imo": "9058713",
+                "mmsi": None,
+                "programs": ["Libya"],
+                "remarks": "UN ref LYe.006",
+                "publish_date": "2026-01-15",
+                "list_name": "UN",
+            },
+        ]
+    )
+    out = dedupe_vessel_list(df)
+    assert len(out) == 2
+    by_list = {r["list_name"]: r for _, r in out.iterrows()}
+    assert by_list["SDN"]["list_names"] == ["SDN"]
+    assert by_list["UN"]["list_names"] == ["UN"]
+    assert str(by_list["UN"]["imo"]) == "9058713"
