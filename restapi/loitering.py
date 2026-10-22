@@ -22,6 +22,7 @@ from port_areas import (
     get_port_area_index,
 )
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from ship_risk_attach import attach_risk_ratings, risk_counts, risk_payload_fields
 from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 
@@ -168,6 +169,7 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
             ),
             **dimension_fields(row),
             **payload_fields(row),
+            **risk_payload_fields(row),
         })
     return records
 
@@ -378,6 +380,7 @@ def detect_loitering(
         port_area_excluded_count = before_n - len(events)
 
     events = attach_sanctions(events, engine)
+    events = attach_risk_ratings(events, engine)
     events = sort_listed_first(events)
 
     by_flag = {
@@ -389,6 +392,7 @@ def detect_loitering(
         ) else 0,
     }
     sanctions_match_count = int(events["sanctions_match"].sum()) if not events.empty else 0
+    risk = risk_counts(events)
     port_index = get_port_area_index()
     return {
         "rule_version": RULE_VERSION,
@@ -401,5 +405,7 @@ def detect_loitering(
         "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "events_payload": events_to_payload(events),
     }

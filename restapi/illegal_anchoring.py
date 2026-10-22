@@ -27,6 +27,7 @@ from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame
 from polygons import anchorage_areas, is_excl_name, restricted_limit
 from port_areas import annotate_in_port_area, get_port_area_index
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from ship_risk_attach import attach_risk_ratings, risk_counts, risk_payload_fields
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
 
@@ -332,6 +333,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "detectedAt": v.get("detected_at"),
             **dimension_fields(v),
             **payload_fields(v),
+            **risk_payload_fields(v),
         })
     return records
 
@@ -351,6 +353,7 @@ def detect_illegal_anchoring(
         illegal
     )
     illegal = attach_sanctions(illegal, engine)
+    illegal = attach_risk_ratings(illegal, engine)
     if not summary_only:
         illegal = sort_listed_first(illegal)
 
@@ -360,6 +363,7 @@ def detect_illegal_anchoring(
         for reason, cnt in illegal["reason"].value_counts().items():
             by_reason[str(reason)] = int(cnt)
         sanctions_match_count = int(illegal["sanctions_match"].sum())
+    risk = risk_counts(illegal)
 
     watch = watch_polygons()
     port = port_limit_polygons()
@@ -373,6 +377,8 @@ def detect_illegal_anchoring(
         "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "port_area_count": len(port_index.areas),
         "sanctions_match_count": sanctions_match_count,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "by_reason": by_reason,
         "watch_polygon_count": len(watch),
         "port_limit_polygon_count": len(port),

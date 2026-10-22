@@ -255,6 +255,8 @@ def get_sts_activities():
             "pairs": result["pairs_payload"],
             "sanctionsMatchPairCount": result["sanctions_match_pair_count"],
             "sanctionsMatchVesselCount": result["sanctions_match_vessel_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
         }
         return jsonify(json_for_client(payload, ["pairs", "pairedVessels"])), 200
     
@@ -467,6 +469,8 @@ def get_loitering():
             "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             "portAreaCount": result["port_area_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "events": result["events_payload"],
         }
         return jsonify(json_for_client(payload, ["events"])), 200
@@ -502,6 +506,8 @@ def get_illegal_anchoring():
             "watchPolygonCount": result["watch_polygon_count"],
             "portLimitPolygonCount": result["port_limit_polygon_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "vessels": result["vessels_payload"],
         }
         return jsonify(json_for_client(payload, ["vessels"])), 200
@@ -540,6 +546,8 @@ def get_dark_vessels():
             "byReason": result["by_reason"],
             "byConfidence": result["by_confidence"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "vessels": result["vessels_payload"],
         }
 
@@ -684,6 +692,8 @@ def get_spoofing():
             "includeDataQuality": result["include_data_quality"],
             "byReason": result["by_reason"],
             "sanctionsMatchCount": result["sanctions_match_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "anomalies": result["anomalies_payload"],
         }
         return jsonify(json_for_client(payload, ["anomalies"])), 200

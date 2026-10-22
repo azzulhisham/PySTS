@@ -29,6 +29,12 @@ from sanctions import (
     payload_fields,
     sort_listed_first,
 )
+from ship_risk_attach import (
+    attach_risk_pair_sides,
+    attach_risk_ratings,
+    risk_counts,
+    risk_payload_fields,
+)
 from vessel_size import DIM_SELECT, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
 
@@ -454,6 +460,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 ),
                 **dimension_fields(p, side="a"),
                 **payload_fields(p, side="a"),
+                **risk_payload_fields(p, side="a"),
             },
             "vesselB": {
                 "mmsi": int(p["mmsi_b"]),
@@ -467,6 +474,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 ),
                 **dimension_fields(p, side="b"),
                 **payload_fields(p, side="b"),
+                **risk_payload_fields(p, side="b"),
             },
             "sanctionsMatch": bool(p.get("sanctions_match")),
             "matchConfidence": (
@@ -474,6 +482,7 @@ def pairs_to_payload(pairs: pd.DataFrame) -> list[dict[str, Any]]:
                 if p.get("match_confidence") is None or pd.isna(p.get("match_confidence"))
                 else str(p.get("match_confidence"))
             ),
+            "riskRedCount": int(p.get("risk_red_count") or 0),
         })
     return records
 
@@ -506,6 +515,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             **_harbour_fields(v),
             **dimension_fields(v),
             **payload_fields(v),
+            **risk_payload_fields(v),
         })
     return records
 
@@ -577,6 +587,7 @@ def detect_sts_in_anchorages(
         pairs = pairs.merge(meta, on="observation_id", how="left")
 
     pairs = attach_sanctions_pair_sides(pairs, engine)
+    pairs = attach_risk_pair_sides(pairs, engine)
     if not summary_only:
         extra_pair = [c for c in ("suspicion_score", "distance_m") if c in pairs.columns]
         extra_asc = [False, True][: len(extra_pair)]
@@ -598,6 +609,7 @@ def detect_sts_in_anchorages(
         meta = in_anchorage[harbour_cols].drop_duplicates("observation_id")
         paired_vessels = paired_vessels.merge(meta, on="observation_id", how="left")
     paired_vessels = attach_sanctions(paired_vessels, engine)
+    paired_vessels = attach_risk_ratings(paired_vessels, engine)
     if not summary_only:
         extra_v = ["suspicion_score"] if "suspicion_score" in paired_vessels.columns else []
         extra_v_asc = [False] if extra_v else []
@@ -609,6 +621,7 @@ def detect_sts_in_anchorages(
     sanctions_match_vessel_count = (
         int(paired_vessels["sanctions_match"].sum()) if not paired_vessels.empty else 0
     )
+    vessel_risk = risk_counts(paired_vessels)
     port_index = get_port_area_index()
 
     return {
@@ -618,6 +631,8 @@ def detect_sts_in_anchorages(
         "paired_vessel_count": int(len(paired_vessels)),
         "sanctions_match_pair_count": sanctions_match_pair_count,
         "sanctions_match_vessel_count": sanctions_match_vessel_count,
+        "risk_red_count": vessel_risk["risk_red_count"],
+        "risk_amber_count": vessel_risk["risk_amber_count"],
         "max_distance_m": float(max_distance_m),
         "min_suspicion_score": float(min_suspicion_score),
         "anchorage_buffer_m": ANCHORAGE_BUFFER_M,

@@ -27,6 +27,7 @@ from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from polygons import anchorage_areas, is_excl_name
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from ship_risk_attach import attach_risk_ratings, risk_counts, risk_payload_fields
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
 from api_timestamps import format_last_seen_at
 
@@ -261,6 +262,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "inExclPolygon": bool(v.get("in_excl_polygon")) if pd.notna(v.get("in_excl_polygon")) else False,
             **dimension_fields(v),
             **payload_fields(v),
+            **risk_payload_fields(v),
         })
     return records
 
@@ -350,6 +352,7 @@ def detect_dark_vessels(
     if not summary_only:
         df = attach_polygon_names(df)
     df = attach_sanctions(df, engine)
+    df = attach_risk_ratings(df, engine)
     if not summary_only:
         extra = ["tscurrent"] if "tscurrent" in df.columns else []
         df = sort_listed_first(df, extra_sort=extra)
@@ -363,12 +366,15 @@ def detect_dark_vessels(
         for conf, cnt in df["confidence"].value_counts().items():
             by_confidence[str(conf)] = int(cnt)
         sanctions_match_count = int(df["sanctions_match"].sum())
+    risk = risk_counts(df)
 
     return {
         "candidate_count": int(len(df)),
         "by_reason": by_reason,
         "by_confidence": by_confidence,
         "sanctions_match_count": sanctions_match_count,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "min_silence_minutes": MIN_SILENCE_MINUTES,
         "coverage_exit_days": COVERAGE_EXIT_DAYS,
         "dark_max_days": DARK_MAX_DAYS,

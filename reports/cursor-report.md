@@ -1,110 +1,138 @@
-# Fix: sanctions ratings must not merge across IMOs
+# Build: identity risk in Phase 1 payloads
 
-**Date:** 2026-10-22  
-**Repo:** PySTS  
-**Follow-up to:** `dd82a32` (deployed)  
-**Scope:** code + read-only dry-run only. No DDL, no deploy, no pnav writes.  
-Prior deploy report saved as `reports/sanctions-rating-deploy.md`.
+**Date (local):** 2026-10-22  
+**Mode:** LOCAL BUILD only — code + tests + read-only pnav check. **No DDL, no pnav writes, no deploy, no JWT minting.**  
+**Prior research** saved unchanged as [`reports/risk-payload-research.md`](risk-payload-research.md).
 
 ---
 
-## 1. Bug
+## 1. Summary
 
-When merging the sanctions list into `ais_ship_risk_rating`, a sanctioned IMO that shared an MMSI with an existing rating was folded onto that other IMO’s key. Event scoring also treated `sanctions_match` as belonging to the AIS/primary ship even when the hit came from `imo_other` / a peer on the same MMSI.
+Phase 1 endpoints now append identity-risk labels from the stored `ais_ship_risk_rating` table (`lookback_months = 24`):
 
-| Symptom | Cause |
-|---------|--------|
-| VIOLET 1 (`9154000`) missing → API GREEN 0 | Merged onto PETERPAUL `imo:9163269` |
-| AKAR WEST `9258167` RED “sanctions match (SDN, UK)” | Inherited OXIS (`9224805`) lists via shared MMSI / event flag |
-| XING YUAN `9408554` RED “sanctions match (SDN, UK)” | Inherited ZEVS (`9168946`) the same way |
+| Field | Where | Default (no row / load fail) |
+|-------|--------|------------------------------|
+| `riskRating` | per ship / vessel / event | `"GREEN"` |
+| `riskScore` | same | `0` |
+| `riskReason` | same | `"none"` |
+| `riskRedCount` / `riskAmberCount` | response top-level (after `sanctionsMatchCount*`) | `0` / `0` |
+| `riskRedCount` (0–2) | STS **pair** object (end) | `0` |
+
+**Hard rule kept:** only ADD fields. Existing keys, order, values, counts, filters, and sorts unchanged. Same-payload golden strip of all `risk*` keys restores today’s shape.
 
 ---
 
-## 2. Fix
+## 2. Files changed
 
-| Area | Change |
+| Path | Change |
 |------|--------|
-| `sanctions_for` | IMO present → IMO lookup only; else MMSI only (same rule as `match_vessel`) |
-| Event collectors | Attribute lists to **primary** IMO only (Lloyd’s: AIS IMO, not `lloyds_imo`) |
-| `_find_rating_key_for_sanctions` | IMO-keyed ships always keep `imo:<their IMO>`; never merge onto another IMO via MMSI. Only rekey `mmsi:` → `imo:` for the **same** vessel |
-| `score_ship` | With `own_imo` set, ignore event `sanctions_match` (use `extra_sanctions_lists` / job merge instead) |
-| `query_ship_risk` | Exact `ship_key` / own IMO; MMSI-only lookup uses `mmsi:` key only; live recompute calls `match_vessel` for this ship |
+| `restapi/ship_risk_attach.py` | **new** — cache, match (IMO then MMSI), attach helpers, `strip_risk_keys` |
+| `restapi/sts_detection.py` | `attach_risk_pair_sides` + vessel attach; pair `riskRedCount`; top counts |
+| `restapi/dark_vessels.py` | attach + per-vessel fields + counts |
+| `restapi/illegal_anchoring.py` | same |
+| `restapi/loitering.py` | same |
+| `restapi/spoofing.py` | same (+ empty-result defaults) |
+| `restapi/main.py` | expose `riskRedCount` / `riskAmberCount` on Phase 1 routes only |
+| `restapi/static/swagger.json` | optional properties + count fields; required lists untouched |
+| `restapi/tests/test_ship_risk_attach.py` | **new** — defaults, IMO>MMSI, TTL, failure→GREEN, golden strips |
+
+**Not touched:** `/mantis/overview`, `/mantis/sanctions`, other endpoints, DDL, job, cron.
+
+Env: `mantis_risk_cache_ttl_s` (default **300**), same pattern as OFAC index cache.
 
 ---
 
-## 3. Tests
+## 3. Behaviour
+
+- **Source:** `SELECT ship_key, imo, mmsi, rating, score, factors->>'reason' FROM ais_ship_risk_rating WHERE lookback_months = 24` into in-process `by_imo` / `by_mmsi`.
+- **Lookup:** IMO key first (no MMSI fallback if IMO present); else MMSI; else GREEN/0/`none`.
+- **Failure:** load or attach exception → warning log + defaults; endpoint must not 500 because of risk.
+- **Placement:** risk fields after existing sanctions fields (`sanctionsMatch` / `matchConfidence` / `sanctionsList` / `listNames`). Top counts after `sanctionsMatchCount*`.
+
+Live key order check (dark vessel PARISAN):
+
+`… matchConfidence, sanctionsList, listNames, riskRating, riskScore, riskReason`
+
+---
+
+## 4. Tests
 
 ```text
-./venv/bin/pytest restapi/tests/test_identity_risk.py -q  → 17 passed
-./venv/bin/pytest restapi/tests/ -q                       → 81 passed
+restapi/tests/test_ship_risk_attach.py  — 11 passed
+full restapi/tests + backend/tests      — 105 passed
 ```
 
-New cases:
+Coverage:
 
-- Two sanctioned IMOs sharing an MMSI → two RED rows (VIOLET 1 / PETERPAUL style)
-- Contaminated `imo_other` event flag does not RED the non-listed AIS IMO; listed IMO still RED via `extra_sanctions_lists` (OXIS / AKAR WEST style)
-
----
-
-## 4. Read-only dry-run (pnav)
-
-Simulated: re-attribute event sanctions (primary IMO only) → `score_ship(..., own_imo=…)` → `apply_sanctions_to_ratings`. **No writes.**
-
-### Expected totals (lookback 24)
-
-| Metric | Current (live) | Expected after next job |
-|--------|---------------:|------------------------:|
-| Total ratings | 2,607 | **2,610** |
-| RED | 1,946 | **1,945** |
-| AMBER | 661 | **665** |
-| `sanctions_match` | 1,939 | **1,938** |
-| Newly added sanctioned rows | — | **1,866** |
-| Dual `imo:`+`mmsi:` pairs | 0 | **0** |
-
-(+3 rows = OXIS, ZEVS, VIOLET 1 now get their own keys. RED −1 / AMBER +4 from four ships that only had inherited flags — see below.)
-
-### Six focus IMOs — before → after
-
-| IMO | Name | Before (live table) | After (dry-run) |
-|-----|------|---------------------|-----------------|
-| **9154000** | VIOLET 1 | *no row* | **RED 100**, SDN, `sanctions match (SDN)`, events 0 |
-| **9163269** | PETERPAUL | RED 100, SDN | **RED 100**, SDN (unchanged own listing) |
-| **9224805** | OXIS | *no row* | **RED 100**, SDN+UK, `sanctions match (SDN, UK)`, events 0 |
-| **9258167** | AKAR WEST | RED 100, SDN+UK (inherited SDN) | **RED 100**, **UK only** — `low_mmsi_misuse; sanctions match (UK)` |
-| **9168946** | ZEVS | *no row* | **RED 100**, SDN+UK, events 0 |
-| **9408554** | XING YUAN / HE BO | RED 100, SDN+UK (inherited SDN) | **RED 100**, **UK only** — `low_mmsi_misuse; sanctions match (UK)` |
-
-**Note on AKAR WEST / XING YUAN:** they do **not** return to AMBER. Both IMOs are themselves on the **UK** list (`uk_vessel`). The fix removes the wrongly inherited **SDN** (from OXIS / ZEVS). Stale-registry AMBER would apply only if they were not listed at all.
-
-### Other ships whose `sanctions_match` changes
-
-These had RED / `sanctions_match` only via peer inheritance; they are **not** on the merged list under their own IMO → expected **AMBER**, `sanctions_match=false`:
-
-| ship_key | Name | Before | After |
-|----------|------|--------|-------|
-| `imo:9230892` | PEPPERONI | RED, SDN+UK | AMBER 30, `low_mmsi_misuse` |
-| `imo:9251781` | SYN ACRAB | RED, UK | AMBER 30, `low_mmsi_misuse` |
-| `imo:9197870` | N LUNA | RED, UK | AMBER 40, `medium_mmsi_misuse` |
-| `imo:9259173` | SCIONG | RED, SDN+UK | AMBER 40, `medium_mmsi_misuse` |
-
-New own-key sanctioned rows among the focus set: **VIOLET 1**, **OXIS**, **ZEVS** (plus the broader +1,866 sanction-only inserts vs event-only baseline; vs live table the net new keys are these three that were previously collapsed).
+- Missing row → GREEN / 0 / `"none"`
+- IMO preferred; IMO present but missing → GREEN (no MMSI fallback)
+- Cache TTL refresh
+- Cache load failure → empty indexes + defaults; attach failure never raises
+- Golden: strip `risk*` from Phase 1 payload builders → identical keys/order/values to no-risk shape
+- Field append order after sanctions; top-level count order
 
 ---
 
-## 5. Commit
+## 5. Read-only pnav check
 
-Local only (not pushed / not deployed):
+**Client:** laptop → RDS `pnav`, `statement_timeout` **15 s** (via `mantis_pg_statement_timeout_ms=15000`).  
+**No writes. No secrets printed.**
 
-```text
-Fix sanctions ratings: never merge listed IMOs by shared MMSI.
-```
+### 5.1 Rating table / cache
+
+| Metric | Value |
+|--------|------:|
+| Rows (`lookback_months=24`) | **2,610** |
+| RED / AMBER in table | **1,945** / **665** |
+| Cache keys IMO / MMSI | **2,590** / **20** |
+| Full cache load (client) | **~368 ms** |
+| TTL | **300 s** |
+
+### 5.2 Phase 1 builders (warm caches)
+
+Sizes: **before** = same payload with all `risk*` keys stripped; **after** = full Phase 1 payload.  
+Timing: warm (polygons + OFAC + risk cache already loaded). Cold STS first call ~5.8 s (shared port-area + sanctions load, not risk-specific).
+
+| Endpoint | Rows | riskRedCount | riskAmberCount | Size before | Size after | Δ bytes | Warm time |
+|----------|-----:|-------------:|---------------:|------------:|-----------:|--------:|----------:|
+| `/mantis/sts-activities` | 8 pairs / 16 vessels | 0 | 0 | 22,950 | 25,094 | +2,144 | 0.35 s |
+| `/mantis/darkvessels` | 207 | 12 | 8 | 182,277 | 195,282 | +13,005 | 1.35 s |
+| `/mantis/illegal-anchoring` | 891 | 53 | 59 | 792,727 | 848,938 | +56,211 | 1.39 s |
+| `/mantis/loitering` | 0 | 0 | 0 | 57 | 97 | +40 | 0.08 s |
+| `/mantis/spoofing` | 21 | 4 | 0 | 15,624 | 17,013 | +1,389 | 0.19 s |
+
+Same-payload golden (strip `risk*`): **OK** on all five.
+
+### 5.3 Sample rows
+
+SEA PEARL was **not** in the live STS set at check time (0 RED/AMBER on current pairs). Sanctioned / RED samples:
+
+| Endpoint | Sample |
+|----------|--------|
+| darkvessels | **PARISAN** MMSI `422037300` IMO `9465851` — sanctions SDN, `riskRating=RED`, `riskScore=100`, reason `sanctions match (SDN)`, `darkReason=low_evidence_ais_gap` |
+| illegal-anchoring | **VICTORY ARI** MMSI `305049000` IMO `9290919` — SDN, RED/100/`sanctions match (SDN)`, reason `in_restricted_zone+in_watch_polygon` |
+| spoofing | **AMINA** MMSI `422035100` IMO `9305192` — SDN, RED/100/`sanctions match (SDN)`, reason `teleport` |
+| sts-activities | Example pair obs `216442`: PUTRA SATRIA ↔ ORIENTAL SPIRIT — both GREEN/0/`none`, pair `riskRedCount=0` |
+| loitering | Empty list at check time (counts 0) |
 
 ---
 
-## 6. Not done
+## 6. Swagger
 
-- No deploy to srv-dp / srv-01  
-- No pnav writes / no job run  
-- No DDL  
+Optional properties added on Phase 1 vessel/event schemas and response count fields. Existing `required` arrays and property definitions left intact.
 
-**Next when approved:** deploy `identity_risk_job.py` + `restapi/identity_risk.py`, run the job once, confirm the six IMOs and the four lost-inheritance ships.
+---
+
+## 7. Commit
+
+Local commit only (no push / no deploy). Message focuses on additive Phase 1 risk labels.
+
+---
+
+## 8. Out of scope / next
+
+- Phase 2–5 endpoints (`identity-conflict`, `sts-review`, `overview`, `sanctions`, timeline/track) — **not** implemented.
+- Deploy to srv-01 / srv-dp — **not** done.
+- Live recompute via `score_ship` — **not** used; stored ratings only.
+
+**When approved:** deploy API modules on srv-01 (`ship_risk_attach.py` + updated detectors/`main`/`swagger`); no DDL; job cron unchanged.

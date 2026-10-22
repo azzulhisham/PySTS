@@ -184,6 +184,21 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"],
+            "description": "Identity risk from ais_ship_risk_rating (lookback 24). GREEN when no row."
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "0–100 identity risk score. 0 when no rating row."
+          },
+          "riskReason": {
+            "type": "string",
+            "description": "factors.reason from the stored rating, or \"none\" when no row."
           }
         }
       },
@@ -241,6 +256,12 @@
             "type": "string",
             "enum": ["confirmed", "possible", "none"],
             "description": "Best of the two vessels (confirmed > possible > none)."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2,
+            "description": "How many of vesselA/vesselB have riskRating RED (0–2)."
           }
         }
       },
@@ -330,6 +351,14 @@
           "sanctionsMatchVesselCount": {
             "type": "integer",
             "description": "Paired vessels that match OFAC."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Paired vessels with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Paired vessels with identity riskRating AMBER."
           }
         }
       },
@@ -472,6 +501,18 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"]
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -534,6 +575,14 @@
           "sanctionsMatchCount": {
             "type": "integer",
             "description": "Candidates that match OFAC. Unmatched vessels are still returned."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Candidates with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Candidates with identity riskRating AMBER."
           },
           "vessels": {
             "type": "array",
@@ -702,6 +751,18 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"]
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -776,6 +837,14 @@
           "sanctionsMatchCount": {
             "type": "integer",
             "description": "Candidates that match OFAC. Unmatched vessels are still returned."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Candidates with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Candidates with identity riskRating AMBER."
           },
           "vessels": {
             "type": "array",
@@ -1195,6 +1264,18 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"]
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -1298,6 +1379,14 @@
           },
           "sanctionsMatchCount": {
             "type": "integer"
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Anomalies with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Anomalies with identity riskRating AMBER."
           },
           "anomalies": {
             "type": "array",
@@ -2130,6 +2219,18 @@
               "SDN",
               "CONS"
             ]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"]
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -2166,6 +2267,14 @@
           },
           "sanctionsMatchCount": {
             "type": "integer"
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Events with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Events with identity riskRating AMBER."
           },
           "totalCount": {
             "type": "integer",

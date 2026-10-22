@@ -31,6 +31,7 @@ from ais_identity import (
 from api_timestamps import format_last_seen_at
 from pg_engine import get_pg_engine  # re-used by spoofing_vessel_analysis
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
+from ship_risk_attach import attach_risk_ratings, risk_counts, risk_payload_fields
 from timelineplayback import (
     VALID_POSITION_SQL,
     _ch_literal_ts,
@@ -491,6 +492,7 @@ def anomalies_to_payload(anomalies: pd.DataFrame) -> list[dict[str, Any]]:
             "impliedSpeedKn": round(float(row["implied_kn"]), 1) if pd.notna(row.get("implied_kn")) else None,
             **dimension_fields(row),
             **payload_fields(row),
+            **risk_payload_fields(row),
         })
     return records
 
@@ -606,6 +608,7 @@ def detect_spoofing(
     )
 
     shown = attach_sanctions(shown, engine)
+    shown = attach_risk_ratings(shown, engine)
     if not summary_only:
         extra = ["implied_kn"] if "implied_kn" in shown.columns else []
         shown = sort_listed_first(shown, extra_sort=extra, extra_ascending=[False])
@@ -616,6 +619,7 @@ def detect_spoofing(
         for reason, cnt in shown["reason"].value_counts().items():
             by_reason[str(reason)] = int(cnt)
         sanctions_match_count = int(shown["sanctions_match"].sum())
+    risk = risk_counts(shown)
 
     return {
         "rule_version": RULE_VERSION,
@@ -645,6 +649,8 @@ def detect_spoofing(
         "include_data_quality": include_data_quality,
         "by_reason": by_reason,
         "sanctions_match_count": sanctions_match_count,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "anomalies_payload": [] if summary_only else anomalies_to_payload(shown),
     }
 
@@ -681,6 +687,8 @@ def _empty_result(
         "include_data_quality": False,
         "by_reason": {},
         "sanctions_match_count": 0,
+        "risk_red_count": 0,
+        "risk_amber_count": 0,
         "anomalies_payload": [],
     }
 
