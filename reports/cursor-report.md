@@ -1,139 +1,118 @@
-# OFAC ingest deploy to srv-dp (.200)
+# Identity risk: rate every sanctioned ship
 
-**Date:** 2026-10-21  
-**Hosts:** srv-dp `10.10.20.200` (ingest/cron), srv-01 `10.10.20.201` (API verify only — **no restart**)  
-**Commits:** deploy base `6cad253`; fix `5b870f2` / `64d8aff` (skip vessel `CREATE OR REPLACE VIEW`)  
-**Backup:** `backup-20261021-125328`  
-**Decision:** **GO**
-
----
-
-## 1. Timezone
-
-| Field | Value |
-|-------|-------|
-| Host | srv-dp |
-| Local time | 2026-10-21 … UTC |
-| Time zone | **Etc/UTC (UTC, +0000)** |
-| NTP | active / synchronized |
-
-Cron times below are **server UTC** (same clock as the existing UN job).
+**Date:** 2026-10-22  
+**Repo:** PySTS  
+**Scope:** Ensure every vessel on the merged sanctions set gets an `ais_ship_risk_rating` row (RED 100), even with no `ais_identity_event`.  
+**Constraints honoured:** no DDL, no pnav writes, no deploy, no cron, no tokens minted. Dry-run was read-only (`statement_timeout` 15s). Prior Tokyo MOU research saved as `reports/tokyo-mou-research.md`.
 
 ---
 
-## 2. Transaction / DDL safety check (before run)
+## 1. Problem
 
-| Check | Result |
-|-------|--------|
-| Row replace | `TRUNCATE` + `INSERT` inside `with engine.begin()` — **one transaction**; API readers never see empty tables (MVCC until commit) |
-| Table DDL | `CREATE TABLE IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `ALTER TABLE … ADD COLUMN IF NOT EXISTS` only |
-| View DDL (original main) | Script also had `CREATE OR REPLACE VIEW ofac_*_vessel` |
-| Live `ofac_sdn_vessel` | Columns start `uid, vessel_name, …` (**no** `list_name`) |
-| Live `ofac_cons_vessel` | Includes `list_name` before `vessel_name` |
-| First real SDN attempt | **Failed** on `CREATE OR REPLACE VIEW` (*cannot change name of view column "vessel_name" to "list_name"*); transaction **rolled back** — counts unchanged |
-| Fix | Removed view REPLACE from `ofac_sdn_ingest.py` (`64d8aff`); views left as-is; only IF NOT EXISTS table/index/column DDL + transactional replace |
-
-**No other DDL.** Restapi untouched; no service restarts.
+`identity_risk_job.py` only wrote ratings for ships that appeared in `ais_identity_event`.  
+`/mantis/sanctions` returns **1,940** vessels (e.g. SEA OPERA, TULIP), but most had **no** rating row, so `/mantis/ship-risk` returned nothing for them.
 
 ---
 
-## 3. Before / after row counts
+## 2. Change
 
-| Object | Before | After | Δ |
-|--------|-------:|------:|---|
-| `ofac_sdn_entry` | 19199 | **19457** | +1.3% |
-| `ofac_sdn_aka` | 24576 | **24617** | +0.2% |
-| `ofac_sdn_identifier` | 53473 | **54909** | +2.7% |
-| `ofac_sdn_vessel` | 1524 | **1559** | +2.3% |
-| SDN vessel with IMO | 1519 | **1546** | +1.8% |
-| SDN vessel with MMSI | 792 | **826** | +4.3% |
-| `ofac_cons_entry` | 481 | **486** | +1.0% |
-| `ofac_cons_aka` | 1186 | **1191** | +0.4% |
-| `ofac_cons_identifier` | 2632 | **2668** | +1.4% |
-| `ofac_cons_vessel` | 0 | **0** | — |
-| `un_vessel` | 1 | **1** | unchanged |
+| File | Change |
+|------|--------|
+| `backend/identity_risk_job.py` | After event-based scoring, merge the same deduped sanctions list as `/mantis/sanctions` (`load_ofac_vessel_list` → SDN + CONS + UN + UK). Missing ships get RED 100; existing rows stay ≥ RED 100 and gain list names in `factors.reason`. IMO key preferred over MMSI (consolidate MMSI-only → IMO). |
+| `restapi/identity_risk.py` | `format_sanctions_reason` / `merge_sanctions_lists`; `score_ship` reason text → `sanctions match (LISTS)` (never downgrade). |
+| `restapi/tests/test_identity_risk.py` | Tests for no-events RED, no duplicate/downgrade, IMO/MMSI consolidate. |
 
-Last-run before: SDN ingest `2026-08-13` publish `08/07/2026`; CONS `2026-08-13` publish `07/27/2026`.  
-After: SDN publish **`10/15/2026`**, CONS **`10/19/2026`** (`ofac_ingest_run` ids 3–4).
+**Key rules (unchanged):** one row per ship — `imo:#######` when IMO present, else `mmsi:#########`. A ship must not appear under both.
 
-**10% drop gate:** not triggered (all key counts rose slightly).
+**Reason format:**
 
-Dry-run (local XML after slow Treasury download): SDN vessels=1559 / IMO=1546 / MMSI=826; CONS vessels=0.
+- New / sanctions-only: `sanctions match (SDN, UK)`
+- Already rated with another reason: `high_mmsi_misuse; sanctions match (SDN, UK)`
+
+**No schema changes.** Sanctions read uses the small OFAC/UN/UK tables/views only (same path as `/mantis/sanctions`).
 
 ---
 
-## 4. Backup
+## 3. Tests
 
-| Item | Value |
-|------|-------|
-| Path | `/home/srvadmin/sts/backup-20261021-125328` |
-| `PRE_DEPLOY.txt` | `BACKUP_NAME=backup-20261021-125328`, PREV=`ec6ebd2`, NEW=`6cad253` (+ later `FIX_COMMIT` / `FIX2_COMMIT` notes) |
-| Contents | prior `*.py`, `restapi/`, `data/`, `code-tree.tgz`, prior `DEPLOYED_COMMIT.txt` |
-
----
-
-## 5. Files deployed (.200)
-
-| Path | Notes |
-|------|-------|
-| `/home/srvadmin/sts/ofac_sdn_ingest.py` | from main `@64d8aff` |
-| `/home/srvadmin/sts/ofac_cons_ingest.py` | wrapper; imports sibling `ofac_sdn_ingest` |
-| `/home/srvadmin/sts/data/sdn.xml` | official SDN XML (wget; ~29 MiB) |
-| `/home/srvadmin/sts/data/consolidated.xml` | official CONS XML |
-| `/home/srvadmin/sts/DEPLOYED_COMMIT.txt` | `64d8aff…` |
-
-Treasury download from `.200` is **very slow** (~20–40 KB/s). One-shot load used `--xml data/…` after `wget -c`. Daily cron still downloads live (may take a long time).
-
----
-
-## 6. Cron (srvadmin, UTC)
-
-```
-10 8 * * * /usr/bin/python3 /home/srvadmin/sts/ofac_sdn_ingest.py  >> /var/log/ofac_sdn_ingest.log 2>&1
-15 8 * * * /usr/bin/python3 /home/srvadmin/sts/ofac_cons_ingest.py >> /var/log/ofac_cons_ingest.log 2>&1
-20 8 * * * /usr/bin/python3 /home/srvadmin/sts/un_sanctions_ingest.py >> /var/log/un_ingest.log 2>&1
+```text
+./venv/bin/pytest restapi/tests/test_identity_risk.py -q   → 15 passed
+./venv/bin/pytest restapi/tests/ -q                        → 79 passed
 ```
 
-Log files created, owned by `srvadmin`. UN line kept.
+Covered:
+
+1. Sanctioned ship, no events → RED 100, reason with list names  
+2. Already-rated RED → not duplicated, not downgraded; lists added to reason  
+3. AMBER + sanctions → upgraded to RED 100  
+4. MMSI-only event rating + sanctions IMO → consolidated to single `imo:` row  
 
 ---
 
-## 7. API check (.201, no restart)
+## 4. Read-only pnav dry-run (no writes)
 
-| Check | Result |
-|-------|--------|
-| `GET /mantis/sanctions` | **200** |
-| Counts | **SDN 1559**, **UN 1**, total **1560** |
-| AVAX | present, IMO `9058713`, `listName` `UN` |
-| Fresh index process | IMO keys **1547** (= 1546 SDN IMO + 1 UN), MMSI keys **824**; `match(9058713)` → UN |
-| Cache | List endpoint already reflected new tables (TTL ≤ 5 min); **no** `ais_mantis_api` restart |
+Recomputed event ratings in memory, then applied `apply_sanctions_to_ratings`. Compared to current `ais_ship_risk_rating` (lookback 24).
+
+### Current table (before job)
+
+| Metric | Value |
+|--------|------:|
+| Total ratings | 744 |
+| AMBER | 661 |
+| RED | 83 |
+| of which `sanctions_match` | 76 |
+
+### Merged sanctions list
+
+| Metric | Value |
+|--------|------:|
+| `/mantis/sanctions` vessels | 1,940 |
+| With usable IMO or MMSI key | 1,938 |
+| Skipped (no IMO/MMSI) | 2 |
+| Already present in event-based ratings (by ship_key) | 72 |
+
+### Expected after next job run
+
+| Metric | Value |
+|--------|------:|
+| **Total ratings** | **2,607** |
+| **RED** | **1,946** |
+| **AMBER** | **661** |
+| GREEN | 0 |
+| `sanctions_match = true` | 1,939 |
+| **Sanctioned ships newly added** | **1,863** |
+| Sanctioned ships upgraded (AMBER→RED) | 0 |
+| IMO+MMSI duplicate pairs | 0 |
+
+Derivation check: 744 event ships + 1,863 new = 2,607.  
+RED: 83 event RED + 1,863 new = 1,946 (AMBER unchanged at 661).
+
+### Examples
+
+| Ship | IMO | Lists | In ratings today? | After dry-run |
+|------|-----|-------|-------------------|---------------|
+| SEA OPERA | 9000883 | SDN | **No** | `imo:9000883` RED 100, reason `sanctions match (SDN)`, events 0 |
+| TULIP | 8912558 | SDN | **No** | `imo:8912558` RED 100, reason `sanctions match (SDN)`, events 0 |
 
 ---
 
-## 8. Stray copy (not touched)
+## 5. Commit
 
-`/home/srvadmin/py/pyvam/backend/copied/PySTS` on `.201` still contains a copied tree including `backend/ofac_sdn_ingest.py` (**STRAY_OFAC_PRESENT**). Left alone per instructions.
+Local commit only (not pushed, not deployed):
 
----
-
-## 9. Rollback (code/cron only; leave refreshed OFAC rows)
-
-```bash
-# .200 — restore prior scripts from this backup; remove OFAC cron; keep UN
-APP=/home/srvadmin/sts
-BAK=$APP/backup-20261021-125328
-cp -a "$BAK/code/"*.py "$APP/" 2>/dev/null || true
-# remove only OFAC lines
-crontab -l | grep -v ofac_sdn_ingest.py | grep -v ofac_cons_ingest.py | crontab -
-# optional: rm -f $APP/ofac_sdn_ingest.py $APP/ofac_cons_ingest.py
+```text
+Ensure every sanctioned ship gets a RED identity risk rating.
 ```
 
-To revert **data** to the Aug snapshot you would need a DB restore (not done; not requested). Tables were refreshed in place successfully.
+Includes job merge, reason helpers, tests, and this report. Prior research archived at `reports/tokyo-mou-research.md`.
 
 ---
 
-## 10. Notes
+## 6. Not done (by request)
 
-- Initial safety review: truncate is transactional; view REPLACE was the hazard and was removed after a rolled-back failure.
-- No restapi deploy, no service restart.
-- IMO/MMSI key totals moved from ~1519/790 to ~1546/824 (plus 1 UN IMO) — consistent with a fresher SDN file, within the 10% gate.
+- No DDL / schema changes  
+- No writes to pnav  
+- No deploy to srv-dp / srv-01  
+- No cron changes  
+
+**Next step when approved:** run `identity_risk_job.py` once on srv-dp (or promote the commit and let the existing cron pick it up), then spot-check `/mantis/ship-risk?imo=9000883` and `8912558`.

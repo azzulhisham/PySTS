@@ -39,7 +39,9 @@ from identity_risk import (  # noqa: E402
     DEFAULT_LOOKBACK_MONTHS,
     RULE_VERSION,
     classify_lloyds_conflict,
+    format_sanctions_reason,
     is_cargo_tanker_type,
+    merge_sanctions_lists,
     names_agree,
     normalize_imo_text,
     normalize_name,
@@ -739,9 +741,187 @@ def primary_event_ship_key(ev: dict[str, Any]) -> str | None:
     return ship_key(imo, mmsi)
 
 
-def recompute_ratings(engine, conn, *, lookback_months: int) -> dict[str, int]:
+def sanctioned_ship_key(imo: Any, mmsi: Any) -> str | None:
+    """Same key rule as /mantis/sanctions: IMO first, else MMSI (no row: fallback)."""
+    imo_key = normalize_imo(imo)
+    if imo_key:
+        return f"imo:{imo_key}"
+    mmsi_key = normalize_mmsi(mmsi)
+    if mmsi_key:
+        return f"mmsi:{int(mmsi_key)}"
+    return None
+
+
+def iter_sanctioned_ships(df) -> list[dict[str, Any]]:
+    """Deduped sanctions vessels with a usable IMO or MMSI ship_key."""
+    if df is None or getattr(df, "empty", True):
+        return []
+    out: list[dict[str, Any]] = []
+    for _, row in df.iterrows():
+        key = sanctioned_ship_key(row.get("imo"), row.get("mmsi"))
+        if not key:
+            continue
+        lists: list[str] = []
+        names = row.get("list_names")
+        if isinstance(names, list) and names:
+            lists = [str(n) for n in names if n]
+        elif row.get("list_name"):
+            lists = [str(row.get("list_name"))]
+        lists = sorted(set(lists), key=lambda n: LIST_PRIORITY.get(n, 99))
+        imo = normalize_imo(row.get("imo"))
+        mmsi_s = normalize_mmsi(row.get("mmsi"))
+        mmsi = int(mmsi_s) if mmsi_s else None
+        name = normalize_name(row.get("vessel_name"))
+        out.append(
+            {
+                "ship_key": key,
+                "imo": imo,
+                "mmsi": mmsi,
+                "ship_name": name,
+                "sanctions_lists": lists,
+            }
+        )
+    return out
+
+
+def _find_rating_key_for_sanctions(
+    ratings: dict[str, dict[str, Any]],
+    *,
+    preferred_key: str,
+    imo: str | None,
+    mmsi: int | None,
+) -> tuple[str | None, bool]:
+    """
+    Resolve where a sanctioned ship should land.
+
+    Returns (existing_or_preferred_key, rekey_to_imo).
+    Prefers IMO key; consolidates an existing MMSI-only row onto IMO when both exist.
+    """
+    if preferred_key in ratings:
+        return preferred_key, False
+    if preferred_key.startswith("imo:") and mmsi is not None:
+        mmsi_key = f"mmsi:{int(mmsi)}"
+        if mmsi_key in ratings:
+            return mmsi_key, True
+        for key, row in ratings.items():
+            if row.get("mmsi") is not None and int(row["mmsi"]) == int(mmsi):
+                # Already under another IMO — do not create a second row.
+                return key, False
+    if preferred_key.startswith("mmsi:") and mmsi is not None:
+        for key, row in ratings.items():
+            if row.get("mmsi") is not None and int(row["mmsi"]) == int(mmsi):
+                return key, False
+            if imo and key == f"imo:{imo}":
+                return key, False
+    return preferred_key, False
+
+
+def apply_sanctions_to_ratings(
+    ratings: dict[str, dict[str, Any]],
+    sanctioned: list[dict[str, Any]],
+    *,
+    lookback_months: int,
+    now: datetime,
+) -> dict[str, int]:
+    """
+    Ensure every sanctioned ship has a RED 100 rating.
+
+    - Missing rating → insert RED 100, reason "sanctions match (LISTS)"
+    - Existing rating → force RED 100 (never downgrade), merge list names into reason
+    - One row per ship: IMO key wins over MMSI-only for the same vessel
+    """
+    added = 0
+    upgraded = 0
+    for vessel in sanctioned:
+        preferred = vessel["ship_key"]
+        imo = vessel.get("imo")
+        mmsi = vessel.get("mmsi")
+        lists = list(vessel.get("sanctions_lists") or [])
+        target_key, rekey = _find_rating_key_for_sanctions(
+            ratings, preferred_key=preferred, imo=imo, mmsi=mmsi
+        )
+        if target_key is None:
+            continue
+
+        if target_key in ratings:
+            row = ratings[target_key]
+            if rekey and preferred.startswith("imo:") and preferred != target_key:
+                ratings.pop(target_key)
+                row["ship_key"] = preferred
+                row["imo"] = imo or row.get("imo")
+                target_key = preferred
+                ratings[target_key] = row
+            prev_rating, prev_score = row.get("rating"), int(row.get("score") or 0)
+            row["sanctions_match"] = True
+            row["sanctions_lists"] = merge_sanctions_lists(row.get("sanctions_lists"), lists)
+            # Never downgrade below RED 100.
+            row["rating"] = "RED"
+            row["score"] = 100
+            if row.get("imo") is None and imo:
+                row["imo"] = imo
+            if row.get("mmsi") is None and mmsi is not None:
+                row["mmsi"] = mmsi
+            if not row.get("ship_name") and vessel.get("ship_name"):
+                row["ship_name"] = vessel.get("ship_name")
+            factors = dict(row.get("factors") or {})
+            sanc_reason = format_sanctions_reason(row["sanctions_lists"])
+            prev_reason = str(factors.get("reason") or "none")
+            if prev_reason in {"none", "sanctions_match"} or prev_reason.startswith(
+                "sanctions match"
+            ):
+                factors["reason"] = sanc_reason
+            elif "sanctions match" not in prev_reason:
+                factors["reason"] = f"{prev_reason}; {sanc_reason}"
+            else:
+                factors["reason"] = sanc_reason
+            factors["sanctionsLists"] = list(row["sanctions_lists"] or [])
+            row["factors"] = factors
+            if prev_rating != "RED" or prev_score < 100:
+                upgraded += 1
+        else:
+            sanc_reason = format_sanctions_reason(lists)
+            ratings[preferred] = {
+                "ship_key": preferred,
+                "imo": imo,
+                "mmsi": mmsi,
+                "ship_name": vessel.get("ship_name"),
+                "rating": "RED",
+                "score": 100,
+                "lookback_months": lookback_months,
+                "mmsi_misuse": False,
+                "sanctions_match": True,
+                "sanctions_lists": lists or None,
+                "event_count_window": 0,
+                "event_count_total": 0,
+                "latest_event_at": None,
+                "factors": {
+                    "reason": sanc_reason,
+                    "lookbackMonths": lookback_months,
+                    "cutoffUtc": None,
+                    "isCargoTanker": False,
+                    "highMisuseCount": 0,
+                    "mediumMisuseCount": 0,
+                    "lowMisuseCount": 0,
+                    "reflagCount": 0,
+                    "sanctionsLists": lists,
+                },
+                "rule_version": RULE_VERSION,
+                "computed_at": now,
+            }
+            added += 1
+    return {"sanctions_ratings_added": added, "sanctions_ratings_upgraded": upgraded}
+
+
+def recompute_ratings(
+    engine,
+    conn,
+    *,
+    lookback_months: int,
+    sanctioned_ships: list[dict[str, Any]] | None = None,
+) -> dict[str, int]:
     """
     Recompute ratings: one row per ship (IMO key when known, else MMSI).
+    Then ensure every merged-sanctions ship has a RED 100 row.
     Drops previous lookback rows so legacy mmsi:/imo_other duplicates disappear.
     """
     from sqlalchemy import text
@@ -787,7 +967,7 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> dict[str, int]:
         if imo and meta[primary]["imo"] is None:
             meta[primary]["imo"] = imo
 
-    rating_rows = []
+    ratings: dict[str, dict[str, Any]] = {}
     now = datetime.now(timezone.utc)
     for key, evs in by_ship.items():
         m = meta[key]
@@ -799,26 +979,53 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> dict[str, int]:
             is_cargo_tanker=cargo,
             now=now,
         )
-        rating_rows.append(
-            (
-                key,
-                m.get("imo"),
-                m.get("mmsi"),
-                m.get("ship_name"),
-                scored["rating"],
-                scored["score"],
-                lookback_months,
-                bool(scored["mmsi_misuse"]),
-                bool(scored["sanctions_match"]),
-                scored["sanctions_lists"],
-                scored["event_count_window"],
-                scored["event_count_total"],
-                scored["latest_event_at"],
-                json.dumps(scored["factors"]),
-                RULE_VERSION,
-                now,
-            )
+        ratings[key] = {
+            "ship_key": key,
+            "imo": m.get("imo"),
+            "mmsi": m.get("mmsi"),
+            "ship_name": m.get("ship_name"),
+            "rating": scored["rating"],
+            "score": scored["score"],
+            "lookback_months": lookback_months,
+            "mmsi_misuse": bool(scored["mmsi_misuse"]),
+            "sanctions_match": bool(scored["sanctions_match"]),
+            "sanctions_lists": scored["sanctions_lists"],
+            "event_count_window": scored["event_count_window"],
+            "event_count_total": scored["event_count_total"],
+            "latest_event_at": scored["latest_event_at"],
+            "factors": scored["factors"],
+            "rule_version": RULE_VERSION,
+            "computed_at": now,
+        }
+
+    sanc_stats = apply_sanctions_to_ratings(
+        ratings,
+        sanctioned_ships or [],
+        lookback_months=lookback_months,
+        now=now,
+    )
+
+    rating_rows = [
+        (
+            row["ship_key"],
+            row.get("imo"),
+            row.get("mmsi"),
+            row.get("ship_name"),
+            row["rating"],
+            row["score"],
+            lookback_months,
+            bool(row.get("mmsi_misuse")),
+            bool(row.get("sanctions_match")),
+            row.get("sanctions_lists"),
+            int(row.get("event_count_window") or 0),
+            int(row.get("event_count_total") or 0),
+            row.get("latest_event_at"),
+            json.dumps(row.get("factors") or {}),
+            RULE_VERSION,
+            now,
         )
+        for row in ratings.values()
+    ]
 
     # Replace lookback slice so removed duplicate keys do not linger.
     conn.execute(
@@ -840,6 +1047,7 @@ def recompute_ratings(engine, conn, *, lookback_months: int) -> dict[str, int]:
     return {
         "ratings_upserted": len(rating_rows),
         "legacy_duplicate_keys_avoided": legacy_key_count,
+        **sanc_stats,
     }
 
 
@@ -853,6 +1061,9 @@ def run_once(*, lookback_months: int = DEFAULT_LOOKBACK_MONTHS) -> dict[str, Any
 
     logging.info("Loading sanctions indexes…")
     by_imo, by_mmsi = load_sanctions_indexes(query_engine)
+    logging.info("Loading merged sanctions vessel list…")
+    sanctioned_ships = iter_sanctioned_ships(load_ofac_vessel_list(query_engine))
+    logging.info("Sanctioned ships with IMO/MMSI key: %s", len(sanctioned_ships))
 
     logging.info("Snapshotting Lloyd's MMSI mismatches for %s…", snap_day)
     snaps = snapshot_lloyds_mismatches(query_engine, snap_day)
@@ -880,7 +1091,12 @@ def run_once(*, lookback_months: int = DEFAULT_LOOKBACK_MONTHS) -> dict[str, Any
         conn.execute(text(f"SET LOCAL statement_timeout = '{INGEST_TIMEOUT_MS}'"))
         snap_n = persist_lloyds_snap(conn, snaps)
         ev_n = upsert_events(conn, events)
-        rating_stats = recompute_ratings(query_engine, conn, lookback_months=lookback_months)
+        rating_stats = recompute_ratings(
+            query_engine,
+            conn,
+            lookback_months=lookback_months,
+            sanctioned_ships=sanctioned_ships,
+        )
 
     elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
     stats = {
@@ -892,6 +1108,9 @@ def run_once(*, lookback_months: int = DEFAULT_LOOKBACK_MONTHS) -> dict[str, Any
         "events_by_confidence": dict(by_conf),
         "ratings_upserted": rating_stats["ratings_upserted"],
         "legacy_duplicate_keys_avoided": rating_stats["legacy_duplicate_keys_avoided"],
+        "sanctions_ratings_added": rating_stats.get("sanctions_ratings_added", 0),
+        "sanctions_ratings_upgraded": rating_stats.get("sanctions_ratings_upgraded", 0),
+        "sanctioned_ships_considered": len(sanctioned_ships),
         "lookback_months": lookback_months,
         "elapsed_sec": round(elapsed, 3),
         "rule_version": RULE_VERSION,

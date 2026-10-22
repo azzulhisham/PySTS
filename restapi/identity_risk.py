@@ -158,6 +158,26 @@ def ship_key(imo: str | None, mmsi: int | None) -> str | None:
     return None
 
 
+def format_sanctions_reason(lists: list[str] | None) -> str:
+    """Human-readable factors.reason for sanctions-driven RED."""
+    names = [str(n) for n in (lists or []) if n]
+    if names:
+        return f"sanctions match ({', '.join(names)})"
+    return "sanctions match"
+
+
+def merge_sanctions_lists(
+    existing: list[str] | None, incoming: list[str] | None
+) -> list[str]:
+    from sanctions import LIST_PRIORITY
+
+    out: list[str] = []
+    for name in list(existing or []) + list(incoming or []):
+        if name and name not in out:
+            out.append(str(name))
+    return sorted(out, key=lambda n: LIST_PRIORITY.get(n, 99))
+
+
 def lookback_cutoff(lookback_months: int, *, now: datetime | None = None) -> datetime:
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None:
@@ -247,7 +267,7 @@ def score_ship(
     reason = "none"
 
     if sanctions_match:
-        rating, score, reason = "RED", 100, "sanctions_match"
+        rating, score, reason = "RED", 100, format_sanctions_reason(sanc_lists)
     if high_misuse and (is_cargo_tanker or sanctions_match):
         rating, score, reason = "RED", 100, "high_mmsi_misuse"
     elif high_misuse and not is_cargo_tanker and not sanctions_match:
@@ -260,10 +280,14 @@ def score_ship(
         rating, score, reason = "AMBER", 60, "reflag_dual_mmsi"
 
     # Sanctions always force RED even if only reflag/misuse amber was set first.
+    # Never downgrade; append list names to the reason when misuse already won.
     if sanctions_match:
         rating, score = "RED", 100
-        if reason == "none":
-            reason = "sanctions_match"
+        sanc_reason = format_sanctions_reason(sanc_lists)
+        if reason in {"none", "sanctions_match"} or reason.startswith("sanctions match"):
+            reason = sanc_reason
+        elif "sanctions match" not in reason:
+            reason = f"{reason}; {sanc_reason}"
 
     latest = None
     for ev in in_window + info:
