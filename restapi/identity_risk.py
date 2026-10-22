@@ -196,12 +196,44 @@ def is_cargo_tanker_type(ship_type: Any) -> bool:
     return 70 <= n <= 89
 
 
+def _event_sanctions_belong_to_ship(
+    ev: dict[str, Any],
+    *,
+    own_imo: str | None,
+    own_mmsi: int | None,
+) -> bool:
+    """
+    True when an event's sanctions_match may be attributed to this ship.
+
+    Sanctions apply only to the ship whose own IMO is listed (or MMSI when it
+    has no IMO). An event that merely links another IMO via imo_other / shared
+    MMSI must not paint this ship RED.
+    """
+    if not ev.get("sanctions_match"):
+        return False
+    ev_imo = normalize_imo_text(ev.get("imo"))
+    if own_imo:
+        return ev_imo == own_imo
+    if own_mmsi is not None:
+        if ev_imo:
+            return False
+        try:
+            return ev.get("mmsi") is not None and int(ev["mmsi"]) == int(own_mmsi)
+        except (TypeError, ValueError):
+            return False
+    # No ship identity supplied — legacy unit-test path: trust the event flag.
+    return True
+
+
 def score_ship(
     events: list[dict[str, Any]],
     *,
     lookback_months: int = DEFAULT_LOOKBACK_MONTHS,
     is_cargo_tanker: bool = False,
     now: datetime | None = None,
+    own_imo: str | None = None,
+    own_mmsi: int | None = None,
+    extra_sanctions_lists: list[str] | None = None,
 ) -> dict[str, Any]:
     """
     Pure rating rules.
@@ -213,6 +245,10 @@ def score_ship(
     - AMBER 30: only low-confidence signals in window
     - GREEN 0: otherwise
     Older events are counted in totals / info only.
+
+    When own_imo / own_mmsi is set, event sanctions_match is only counted if the
+    event's primary IMO (or MMSI-only identity) is this ship. Pass
+    extra_sanctions_lists for list membership resolved outside the event stream.
     """
     cutoff = lookback_cutoff(lookback_months, now=now)
     in_window: list[dict[str, Any]] = []
@@ -235,13 +271,25 @@ def score_ship(
         else:
             info.append(row)
 
+    own_imo = normalize_imo_text(own_imo) if own_imo else None
     sanc_lists: list[str] = []
-    for ev in in_window + info:
-        if ev.get("sanctions_match"):
+    for name in extra_sanctions_lists or []:
+        if name and str(name) not in sanc_lists:
+            sanc_lists.append(str(name))
+    # IMO-keyed ships: never inherit sanctions from event flags (those may still
+    # reflect a peer imo_other / shared-MMSI list hit). List membership is
+    # applied via extra_sanctions_lists or apply_sanctions_to_ratings instead.
+    # MMSI-only / legacy (no own_*) paths may still read event.sanctions_match.
+    if not own_imo:
+        for ev in in_window + info:
+            if not _event_sanctions_belong_to_ship(
+                ev, own_imo=own_imo, own_mmsi=own_mmsi
+            ):
+                continue
             for name in ev.get("sanctions_lists") or []:
-                if name and name not in sanc_lists:
+                if name and str(name) not in sanc_lists:
                     sanc_lists.append(str(name))
-    sanctions_match = bool(sanc_lists) or any(ev.get("sanctions_match") for ev in in_window)
+    sanctions_match = bool(sanc_lists)
 
     high_misuse = [
         ev
@@ -359,7 +407,8 @@ def query_ship_risk(
         raise ValueError("imo or mmsi is required")
 
     lookback_months = max(1, min(int(lookback_months or DEFAULT_LOOKBACK_MONTHS), 120))
-    key = ship_key(imo_key, mmsi_key)
+    # Prefer IMO key when IMO is supplied; MMSI-only queries use mmsi: key.
+    key = ship_key(imo_key, None if imo_key else mmsi_key)
 
     with engine.connect() as conn:
         rating_row = None
@@ -385,16 +434,18 @@ def query_ship_risk(
                 ),
                 {"imo": imo_key, "lb": lookback_months},
             ).mappings().first()
-        if rating_row is None and mmsi_key is not None:
+        # MMSI-only lookup: exact mmsi: ship_key only — never another IMO that
+        # happens to share the MMSI.
+        if rating_row is None and not imo_key and mmsi_key is not None:
             rating_row = conn.execute(
                 text(
                     """
                     SELECT * FROM ais_ship_risk_rating
-                    WHERE mmsi = :mmsi AND lookback_months = :lb
-                    ORDER BY computed_at DESC LIMIT 1
+                    WHERE ship_key = :key AND lookback_months = :lb
+                    LIMIT 1
                     """
                 ),
-                {"mmsi": mmsi_key, "lb": lookback_months},
+                {"key": f"mmsi:{int(mmsi_key)}", "lb": lookback_months},
             ).mappings().first()
 
         clauses = []
@@ -402,16 +453,23 @@ def query_ship_risk(
         if imo_key:
             clauses.append("(imo = :imo OR imo_other = :imo)")
             params["imo"] = imo_key
-        if mmsi_key is not None:
+        if mmsi_key is not None and not imo_key:
             clauses.append("mmsi = :mmsi")
             params["mmsi"] = mmsi_key
-        events_sql = f"""
-            SELECT * FROM ais_identity_event
-            WHERE {' OR '.join(clauses)}
-            ORDER BY ts_start DESC
-            LIMIT 500
-        """
-        event_rows = conn.execute(text(events_sql), params).mappings().all()
+        elif mmsi_key is not None and imo_key:
+            # Still fetch events on this MMSI for context, but scoring will not
+            # inherit another ship's sanctions via the shared MMSI.
+            clauses.append("mmsi = :mmsi")
+            params["mmsi"] = mmsi_key
+        event_rows = []
+        if clauses:
+            events_sql = f"""
+                SELECT * FROM ais_identity_event
+                WHERE {' OR '.join(clauses)}
+                ORDER BY ts_start DESC
+                LIMIT 500
+            """
+            event_rows = conn.execute(text(events_sql), params).mappings().all()
 
     events = [dict(r) for r in event_rows]
     # Prefer stored rating when lookback matches; else recompute from events.
@@ -455,7 +513,33 @@ def query_ship_risk(
             else rating_row.get("computed_at"),
         }
 
-    scored = score_ship(events, lookback_months=lookback_months, is_cargo_tanker=False)
+    # Live recompute: resolve this ship's list membership directly (IMO first,
+    # else MMSI) so API agrees with the job even when event flags are stale.
+    extra_lists: list[str] | None = None
+    try:
+        from sanctions import LIST_PRIORITY, load_ofac_indexes, match_vessel
+
+        by_imo_idx, by_mmsi_idx = load_ofac_indexes(engine)
+        hit = match_vessel(imo_key, mmsi_key, by_imo_idx, by_mmsi_idx)
+        if hit.get("sanctions_match"):
+            names = hit.get("list_names") or []
+            if not names and hit.get("sanctions_list"):
+                names = [hit["sanctions_list"]]
+            extra_lists = sorted(
+                {str(n) for n in names if n},
+                key=lambda n: LIST_PRIORITY.get(n, 99),
+            )
+    except Exception:
+        logger.exception("query_ship_risk sanctions lookup failed; scoring events only")
+
+    scored = score_ship(
+        events,
+        lookback_months=lookback_months,
+        is_cargo_tanker=False,
+        own_imo=imo_key,
+        own_mmsi=mmsi_key,
+        extra_sanctions_lists=extra_lists,
+    )
     return {
         "imo": imo_key,
         "mmsi": mmsi_key,

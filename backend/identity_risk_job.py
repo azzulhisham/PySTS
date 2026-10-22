@@ -134,14 +134,20 @@ def sanctions_for(
     imos: list[str | None],
     mmsi: int | None,
 ) -> tuple[bool, list[str]]:
+    """
+    Attribute sanctions to one ship identity only.
+
+    If any IMO is present, match IMO keys only (never inherit via shared MMSI
+    or a conflicting imo_other). If no IMO, match MMSI only.
+    """
     lists: list[str] = []
-    for imo in imos:
-        if not imo:
-            continue
-        for n in by_imo.get(imo, []):
-            if n not in lists:
-                lists.append(n)
-    if mmsi is not None:
+    primary_imos = [imo for imo in imos if imo]
+    if primary_imos:
+        for imo in primary_imos:
+            for n in by_imo.get(imo, []):
+                if n not in lists:
+                    lists.append(n)
+    elif mmsi is not None:
         for n in by_mmsi.get(str(int(mmsi)), []):
             if n not in lists:
                 lists.append(n)
@@ -402,8 +408,9 @@ def collect_lloyds_events(snaps: list[dict[str, Any]], by_imo, by_mmsi) -> list[
             conf = "high"
         else:
             conf = "low"
+        # Primary ship only (AIS IMO). Do not inherit lists from lloyds_imo / imo_other.
         match, lists = sanctions_for(
-            by_imo, by_mmsi, imos=[s["ais_imo"], s["lloyds_imo"]], mmsi=s["mmsi"]
+            by_imo, by_mmsi, imos=[s["ais_imo"]], mmsi=s["mmsi"]
         )
         # Anchor event time at start of snap day UTC for idempotent key.
         ts = datetime(s["snap_date"].year, s["snap_date"].month, s["snap_date"].day, tzinfo=timezone.utc)
@@ -478,7 +485,7 @@ def collect_multi_imo_static(engine, by_imo, by_mmsi) -> list[dict[str, Any]]:
         ts_start = earliest_ts
         if getattr(ts_start, "tzinfo", None) is None:
             ts_start = ts_start.replace(tzinfo=timezone.utc)
-        match, lists = sanctions_for(by_imo, by_mmsi, imos=imos, mmsi=mmsi)
+        match, lists = sanctions_for(by_imo, by_mmsi, imos=[imos[0]], mmsi=mmsi)
         events.append(
             {
                 "event_type": "mmsi_multi_imo_static",
@@ -565,7 +572,7 @@ def collect_static_evt_reuse(engine, by_imo, by_mmsi) -> list[dict[str, Any]]:
             ts_start = ts_start.replace(tzinfo=timezone.utc)
         if ts_end is not None and getattr(ts_end, "tzinfo", None) is None:
             ts_end = ts_end.replace(tzinfo=timezone.utc)
-        match, lists = sanctions_for(by_imo, by_mmsi, imos=imos, mmsi=mmsi)
+        match, lists = sanctions_for(by_imo, by_mmsi, imos=[imos[0]], mmsi=mmsi)
         events.append(
             {
                 "event_type": "mmsi_reused_static_evt",
@@ -621,13 +628,16 @@ def collect_reflag_events(engine, by_imo, by_mmsi) -> list[dict[str, Any]]:
         ts_full = pd_timestamp(detected)
         # Day-bucket for idempotent unique key across re-runs.
         ts = datetime(ts_full.year, ts_full.month, ts_full.day, tzinfo=timezone.utc)
-        match, lists = sanctions_for(by_imo, by_mmsi, imos=imos, mmsi=mmsi)
-        # Also inherit group-level sanctions from payload if present
-        if group.get("sanctionsMatch") and not match:
-            match = True
-            primary = group.get("sanctionsList")
-            if primary and primary not in lists:
-                lists = [primary] + lists
+        # Attribute to primary IMO only (first identity); not every IMO in the group.
+        match, lists = sanctions_for(by_imo, by_mmsi, imos=[imo], mmsi=mmsi)
+        # Group-level flag only when it refers to this primary ship.
+        if group.get("sanctionsMatch") and not match and imo:
+            group_imo = normalize_imo_text(group.get("imo")) or imo
+            if group_imo == imo:
+                match = True
+                primary = group.get("sanctionsList")
+                if primary and primary not in lists:
+                    lists = [primary] + lists
         events.append(
             {
                 "event_type": "reflag_dual_mmsi",
@@ -795,7 +805,13 @@ def _find_rating_key_for_sanctions(
     Resolve where a sanctioned ship should land.
 
     Returns (existing_or_preferred_key, rekey_to_imo).
-    Prefers IMO key; consolidates an existing MMSI-only row onto IMO when both exist.
+
+    - IMO-keyed sanctioned ships always keep imo:<their IMO>. Never merge onto
+      another IMO because of a shared MMSI.
+    - The only MMSI merge is consolidating an existing mmsi:<same> row onto this
+      IMO (same vessel, previously MMSI-only).
+    - MMSI-only sanctioned ships (no IMO) use mmsi:<MMSI> and do not merge onto
+      any imo:* row that happens to share the MMSI.
     """
     if preferred_key in ratings:
         return preferred_key, False
@@ -803,16 +819,11 @@ def _find_rating_key_for_sanctions(
         mmsi_key = f"mmsi:{int(mmsi)}"
         if mmsi_key in ratings:
             return mmsi_key, True
-        for key, row in ratings.items():
-            if row.get("mmsi") is not None and int(row["mmsi"]) == int(mmsi):
-                # Already under another IMO — do not create a second row.
-                return key, False
-    if preferred_key.startswith("mmsi:") and mmsi is not None:
-        for key, row in ratings.items():
-            if row.get("mmsi") is not None and int(row["mmsi"]) == int(mmsi):
-                return key, False
-            if imo and key == f"imo:{imo}":
-                return key, False
+        # Do not absorb into another ship's imo:* row.
+        return preferred_key, False
+    if preferred_key.startswith("mmsi:"):
+        # Own MMSI key only — never fold into an imo:* neighbour.
+        return preferred_key, False
     return preferred_key, False
 
 
@@ -824,11 +835,11 @@ def apply_sanctions_to_ratings(
     now: datetime,
 ) -> dict[str, int]:
     """
-    Ensure every sanctioned ship has a RED 100 rating.
+    Ensure every sanctioned ship has a RED 100 rating on its own ship_key.
 
     - Missing rating → insert RED 100, reason "sanctions match (LISTS)"
-    - Existing rating → force RED 100 (never downgrade), merge list names into reason
-    - One row per ship: IMO key wins over MMSI-only for the same vessel
+    - Existing rating for the same key → force RED 100 (never downgrade)
+    - IMO ships never share a row with a different IMO via MMSI
     """
     added = 0
     upgraded = 0
@@ -978,6 +989,8 @@ def recompute_ratings(
             lookback_months=lookback_months,
             is_cargo_tanker=cargo,
             now=now,
+            own_imo=m.get("imo"),
+            own_mmsi=m.get("mmsi"),
         )
         ratings[key] = {
             "ship_key": key,

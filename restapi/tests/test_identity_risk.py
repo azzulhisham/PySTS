@@ -204,6 +204,7 @@ def test_sanctioned_amber_upgraded_not_downgraded():
 
 
 def test_sanctions_imo_mmsi_dedupe_consolidates():
+    """Same vessel: MMSI-only event row may rekey onto imo: when sanctions supply IMO."""
     now = datetime(2026, 10, 22, tzinfo=timezone.utc)
     ratings = {
         "mmsi:538090000": {
@@ -245,6 +246,103 @@ def test_sanctions_imo_mmsi_dedupe_consolidates():
     assert ratings["imo:9058713"]["rating"] == "RED"
     assert ratings["imo:9058713"]["score"] == 100
     assert ratings["imo:9058713"]["imo"] == "9058713"
+
+
+def test_two_sanctioned_imos_shared_mmsi_two_red_rows():
+    """VIOLET 1 / PETERPAUL style: shared MMSI must not collapse two IMO rows."""
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    ratings = {
+        "imo:9163269": {
+            "ship_key": "imo:9163269",
+            "imo": "9163269",
+            "mmsi": 352900000,
+            "ship_name": "PETERPAUL",
+            "rating": "AMBER",
+            "score": 30,
+            "lookback_months": 24,
+            "mmsi_misuse": True,
+            "sanctions_match": False,
+            "sanctions_lists": None,
+            "event_count_window": 1,
+            "event_count_total": 1,
+            "latest_event_at": now,
+            "factors": {"reason": "low_mmsi_misuse", "sanctionsLists": []},
+            "rule_version": "v1",
+            "computed_at": now,
+        }
+    }
+    apply_sanctions_to_ratings(
+        ratings,
+        [
+            {
+                "ship_key": "imo:9163269",
+                "imo": "9163269",
+                "mmsi": 352900000,
+                "ship_name": "PETERPAUL",
+                "sanctions_lists": ["SDN"],
+            },
+            {
+                "ship_key": "imo:9154000",
+                "imo": "9154000",
+                "mmsi": 352900000,
+                "ship_name": "VIOLET 1",
+                "sanctions_lists": ["SDN"],
+            },
+        ],
+        lookback_months=24,
+        now=now,
+    )
+    assert set(ratings) == {"imo:9163269", "imo:9154000"}
+    assert ratings["imo:9154000"]["rating"] == "RED"
+    assert ratings["imo:9154000"]["score"] == 100
+    assert ratings["imo:9154000"]["factors"]["reason"] == "sanctions match (SDN)"
+    assert ratings["imo:9163269"]["rating"] == "RED"
+    assert ratings["imo:9163269"]["sanctions_lists"] == ["SDN"]
+
+
+def test_imo_other_link_does_not_flag_non_sanctioned():
+    """OXIS-style: peer on the list via imo_other must not RED the AIS IMO ship."""
+    now = datetime(2026, 10, 22, tzinfo=timezone.utc)
+    events = [
+        {
+            "event_type": "lloyds_mmsi_imo_conflict",
+            "confidence": "low",
+            "imo": "9258167",
+            "imo_other": "9224805",
+            "mmsi": 613612000,
+            "ts_start": now - timedelta(days=1),
+            # Contaminated flag as previously written when both IMOs were checked.
+            "sanctions_match": True,
+            "sanctions_lists": ["SDN", "UK"],
+        }
+    ]
+    scored = score_ship(
+        events,
+        lookback_months=24,
+        is_cargo_tanker=True,
+        now=now,
+        own_imo="9258167",
+        own_mmsi=613612000,
+    )
+    assert scored["rating"] == "AMBER"
+    assert scored["score"] == 30
+    assert scored["sanctions_match"] is False
+    assert scored["factors"]["reason"] == "low_mmsi_misuse"
+
+    # The sanctioned IMO itself, with list membership supplied explicitly.
+    scored_oxis = score_ship(
+        events,
+        lookback_months=24,
+        is_cargo_tanker=False,
+        now=now,
+        own_imo="9224805",
+        own_mmsi=613612000,
+        extra_sanctions_lists=["SDN", "UK"],
+    )
+    assert scored_oxis["rating"] == "RED"
+    assert scored_oxis["score"] == 100
+    assert scored_oxis["sanctions_match"] is True
+    assert scored_oxis["factors"]["reason"] == "sanctions match (SDN, UK)"
 
 
 def test_sanctioned_ship_key_prefers_imo():
