@@ -1,141 +1,124 @@
-# Build: identity risk Phase 5 vessel-timeline + vessel-track
+# Deploy: identity risk Phase 5 vessel-timeline + vessel-track (`e1c481c`)
 
-**Date (local):** 2026-10-23  
-**Mode:** LOCAL BUILD + TEST only — **no deploy, no push, no DDL, no pnav/ClickHouse writes, no JWT minting.**  
-**Prior report** (Phase 4 deploy) archived as [`reports/risk-payload-phase4-deploy.md`](risk-payload-phase4-deploy.md) in commit `92e0741` (reports-only).
-
-Phases 1–4 remain live on srv-01. This build adds identity risk to **`GET /mantis/vessel-timeline`** (JSON top-level once) and **`GET /mantis/vessel-track`** (**HTTP headers only**; NDJSON body unchanged).
+**Date (UTC):** 2026-10-23  
+**Commits pushed:** `bfb3239` → `92e0741` → `e1c481c`  
+**Host:** srv-01 `10.10.20.201` only (`/home/srvadmin/py/mantis`, `ais_mantis_api` `:8085`)  
+**Backup stamp:** `backup-20261023-075610`  
+**No DDL. No pnav writes. srv-dp / job / cron / polygons / pyvam-\* / ais_tss_aisposition / pycpm-processor untouched.**  
+Prior build report saved as [`reports/risk-payload-phase5-build.md`](risk-payload-phase5-build.md).
 
 ---
 
-## 1. Routes / files
+## 1. Push
 
-| Path | Change |
+| Item | Result |
 |------|--------|
-| `GET /mantis/vessel-timeline` | Top-level `riskRating`, `riskScore`, `riskReason` (not on `events[]`) |
-| `GET /mantis/vessel-track` | Response headers `X-Risk-Rating`, `X-Risk-Score`, `X-Risk-Reason` (+ `Access-Control-Expose-Headers`); **no** body / stream-line changes |
+| `git push origin main` | **OK** — `228c19b..e1c481c` (includes `bfb3239`, `92e0741`, `e1c481c`) |
 
-| File | Role |
+---
+
+## 2. Pre-copy safety diffs (srv-01 vs `228c19b`)
+
+| Remote file | vs `228c19b` | Action |
+|-------------|--------------|--------|
+| `ship_risk_attach.py` | **MATCH** | replace |
+| `timelineplayback.py` | **MATCH** | replace |
+| `main.py` | **MATCH** | replace |
+| `static/swagger.json` | **MATCH** | replace |
+
+**STOP condition not triggered.**
+
+---
+
+## 3. Backup (srv-01)
+
+| Item | Path |
 |------|------|
-| `restapi/ship_risk_attach.py` | `lookup_imo_for_mmsi`, `risk_for_mmsi`, `risk_payload_for_mmsi`, `risk_http_headers`, `encode_risk_reason_header` |
-| `restapi/timelineplayback.py` | Timeline payload spreads risk once |
-| `restapi/main.py` | Track resolves headers before `Response` / jsonify |
-| `restapi/static/swagger.json` | Timeline fields + track response headers documented; existing NDJSON sample unchanged |
-| `restapi/tests/test_ship_risk_phase5.py` | **new** |
+| Backup dir | `/home/srvadmin/py/mantis/backup-20261023-075610/` |
+| Prior code | `…/code/{ship_risk_attach,timelineplayback,main}.py` |
+| Prior swagger | `…/static/swagger.json` |
+| Manifest | `…/PRE_DEPLOY.txt` (`PREV_COMMIT=228c19b`, `NEW_COMMIT=e1c481c`) |
 
 ---
 
-## 2. Field / header list
+## 4. Files copied
 
-### Timeline (JSON body, additive)
+| Local → remote | Result |
+|----------------|--------|
+| `restapi/ship_risk_attach.py` | updated |
+| `restapi/timelineplayback.py` | updated |
+| `restapi/main.py` | updated |
+| `restapi/static/swagger.json` | updated |
 
-| Field | Placement |
-|-------|-----------|
-| `riskRating` | After `byEventType`, before `events` |
-| `riskScore` | same |
-| `riskReason` | same |
+Import check: **IMPORT_OK** — lookback 24, TTL 300; `risk_http_headers` / `risk_payload_for_mmsi` present.
 
-### Track (headers only)
-
-| Header | Value |
-|--------|--------|
-| `X-Risk-Rating` | `RED` / `AMBER` / `GREEN` |
-| `X-Risk-Score` | decimal string (`0`–`100`) |
-| `X-Risk-Reason` | percent-encoded reason; raw text truncated to **200** chars before encoding |
-| `Access-Control-Expose-Headers` | `X-Risk-Rating, X-Risk-Score, X-Risk-Reason` (so browsers can read them) |
-
-**Headers are workable** with Flask streaming: risk is resolved **before** the generator runs; headers are set on the `Response` at construction time. Stream lines are byte-identical to pre-change for a fixed fixture (unit test). No extra NDJSON line was added.
+`DEPLOYED_COMMIT.txt` → `e1c481c` / `BACKUP=backup-20261023-075610`.
 
 ---
 
-## 3. IMO lookup choice and cost
+## 5. Restart / health
 
-| Choice | Detail |
-|--------|--------|
-| Strategy | **One cheap indexed read** of latest `ais_static` row for the query MMSI (`ORDER BY ts DESC NULLS LAST, id DESC LIMIT 1`), then `match_risk(imo, mmsi)` (IMO first, else MMSI). |
-| On IMO lookup failure | Fall back to MMSI-only match (still via cache). |
-| On any risk failure | `GREEN` / `0` / `"none"`; request continues. |
-| Measured IMO lookup (cold, MMSI `312837000`) | ~**0.82 s** first call (includes PG pool); subsequent risk attach with warm cache ~**0.06–0.29 s** depending on path. |
-
-Rating computation / table / job **unchanged** — read-only use of `ship_risk_attach` cache (`lookback_months=24`, TTL 300 s).
+| Check | Result |
+|-------|--------|
+| `systemctl restart ais_mantis_api` | **OK** (07:56:20 UTC) |
+| `ais_mantis_api` | **active** (PID 1444484 → **1462290**) |
+| `pyvam-api` | **active**, PID **1390232** unchanged |
+| `pyvam-processor` | **active**, PID **1390231** unchanged |
+| `pyvam-dash` | **active**, PID **1390233** unchanged |
+| `GET http://127.0.0.1:8085/` | **401** |
+| journalctl ~2–3 min | gunicorn start OK; polygons loaded; Traceback count **0** |
+| Live traffic | `GET /mantis/sts-review/notifications` → **200** (existing client JWT; not minted by us) |
 
 ---
 
-## 4. Sample before / after
+## 6. Handler verification (no JWT)
 
-### Timeline
+### Phase 5
 
-**Before:** `mmsi`, `dateFrom`, `dateTo`, `eventCount`, `byEventType`, `events` (no risk keys).
+| Check | Result |
+|-------|--------|
+| Timeline AMINA `422035100` | **RED 100** — `sanctions match (SDN)`; 4 events; golden strip **OK** |
+| Track headers | `X-Risk-Rating=RED`, `X-Risk-Score=100`, reason decoded `sanctions match (SDN)` |
+| Track first NDJSON line | `type=meta`; **no** risk keys |
 
-**After — added only:**
+### Phases 1–4 still labelled
 
-```json
-{
-  "riskRating": "RED",
-  "riskScore": 100,
-  "riskReason": "sanctions match (SDN)"
-}
+| Check | Result |
+|-------|--------|
+| overview `riskRatedShipCount` | **2619** |
+| sanctions list | **1949** vessels; RED **1947** |
+| illegal-anchoring | RED **53** / AMBER **55** |
+| identity-conflict | RED **126** / AMBER **1,156** |
+
+---
+
+## 7. Rollback
+
+```bash
+# SSH as srvadmin@10.10.20.201
+BK=/home/srvadmin/py/mantis/backup-20261023-075610
+cp -a $BK/code/ship_risk_attach.py /home/srvadmin/py/mantis/ship_risk_attach.py
+cp -a $BK/code/timelineplayback.py /home/srvadmin/py/mantis/timelineplayback.py
+cp -a $BK/code/main.py /home/srvadmin/py/mantis/main.py
+cp -a $BK/static/swagger.json /home/srvadmin/py/mantis/static/swagger.json
+sudo systemctl restart ais_mantis_api
+# do not touch pyvam-* / srv-dp / cron / polygons
 ```
 
-(example: AMINA `422035100`)
-
-### Track stream body
-
-**Unchanged** — first line remains `{"type":"meta",...}` with **no** risk keys. Rating appears only in response headers.
-
 ---
 
-## 5. Tests
-
-| Suite | Result |
-|-------|--------|
-| `restapi/tests/test_ship_risk_phase5.py` | **8 passed** (timeline fields; GREEN fallback; golden strip; headers; reason encode/cap; stream source has no risk; fixture body byte-identical with headers layer) |
-| Full `restapi/tests` + `backend/tests` | **139 passed** (was 131) |
-
----
-
-## 6. Local size & timing
-
-| Endpoint | Metric | Before → after / notes |
-|----------|--------|-------------------------|
-| Timeline (`422035100` AMINA, 2-day, 4 events) | JSON size | 2,175 → 2,253 bytes (**+78**) |
-| Timeline AMINA | Latency | **0.53 s** wall (includes cold risk cache + IMO lookup ~**0.66 s** first IMO read) |
-| Timeline AMINA | Risk | **RED 100** — `sanctions match (SDN)` |
-| Timeline (`312837000`, 0 events) | Size delta | +61 bytes; risk GREEN (IMO `1033016` not in rating table) |
-| Track | Headers cold | **0.72 s** (cache load) |
-| Track | Time to first NDJSON line | cold **0.14 s**; warm **0.10 s** |
-| Track | TTF headers+first (cold) | **0.86 s** vs body-only first line **0.14 s** (header resolve is additive before stream) |
-| Track | First line contains `risk` | **false**; warm first lines equal |
-
----
-
-## 7. Risks / uncertainties
-
-| Item | Note |
-|------|------|
-| IMO present but not in rating table | Same Phase 1–4 rule: IMO-only lookup → GREEN (no MMSI fallback). Example: `312837000` reported IMO `1033016` → GREEN. |
-| `Access-Control-Expose-Headers` | Added so browser JS can read `X-Risk-*`. Additive; does not change body. |
-| Swagger JSON sample for track | Also gets the same three headers; JSON **body** still has no risk fields (per “headers only”). |
-| Deploy | **Not done** (by request). |
-
----
-
-## 8. Deploy steps (later — not done now)
-
-srv-01 only. Backup / copy: `ship_risk_attach.py`, `timelineplayback.py`, `main.py`, `static/swagger.json`. Restart **only** `ais_mantis_api`. Verify without JWT: call `get_vessel_activity_timeline` and `risk_http_headers` / stream first line on the server; confirm headers present and first NDJSON line has no risk keys. **Do not** touch srv-dp.
-
-Rollback: restore the four files from `backup-<stamp>/` and restart `ais_mantis_api`.
-
----
-
-## 9. Decision
+## 8. Decision
 
 | Item | Status |
 |------|--------|
-| Timeline top-level risk | Done |
-| Track headers only; body unchanged | Done (headers workable) |
-| IMO lookup documented | Done (§3) |
-| Tests + full suite | **139 passed** |
-| Push / deploy | **Not done** |
+| Push `bfb3239` + `92e0741` + `e1c481c` | Done |
+| Backup | `backup-20261023-075610` |
+| Diff vs `228c19b` | Clean |
+| Copy + import | Done |
+| Restart `ais_mantis_api` only | Done |
+| pyvam PIDs unchanged | Done |
+| No Tracebacks | Done |
+| Handler verify (no JWT) | Done — timeline RED; track headers; Phases 1–4 intact |
+| Rollback | Documented |
 
-**Ready for review** — deploy when approved.
+**GO** — Phase 5 identity-risk fields live on vessel-timeline and vessel-track (headers) on srv-01.
