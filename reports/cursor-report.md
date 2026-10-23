@@ -1,194 +1,126 @@
-# Build: identity risk in Phase 4 overview + sanctions payloads
+# Deploy: identity risk Phase 4 overview + sanctions (`228c19b`)
 
-**Date (local):** 2026-10-23  
-**Mode:** LOCAL BUILD + TEST only — **no deploy, no push, no DDL, no pnav writes, no JWT minting.**  
-**Prior report** (Phase 3 deploy) archived as [`reports/risk-payload-phase3-deploy.md`](risk-payload-phase3-deploy.md) in commit `6ba1a3b` (reports-only).
-
-Phases 1–3 (`c7a5bd5`, `298a5d2`, `7f52efb`) remain live. This build adds summary risk counts to **`/mantis/overview`** and per-ship risk fields to **`/mantis/sanctions`**, reusing `ship_risk_attach.py`.
-
----
-
-## 1. Routes covered
-
-| Path | Method | Handler | Module | What changed |
-|------|--------|---------|--------|--------------|
-| `/mantis/overview` | GET | `get_mantis_overview` | `main.py` → `mantis_overview.detect_mantis_overview` | Summary counts only (no per-ship lists) |
-| `/mantis/sanctions` | GET | `get_sanctions_list` | `main.py` → `sanctions.query_ofac_vessels` | Risk on each `vessels[]` item + list totals |
+**Date (UTC):** 2026-10-23  
+**Commits pushed:** `c8bc22e` → `6ba1a3b` → `228c19b`  
+**Host:** srv-01 `10.10.20.201` only (`/home/srvadmin/py/mantis`, `ais_mantis_api` `:8085`)  
+**Backup stamp:** `backup-20261023-073511`  
+**No DDL. No pnav writes. srv-dp untouched (including its `sanctions.py`). job / cron / polygons / pyvam-\* / ais_tss_aisposition / pycpm-processor untouched.**  
+Prior build report saved as [`reports/risk-payload-phase4-build.md`](risk-payload-phase4-build.md).
 
 ---
 
-## 2. New fields (additive only)
+## 1. Push
 
-### `/mantis/overview`
-
-| Location | Fields | Scope |
-|----------|--------|-------|
-| Top-level | `riskRatedShipCount` | **Whole** `ais_ship_risk_rating` table for lookback 24 (IMO keys + MMSI keys in the process cache). **Not** limited to ships currently in overview modules. |
-| Each module block (`darkVessels`, `stsActivities`, `illegalAnchoring`, `spoofing`) | `riskRedCount`, `riskAmberCount` (after existing `sanctionsMatch*` counts) | **Same scope as that module’s sanctions counts** — ships/rows in that detector’s current summary result (dark candidates; STS **paired vessels**; illegal candidates; spoofing anomalies). |
-
-No per-ship arrays added to overview.
-
-### `/mantis/sanctions`
-
-| Location | Fields |
-|----------|--------|
-| Each `vessels[]` item | `riskRating`, `riskScore`, `riskReason` after existing list fields (`publishDate` …) |
-| Response top-level | `riskRedCount`, `riskAmberCount` over the returned vessel list |
-
-**Defaults / failure:** missing row or cache/attach failure → `GREEN` / `0` / `"none"`; overview module counts → `0`; `riskRatedShipCount` → `0`; request must not fail.
-
-**Lookup:** unchanged — `imo:<IMO>` first, else `mmsi:<MMSI>`.
-
----
-
-## 3. Sample before / after
-
-### Overview module (dark vessels excerpt)
-
-**Before:** … `sanctionsMatchCount` (no risk keys).
-
-**After — added:**
-
-```json
-{
-  "riskRedCount": 10,
-  "riskAmberCount": 8
-}
-```
-
-**Top-level added:** `"riskRatedShipCount": 2619`
-
-### Sanctions vessel
-
-**Before:**
-
-```json
-{
-  "imo": "8898831",
-  "mmsi": null,
-  "vesselName": "7-28",
-  "listName": "SDN",
-  "publishDate": "…"
-}
-```
-
-**After — keys added only:**
-
-```json
-{
-  "riskRating": "RED",
-  "riskScore": 100,
-  "riskReason": "sanctions match (SDN)"
-}
-```
-
----
-
-## 4. Sanctions list RED / AMBER / GREEN breakdown (local full list)
-
-| Metric | Value |
-|--------|------:|
-| Listed vessels returned | **1,949** |
-| RED | **1,947** |
-| AMBER | **0** |
-| GREEN | **2** |
-
-### GREEN while still on the sanctions list (lookup gap)
-
-These rows have **no IMO and no MMSI**, so identity-risk lookup cannot key the rating table → default GREEN / `none`. Not a scoring bug; an identifier gap on the ingested OFAC vessel row.
-
-| vesselName | listName | imo | mmsi | riskReason |
-|------------|----------|-----|------|------------|
-| BONU 5 | SDN | null | null | none |
-| MAR AZUL | SDN | null | null | none |
-
----
-
-## 5. Tests
-
-| Suite | Result |
-|-------|--------|
-| `restapi/tests/test_ship_risk_phase4.py` | **7 passed** (overview summaries + rated count + golden strip; sanctions fields, GREEN fallback, golden strip, key order) |
-| Full `restapi/tests` + `backend/tests` | **131 passed** |
-
----
-
-## 6. Local size & timing (read-only pnav; statement_timeout 15s)
-
-Risk cache: **2,599** IMO + **20** MMSI → `riskRatedShipCount` **2,619**; load ~**0.84 s** (cold).
-
-| Endpoint | Scope | riskRed / riskAmber | Size before → after | Δ bytes | Timing |
-|----------|-------|--------------------:|---------------------|--------:|--------|
-| `GET` sanctions (via `query_ofac_vessels`) | **1,949** vessels | **1,947** / **0** | 1,021,959 → 1,176,108 | **+154,149** | first **1.41 s**; warm **1.08 s** |
-| `GET` overview | summary only; rated **2,619** | per-module (see below) | 2,323 → 2,514 | **+191** | first (includeSpoofing false) **8.7 s**; overview TTL warm **~0.0 s** (`cached=true`) |
-
-Overview module spot (this run): dark RED **10** / AMBER **8** (sanctions **10**); STS **0/0**; illegal RED **53** / AMBER **55** (sanctions **53**); spoofing RED **3** / AMBER **0** (sanctions **3**).
-
-Golden: strip identity-risk keys → pre-existing keys/values unchanged (unit tests).
-
----
-
-## 7. Files changed (this build)
-
-| Path | Change |
+| Item | Result |
 |------|--------|
-| `restapi/mantis_overview.py` | module `riskRedCount`/`riskAmberCount`; top `riskRatedShipCount` |
-| `restapi/sanctions.py` | attach risk on OFAC list; emit per-vessel risk + list counts |
-| `restapi/ship_risk_attach.py` | `rated_ship_count`; strip includes `riskRatedShipCount` |
-| `restapi/main.py` | expose sanctions `riskRedCount` / `riskAmberCount` |
-| `restapi/static/swagger.json` | overview + OfacVessel / SanctionsListResponse |
-| `restapi/tests/test_ship_risk_phase4.py` | **new** |
+| `git push origin main` | **OK** — `5032970..228c19b` (includes `c8bc22e`, `6ba1a3b`, `228c19b`) |
 
 ---
 
-## 8. Deploy steps (later — **not** done now)
+## 2. Pre-copy safety diffs (srv-01 vs `7f52efb`)
 
-srv-01 only (`/home/srvadmin/py/mantis`, flat layout). **Do not** touch srv-dp, job, cron, polygons, pyvam-\*.
+Every file to be replaced was SHA-256 compared to `git show 7f52efb:restapi/…`.
 
-1. Push the Phase 4 commit when approved.
-2. Backup into `backup-<UTC stamp>/` with `PRE_DEPLOY.txt`:  
-   `mantis_overview.py`, `sanctions.py`, `ship_risk_attach.py`, `main.py`, `static/swagger.json`.
-3. Diff each server file against the last deployed git baseline (`7f52efb`); **STOP** if dirty.
-4. Copy the five files (flat names; swagger under `static/`).
-5. Import check with service Python from `/home/srvadmin/py/mantis` (source `mantis.env`, do not echo).
-6. `sudo systemctl restart ais_mantis_api` only; confirm `ais_mantis_api` and `pyvam-*` active; `GET http://127.0.0.1:8085/` → **401**.
-7. **Verification without minting a token** — call handlers directly:
+| Remote file | vs `7f52efb` | Action |
+|-------------|--------------|--------|
+| `mantis_overview.py` | **MATCH** | replace |
+| `sanctions.py` | **MATCH** | replace |
+| `ship_risk_attach.py` | **MATCH** | replace |
+| `main.py` | **MATCH** | replace |
+| `static/swagger.json` | **MATCH** | replace |
 
-```bash
-set -a; source /home/srvadmin/py/mantis/mantis.env; set +a
-cd /home/srvadmin/py/mantis
-export PYTHONPATH=$PWD
-/usr/bin/python3 - <<'PY'
-from mantis_overview import detect_mantis_overview
-from sanctions import query_ofac_vessels
-from ship_risk_attach import strip_risk_keys
-import json
+**STOP condition not triggered.**
 
-o = detect_mantis_overview(include_spoofing=False)
-assert "riskRatedShipCount" in o
-for key in ("darkVessels", "stsActivities", "illegalAnchoring"):
-    sec = o.get(key) or {}
-    assert "riskRedCount" in sec and "riskAmberCount" in sec
-    assert "sanctionsMatchCount" in sec or "sanctionsMatchVesselCount" in sec
-print("OK overview", o["riskRatedShipCount"], {k: (o[k] or {}).get("riskRedCount") for k in ("darkVessels","stsActivities","illegalAnchoring")})
+### `sanctions.py`: srv-01 vs srv-dp (read-only)
 
-s = query_ofac_vessels()
-v = s["vessels"][0]
-assert set(v) >= {"riskRating", "riskScore", "riskReason", "listName"}
-assert "risk_red_count" in s
-stripped = strip_risk_keys({"vessels": s["vessels"], "riskRedCount": s["risk_red_count"], "riskAmberCount": s["risk_amber_count"]})
-assert "riskRating" not in json.dumps(stripped)
-print("OK sanctions", len(s["vessels"]), s["risk_red_count"], s["risk_amber_count"], v.get("riskRating"))
-PY
-```
+| Location | Path | SHA-256 | vs git |
+|----------|------|---------|--------|
+| srv-01 **before** deploy | `/home/srvadmin/py/mantis/sanctions.py` | `20b607fd…` | = `7f52efb` |
+| srv-01 **after** deploy | same | `98108310…` | = `228c19b` |
+| srv-dp (untouched) | `/home/srvadmin/sts/restapi/sanctions.py` | `20b607fd…` | = `7f52efb` (pre–Phase 4) |
+
+**srv-01 and srv-dp `sanctions.py` now differ** (by design): API host has Phase 4 attach; job host keeps the prior copy for `identity_risk_job`. srv-dp was only hashed; nothing was written or restarted there.
 
 ---
 
-## 9. Rollback
+## 3. Backup (srv-01)
+
+| Item | Path |
+|------|------|
+| Backup dir | `/home/srvadmin/py/mantis/backup-20261023-073511/` |
+| Prior code | `…/code/{mantis_overview,sanctions,ship_risk_attach,main}.py` |
+| Prior swagger | `…/static/swagger.json` |
+| Manifest | `…/PRE_DEPLOY.txt` (`PREV_COMMIT=7f52efb`, `NEW_COMMIT=228c19b`) |
+
+---
+
+## 4. Files copied (flat layout)
+
+| Local → remote | Result |
+|----------------|--------|
+| `restapi/mantis_overview.py` | updated |
+| `restapi/sanctions.py` | updated |
+| `restapi/ship_risk_attach.py` | updated |
+| `restapi/main.py` | updated |
+| `restapi/static/swagger.json` | updated |
+
+Import check (service Python + `mantis.env`, no secret echo): **IMPORT_OK** — lookback 24, TTL 300; `rated_ship_count` present.
+
+`DEPLOYED_COMMIT.txt` → `228c19b` / `BACKUP=backup-20261023-073511`.
+
+---
+
+## 5. Restart / health
+
+| Check | Result |
+|-------|--------|
+| `systemctl restart ais_mantis_api` | **OK** (07:35:21 UTC) |
+| `ais_mantis_api` | **active** (PID 1409830 → **1444484**) |
+| `pyvam-api` | **active**, PID **1390232** unchanged |
+| `pyvam-processor` | **active**, PID **1390231** unchanged |
+| `pyvam-dash` | **active**, PID **1390233** unchanged |
+| `GET http://127.0.0.1:8085/` | **401** |
+| journalctl ~2–3 min | gunicorn start OK; polygons loaded; Traceback count **0** |
+| Live traffic | `GET /mantis/sts-review/notifications` → **200** (existing client JWT; not minted by us) |
+
+---
+
+## 6. Handler verification (no JWT — direct Python on srv-01)
+
+### Overview
+
+| Check | Result |
+|-------|--------|
+| `riskRatedShipCount` | **2619** |
+| Module `riskRedCount` / `riskAmberCount` | present on dark / STS / illegal |
+| Existing sanctions counts | still present (dark sanctions **9**; STS vessel **0**; illegal **51**) |
+| Module spot | dark RED **9** / AMBER **7**; STS RED **0** / AMBER **1**; illegal RED **53** / AMBER **55** |
+
+### Sanctions
+
+| Check | Result |
+|-------|--------|
+| Vessel count | **1949** |
+| RED / AMBER | **1947** / **0** |
+| GREEN listed | **BONU 5**, **MAR AZUL** (null IMO/MMSI) |
+| Golden strip | **OK** — pre-existing keys/values unchanged |
+
+### Phases 1–3 still labelled
+
+| Check | Result |
+|-------|--------|
+| illegal-anchoring | RED **53** / AMBER **55** (sanctions **53**) |
+| identity-conflict | RED **126** / AMBER **1,156** |
+| AMINA vessel-analysis | **RED 100** — `sanctions match (SDN)` |
+| sts-review list | risk fields present (page sample AMBER **1**) |
+
+---
+
+## 7. Rollback
 
 ```bash
-# SSH srvadmin@10.10.20.201
-BK=/home/srvadmin/py/mantis/backup-<stamp>
+# SSH as srvadmin@10.10.20.201
+BK=/home/srvadmin/py/mantis/backup-20261023-073511
 cp -a $BK/code/mantis_overview.py /home/srvadmin/py/mantis/mantis_overview.py
 cp -a $BK/code/sanctions.py /home/srvadmin/py/mantis/sanctions.py
 cp -a $BK/code/ship_risk_attach.py /home/srvadmin/py/mantis/ship_risk_attach.py
@@ -200,15 +132,19 @@ sudo systemctl restart ais_mantis_api
 
 ---
 
-## 10. Decision
+## 8. Decision
 
 | Item | Status |
 |------|--------|
-| Routes listed | Done (§1) |
-| Additive fields + scoped counts documented | Done (§2–4) |
-| GREEN sanctioned gaps listed | Done (§4) — 2 ships, null IMO/MMSI |
-| Tests + full suite | **131 passed** |
-| Size / timing | Done (§6) |
-| Push / deploy | **Not done** (by request) |
+| Push `c8bc22e` + `6ba1a3b` + `228c19b` | Done |
+| Backup | `backup-20261023-073511` |
+| Diff vs `7f52efb` | Clean |
+| srv-dp `sanctions.py` left at `7f52efb` hash | Confirmed (differs from srv-01 after deploy) |
+| Copy + import | Done |
+| Restart `ais_mantis_api` only | Done |
+| pyvam PIDs unchanged | Done |
+| No Tracebacks | Done |
+| Handler verify (no JWT) | Done — overview + sanctions + Phases 1–3 |
+| Rollback | Documented |
 
-**Ready for review** — deploy when approved.
+**GO** — Phase 4 identity-risk fields live on `/mantis/overview` and `/mantis/sanctions` on srv-01.
