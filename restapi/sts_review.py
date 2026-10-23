@@ -19,6 +19,7 @@ from sqlalchemy.engine import Engine
 
 from ais_identity import clean_ship_name, is_valid_ship_mmsi
 from pg_engine import get_pg_engine
+from ship_risk_attach import load_risk_indexes, match_risk
 
 MIN_SUSPICION_SCORE = 4.5
 REVIEW_CLASSES = frozenset({
@@ -147,26 +148,71 @@ def _iso_z(value: Any) -> str | None:
     return None if iso is None else iso.replace("+00:00", "Z")
 
 
-def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
+def _enrich_members_with_risk(
+    members: list[Any],
+    by_imo: dict[str, dict[str, Any]],
+    by_mmsi: dict[str, dict[str, Any]],
+) -> tuple[list[Any], int]:
+    """
+    Append current identity-risk fields onto stored member snapshots (read-time only).
+
+    Stored sanctionsMatch / matchConfidence / sanctionsList on the member stay as
+    captured when the case was written. riskRating/Score/Reason are live from
+    ais_ship_risk_rating via the process cache.
+    """
+    enriched: list[Any] = []
+    risk_red = 0
+    for member in members or []:
+        if not isinstance(member, dict):
+            enriched.append(member)
+            continue
+        item = dict(member)
+        if "shipName" in item:
+            item["shipName"] = clean_ship_name(item.get("shipName"))
+        hit = match_risk(item.get("imo"), item.get("mmsi"), by_imo, by_mmsi)
+        item["riskRating"] = hit["rating"]
+        item["riskScore"] = int(hit["score"])
+        item["riskReason"] = hit["reason"]
+        if hit["rating"] == "RED":
+            risk_red += 1
+        enriched.append(item)
+    return enriched, risk_red
+
+
+def risk_counts_from_cases(cases: list[dict[str, Any]]) -> dict[str, int]:
+    """List-level RED/AMBER counts over member ships in the returned cases page."""
+    red = amber = 0
+    for case in cases:
+        for member in case.get("members") or []:
+            if not isinstance(member, dict):
+                continue
+            rating = member.get("riskRating")
+            if rating == "RED":
+                red += 1
+            elif rating == "AMBER":
+                amber += 1
+    return {"risk_red_count": red, "risk_amber_count": amber}
+
+
+def cases_to_payload(
+    frame: pd.DataFrame,
+    engine: Engine | None = None,
+) -> list[dict[str, Any]]:
     records = []
     if frame.empty:
         return records
+    # One cache load for the page; never fails the request (empty indexes → GREEN).
+    try:
+        by_imo, by_mmsi = load_risk_indexes(engine)
+    except Exception:
+        by_imo, by_mmsi = {}, {}
     for _, row in frame.iterrows():
         members = row.get("members")
         if isinstance(members, str):
             members = json.loads(members)
         elif members is None or (isinstance(members, float) and pd.isna(members)):
             members = []
-        cleaned_members = []
-        for member in members or []:
-            if not isinstance(member, dict):
-                cleaned_members.append(member)
-                continue
-            item = dict(member)
-            if "shipName" in item:
-                item["shipName"] = clean_ship_name(item.get("shipName"))
-            cleaned_members.append(item)
-        members = cleaned_members
+        members, risk_red_count = _enrich_members_with_risk(members or [], by_imo, by_mmsi)
         port_name = _clean(row.get("port_area_name"))
         terminal_name = _clean(row.get("port_area_terminal_name"))
         berth_name = _clean(row.get("berth_name"))
@@ -204,7 +250,8 @@ def cases_to_payload(frame: pd.DataFrame) -> list[dict[str, Any]]:
             "loiterOverlap": bool(_clean(row.get("loiter_overlap"))),
             "anchorSwingOverlap": bool(_clean(row.get("anchor_swing_overlap"))),
             "spoofOverlap": bool(_clean(row.get("spoof_overlap"))),
-            "members": members or [],
+            "riskRedCount": int(risk_red_count),
+            "members": members,
         })
     return records
 
@@ -430,7 +477,8 @@ def list_notifications(
     if area == "anchorage" and not frame.empty:
         frame = _in_anchorage_screen(frame)
     frame, harbour_stats, _ = _annotate_and_filter_cases(frame, include_in_port=include_in_port)
-    cases = cases_to_payload(frame)
+    cases = cases_to_payload(frame, engine=engine)
+    risk = risk_counts_from_cases(cases)
     return {
         "area": area,
         "since": _iso_z(since),
@@ -440,6 +488,8 @@ def list_notifications(
         "scanned_count": scanned,
         "notification_count": len(cases),
         "sanctions_match_count": sum(1 for case in cases if case["sanctionsMatch"]),
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "include_in_port": include_in_port,
         **harbour_stats,
         "cases": cases,
@@ -484,12 +534,15 @@ def list_unreviewed(
         )
     # Flag only — same rows / order / page size as the SQL page (main behaviour).
     frame, harbour_stats = _annotate_cases(frame)
-    cases = cases_to_payload(frame)
+    cases = cases_to_payload(frame, engine=engine)
+    risk = risk_counts_from_cases(cases)
     return {
         "date_from": None if date_from is None else date_from.astimezone(timezone.utc).isoformat(),
         "date_to": None if date_to is None else date_to.astimezone(timezone.utc).isoformat(),
         "case_count": total,
         **harbour_stats,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,
     }
@@ -514,12 +567,15 @@ def list_unexplained(
         )
     # Flag only — same rows / order / page size as the SQL page (main behaviour).
     frame, harbour_stats = _annotate_cases(frame)
-    cases = cases_to_payload(frame)
+    cases = cases_to_payload(frame, engine=engine)
+    risk = risk_counts_from_cases(cases)
     total = int(counts["case_count"])
     return {
         "min_suspicion_score": float(min_suspicion_score),
         "case_count": total,
         "sanctions_match_count": int(counts["sanctions_match_count"]),
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         **harbour_stats,
         **_page_fields(page, page_size, total, len(cases)),
         "cases": cases,

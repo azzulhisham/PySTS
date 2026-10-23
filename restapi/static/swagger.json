@@ -1725,6 +1725,19 @@
           "onBunkerList": {
             "type": "boolean",
             "description": "Always false until a bunker register is connected."
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"],
+            "description": "Current identity risk from ais_ship_risk_rating (lookback 24), attached at read time. Not stored on the case. GREEN when no row."
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -1856,6 +1869,11 @@
           "spoofOverlap": {
             "type": "boolean"
           },
+          "riskRedCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many members in this case currently have riskRating RED (0–N)."
+          },
           "members": {
             "type": "array",
             "items": {
@@ -1875,6 +1893,14 @@
           "sanctionsMatchCount": {
             "type": "integer",
             "description": "Matching cases with a sanctioned member, across all pages."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Members on this page with identity riskRating RED (current rating)."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Members on this page with identity riskRating AMBER (current rating)."
           },
           "caseCount": {
             "type": "integer",
@@ -1942,6 +1968,14 @@
           "caseCount": {
             "type": "integer",
             "description": "Cases matching the query across all pages."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Members on this page with identity riskRating RED (current rating)."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Members on this page with identity riskRating AMBER (current rating)."
           },
           "totalCount": {
             "type": "integer",
@@ -2389,6 +2423,14 @@
           },
           "sanctionsMatchCount": {
             "type": "integer"
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Members in this notification batch with identity riskRating RED (current rating)."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Members in this notification batch with identity riskRating AMBER (current rating)."
           },
           "totalCount": {
             "type": "integer",
