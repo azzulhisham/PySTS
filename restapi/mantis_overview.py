@@ -20,6 +20,7 @@ from typing import Any
 from dark_vessels import detect_dark_vessels
 from illegal_anchoring import detect_illegal_anchoring
 from pg_engine import get_pg_engine
+from ship_risk_attach import rated_ship_count
 from spoofing import detect_spoofing
 from sts_detection import detect_sts_in_anchorages
 from sts_review import MIN_SUSPICION_SCORE
@@ -67,6 +68,9 @@ def _dark_vessels_summary(result: dict[str, Any]) -> dict[str, Any]:
         "mediumConfidenceCount": _conf_count(by_conf, "medium"),
         "lowConfidenceCount": _conf_count(by_conf, "low"),
         "sanctionsMatchCount": result["sanctions_match_count"],
+        # Same scope as sanctionsMatchCount: dark-vessel candidates in this overview run.
+        "riskRedCount": int(result.get("risk_red_count") or 0),
+        "riskAmberCount": int(result.get("risk_amber_count") or 0),
     }
 
 
@@ -80,6 +84,9 @@ def _sts_summary(result: dict[str, Any]) -> dict[str, Any]:
         "pairedVesselCount": result["paired_vessel_count"],
         "sanctionsMatchPairCount": result["sanctions_match_pair_count"],
         "sanctionsMatchVesselCount": result["sanctions_match_vessel_count"],
+        # Same scope as sanctionsMatchVesselCount: paired vessels in this overview run.
+        "riskRedCount": int(result.get("risk_red_count") or 0),
+        "riskAmberCount": int(result.get("risk_amber_count") or 0),
     }
 
 
@@ -99,6 +106,9 @@ def _illegal_anchoring_summary(result: dict[str, Any]) -> dict[str, Any]:
         "watchPolygonCount": result["watch_polygon_count"],
         "portLimitPolygonCount": result["port_limit_polygon_count"],
         "sanctionsMatchCount": result["sanctions_match_count"],
+        # Same scope as sanctionsMatchCount: illegal-anchoring candidates in this overview run.
+        "riskRedCount": int(result.get("risk_red_count") or 0),
+        "riskAmberCount": int(result.get("risk_amber_count") or 0),
     }
 
 
@@ -127,6 +137,9 @@ def _spoofing_summary(result: dict[str, Any]) -> dict[str, Any]:
         "teleportCount": _reason_count(by_reason, "teleport"),
         "highSpeedCount": _reason_count(by_reason, "high_speed"),
         "sanctionsMatchCount": result["sanctions_match_count"],
+        # Same scope as sanctionsMatchCount: spoofing anomalies in this overview run.
+        "riskRedCount": int(result.get("risk_red_count") or 0),
+        "riskAmberCount": int(result.get("risk_amber_count") or 0),
     }
 
 
@@ -261,8 +274,15 @@ def detect_mantis_overview(
     timing_ms: dict[str, float] = {}
     errors: dict[str, str] = {}
 
+    # Whole ais_ship_risk_rating table (lookback 24), not scoped to overview modules.
+    try:
+        rated = rated_ship_count(engine)
+    except Exception:
+        rated = 0
+
     out: dict[str, Any] = {
         "generatedAt": generated_at,
+        "riskRatedShipCount": int(rated),
         "darkVessels": None,
         "stsActivities": None,
         "illegalAnchoring": None,

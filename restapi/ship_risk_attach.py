@@ -255,9 +255,31 @@ def risk_counts(df: pd.DataFrame, *, rating_col: str = "risk_rating") -> dict[st
     }
 
 
+def rated_ship_count(engine: Engine | None = None) -> int:
+    """
+    Rows in the cached ais_ship_risk_rating indexes (lookback 24).
+
+    Counts IMO keys + MMSI keys (one entry per ship_key). Load failure → 0.
+    """
+    try:
+        by_imo, by_mmsi = load_risk_indexes(engine)
+        return int(len(by_imo) + len(by_mmsi))
+    except Exception:
+        logger.warning("rated_ship_count failed — returning 0", exc_info=True)
+        return 0
+
+
 # Identity-risk JSON keys only — do not strip spoofing `riskLevel` on vessel-analysis events.
 _IDENTITY_RISK_JSON_KEYS = frozenset(
-    {"riskRating", "riskScore", "riskReason", "riskRedCount", "riskAmberCount", "riskRatingMax"}
+    {
+        "riskRating",
+        "riskScore",
+        "riskReason",
+        "riskRedCount",
+        "riskAmberCount",
+        "riskRatingMax",
+        "riskRatedShipCount",
+    }
 )
 
 

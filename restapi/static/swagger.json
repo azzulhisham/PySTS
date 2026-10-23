@@ -862,6 +862,14 @@
           "coverageExitCount": { "type": "integer", "description": "dark_reason = possible_coverage_exit" },
           "highConfidenceCount": { "type": "integer" },
           "sanctionsMatchCount": { "type": "integer" },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Candidates in this module summary with identity riskRating RED (same scope as sanctionsMatchCount)."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Candidates in this module summary with identity riskRating AMBER."
+          },
           "byReason": { "type": "object", "additionalProperties": { "type": "integer" } },
           "byConfidence": { "type": "object", "additionalProperties": { "type": "integer" } }
         }
@@ -870,6 +878,10 @@
         "type": "object",
         "properties": {
           "generatedAt": { "type": "string", "format": "date-time" },
+          "riskRatedShipCount": {
+            "type": "integer",
+            "description": "Rows in ais_ship_risk_rating for lookback_months=24 (whole rating table via process cache). Not scoped to overview modules."
+          },
           "partial": { "type": "boolean", "description": "True if one or more modules failed; see errors." },
           "darkVessels": { "$ref": "#/components/schemas/MantisOverviewDarkVessels" },
           "stsActivities": { "type": "object" },
@@ -1586,6 +1598,19 @@
           "publishDate": {
             "type": "string",
             "nullable": true
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"],
+            "description": "Identity risk from ais_ship_risk_rating (lookback 24). GREEN when no row."
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -1601,6 +1626,14 @@
             "type": "string",
             "nullable": true,
             "description": "Normalized MMSI used for the search, if provided."
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Listed vessels in this response with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Listed vessels in this response with identity riskRating AMBER."
           },
           "totalCount": {
             "type": "integer",

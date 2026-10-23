@@ -789,6 +789,8 @@ def get_sanctions_list():
         payload = {
             "imo": result["imo"],
             "mmsi": result["mmsi"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "vessels": result["vessels"],
         }
         return jsonify(json_for_client(payload, ["vessels"])), 200

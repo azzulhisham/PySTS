@@ -752,6 +752,9 @@ def ofac_vessels_to_payload(df: pd.DataFrame) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     if df.empty:
         return records
+    # Lazy import: ship_risk_attach imports normalize_* from this module.
+    from ship_risk_attach import risk_payload_fields
+
     for _, row in df.iterrows():
         list_name = None if pd.isna(row.get("list_name")) else row.get("list_name")
         list_names = _json_list(row.get("list_names")) if "list_names" in row.index else None
@@ -772,6 +775,7 @@ def ofac_vessels_to_payload(df: pd.DataFrame) -> list[dict[str, Any]]:
                 "programs": _json_list(row.get("programs")),
                 "remarks": None if pd.isna(row.get("remarks")) else row.get("remarks"),
                 "publishDate": None if pd.isna(row.get("publish_date")) else str(row.get("publish_date")),
+                **risk_payload_fields(row),
             }
         )
     return records
@@ -790,6 +794,9 @@ def query_ofac_vessels(
     If sample_limit is set and the filtered result is larger, only that many
     rows are returned (Swagger UI). Full list for curl / frontend / MCP.
     """
+    # Lazy import avoids cycle with ship_risk_attach → sanctions.normalize_*.
+    from ship_risk_attach import attach_risk_ratings, risk_counts
+
     engine = engine or get_pg_engine()
     df = _filter_ofac_vessels(load_ofac_vessel_list(engine), imo, mmsi)
     total = int(len(df))
@@ -797,6 +804,17 @@ def query_ofac_vessels(
     if sample_limit is not None and total > sample_limit:
         df = df.head(int(sample_limit)).reset_index(drop=True)
         sampled = True
+    # Identity risk at read time via process cache (never fails the request).
+    try:
+        df = attach_risk_ratings(df, engine)
+    except Exception:
+        logger.warning("OFAC list risk attach failed — GREEN defaults", exc_info=True)
+        if not df.empty:
+            df = df.copy()
+            df["risk_rating"] = "GREEN"
+            df["risk_score"] = 0
+            df["risk_reason"] = "none"
+    risk = risk_counts(df)
     return {
         "imo": normalize_imo(imo),
         "mmsi": normalize_mmsi(mmsi),
@@ -805,5 +823,7 @@ def query_ofac_vessels(
         "sample": sampled,
         "sample_limit": int(sample_limit) if sampled else None,
         "message": SWAGGER_SAMPLE_MESSAGE if sampled else None,
+        "risk_red_count": risk["risk_red_count"],
+        "risk_amber_count": risk["risk_amber_count"],
         "vessels": ofac_vessels_to_payload(df),
     }
