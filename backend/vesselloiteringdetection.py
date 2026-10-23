@@ -90,7 +90,7 @@ else:
         "port_areas import failed; loitering will not apply harbour exclusions"
     )
 
-DETECTION_VERSION = "1.1-loiter-circle-6nm"
+DETECTION_VERSION = "1.2-loiter-motion-metrics"
 LOOP_INTERVAL_SECONDS = int(os.environ.get("loiter_loop_seconds", "900"))
 LOOKBACK_HOURS = 2
 MIN_SPAN_SECONDS = 2 * 3600
@@ -104,6 +104,23 @@ STS_LOOKAHEAD_HOURS = 6
 STS_MAX_DISTANCE_M = 5 * 1852.0
 PLACE_MATCH_M = 2 * 1852.0
 MMSI_CHUNK = 1500
+
+# Motion evidence (informational only — does not change which events are detected).
+SOG_UNAVAILABLE_KN = 102.0  # AIS "not available" is 102.3; treat >= 102 as missing
+HEADING_UNAVAILABLE = 511
+SOG_CHANGE_THRESHOLD_KN = 0.5  # consecutive 5-min buckets
+HEADING_CHANGE_THRESHOLD_DEG = 45.0  # mid of 30–45° band; counts a deliberate turn
+NET_EPS_M = 1.0  # loiter_ratio null when net displacement ~0
+
+# Nullable columns added by sql/loiter_motion_metrics.sql (not applied by this job).
+MOTION_METRIC_COLUMNS = (
+    "avg_sog_kn",
+    "max_sog_kn",
+    "sog_std_kn",
+    "sog_change_count",
+    "heading_change_count",
+    "loiter_ratio",
+)
 
 def _require_env(name: str) -> str:
     value = os.environ.get(name)
@@ -228,9 +245,16 @@ def load_cargo_tanker_mmsis(engine: Engine) -> list[int]:
 
 
 def fetch_track_samples(client, mmsis: list[int], start: datetime, end: datetime) -> pd.DataFrame:
+    """
+    5-minute track buckets for the lookback window (same filters as before).
+
+    Also returns SOG / COG / trueHeading via argMax(..., ts) so motion metrics
+    use the same sample points without a second ClickHouse scan.
+    """
     frames = []
     start_s = _ch_ts(start)
     end_s = _ch_ts(end)
+    empty_cols = ["mmsi", "ts", "latitude", "longitude", "sog", "cog", "true_heading"]
     for offset in range(0, len(mmsis), MMSI_CHUNK):
         chunk = mmsis[offset: offset + MMSI_CHUNK]
         ids = ",".join(str(m) for m in chunk)
@@ -239,13 +263,19 @@ def fetch_track_samples(client, mmsis: list[int], start: datetime, end: datetime
             mmsi,
             bucket AS ts,
             argMax(latitude, ts) AS latitude,
-            argMax(longitude, ts) AS longitude
+            argMax(longitude, ts) AS longitude,
+            argMax(sog, ts) AS sog,
+            argMax(cog, ts) AS cog,
+            argMax(trueHeading, ts) AS true_heading
         FROM (
             SELECT
                 mmsi,
                 ts,
                 latitude,
                 longitude,
+                sog,
+                cog,
+                trueHeading,
                 toStartOfFiveMinutes(ts) AS bucket
             FROM pnav.ais_position
             WHERE ts >= toDateTime64('{start_s}', 3)
@@ -262,10 +292,149 @@ def fetch_track_samples(client, mmsis: list[int], start: datetime, end: datetime
         if result.result_rows:
             frames.append(pd.DataFrame(result.result_rows, columns=result.column_names))
     if not frames:
-        return pd.DataFrame(columns=["mmsi", "ts", "latitude", "longitude"])
+        return pd.DataFrame(columns=empty_cols)
     out = pd.concat(frames, ignore_index=True)
     out["ts"] = pd.to_datetime(out["ts"], utc=True)
     return out
+
+
+def _usable_sog(value) -> float | None:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    try:
+        sog = float(value)
+    except (TypeError, ValueError):
+        return None
+    if sog < 0 or sog >= SOG_UNAVAILABLE_KN:
+        return None
+    return sog
+
+
+def _usable_heading(true_heading, cog) -> float | None:
+    """Prefer trueHeading; fall back to COG. Skip 511 / invalid."""
+    for raw in (true_heading, cog):
+        if raw is None or (isinstance(raw, float) and math.isnan(raw)):
+            continue
+        try:
+            hdg = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if hdg < 0 or hdg >= HEADING_UNAVAILABLE:
+            continue
+        if hdg > 360:
+            continue
+        return hdg % 360.0
+    return None
+
+
+def _heading_delta_deg(a: float, b: float) -> float:
+    """Smallest turn from heading a to b (degrees), handling 0/360 wrap."""
+    d = (b - a + 180.0) % 360.0 - 180.0
+    return abs(d)
+
+
+def compute_motion_metrics(samples: pd.DataFrame) -> pd.DataFrame:
+    """
+    Per-MMSI SOG / heading behaviour over the detection window samples.
+
+    Informational only — callers merge onto loiter rows; detection filters unchanged.
+    """
+    cols = list(MOTION_METRIC_COLUMNS)
+    if samples is None or samples.empty:
+        return pd.DataFrame(columns=["mmsi", *cols])
+
+    rows: list[dict] = []
+    for mmsi, group in samples.sort_values("ts").groupby("mmsi", sort=False):
+        sogs: list[float] = []
+        headings: list[float] = []
+        sog_changes = 0
+        heading_changes = 0
+        prev_sog: float | None = None
+        prev_hdg: float | None = None
+        for rec in group.itertuples(index=False):
+            sog = _usable_sog(getattr(rec, "sog", None))
+            hdg = _usable_heading(
+                getattr(rec, "true_heading", None),
+                getattr(rec, "cog", None),
+            )
+            if sog is not None:
+                sogs.append(sog)
+                if prev_sog is not None and abs(sog - prev_sog) >= SOG_CHANGE_THRESHOLD_KN:
+                    sog_changes += 1
+                prev_sog = sog
+            if hdg is not None:
+                headings.append(hdg)
+                if prev_hdg is not None and _heading_delta_deg(prev_hdg, hdg) >= HEADING_CHANGE_THRESHOLD_DEG:
+                    heading_changes += 1
+                prev_hdg = hdg
+
+        if sogs:
+            avg_sog = float(sum(sogs) / len(sogs))
+            max_sog = float(max(sogs))
+            if len(sogs) >= 2:
+                mean = avg_sog
+                var = sum((x - mean) ** 2 for x in sogs) / (len(sogs) - 1)
+                sog_std = float(math.sqrt(var))
+            else:
+                sog_std = 0.0
+        else:
+            avg_sog = max_sog = sog_std = None
+
+        rows.append({
+            "mmsi": int(mmsi),
+            "avg_sog_kn": avg_sog,
+            "max_sog_kn": max_sog,
+            "sog_std_kn": sog_std,
+            "sog_change_count": int(sog_changes),
+            "heading_change_count": int(heading_changes),
+            # loiter_ratio filled after path/net known
+            "loiter_ratio": None,
+        })
+    return pd.DataFrame(rows)
+
+
+def attach_loiter_ratio(loiters: pd.DataFrame) -> pd.DataFrame:
+    """path_m / net_m; null when net is missing or <= NET_EPS_M."""
+    out = loiters.copy()
+    if out.empty:
+        if "loiter_ratio" not in out.columns:
+            out["loiter_ratio"] = pd.Series(dtype="float")
+        return out
+    ratios = []
+    for row in out.itertuples(index=False):
+        try:
+            net = float(row.net_m)
+            path = float(row.path_m)
+        except (TypeError, ValueError, AttributeError):
+            ratios.append(None)
+            continue
+        if net <= NET_EPS_M or math.isnan(net) or math.isnan(path):
+            ratios.append(None)
+        else:
+            ratios.append(round(path / net, 4))
+    out["loiter_ratio"] = ratios
+    return out
+
+
+def _table_columns(conn, table: str = "ais_vesselloiteractivity") -> set[str]:
+    rows = conn.execute(
+        text(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = :table
+            """
+        ),
+        {"table": table},
+    ).fetchall()
+    return {str(r[0]) for r in rows}
+
+
+def motion_columns_present(engine: Engine) -> bool:
+    """True when migration sql/loiter_motion_metrics.sql has been applied."""
+    with engine.connect() as conn:
+        cols = _table_columns(conn)
+    return all(c in cols for c in MOTION_METRIC_COLUMNS)
 
 
 def _spatial():
@@ -618,6 +787,17 @@ def upsert_loiters(engine: Engine, loiters: pd.DataFrame, now: datetime) -> tupl
     seen: set[int] = set()
     inserted = 0
     updated = 0
+    write_motion = motion_columns_present(engine)
+
+    motion_insert_cols = ""
+    motion_insert_vals = ""
+    motion_update_set = ""
+    if write_motion:
+        motion_insert_cols = ",\n                            " + ", ".join(MOTION_METRIC_COLUMNS)
+        motion_insert_vals = ",\n                            " + ", ".join(f":{c}" for c in MOTION_METRIC_COLUMNS)
+        motion_update_set = ",\n                            " + ",\n                            ".join(
+            f"{c} = :{c}" for c in MOTION_METRIC_COLUMNS
+        )
 
     with engine.begin() as conn:
         for row in loiters.itertuples(index=False):
@@ -641,29 +821,32 @@ def upsert_loiters(engine: Engine, loiters: pd.DataFrame, now: datetime) -> tupl
                         """),
                         {"id": int(existing.id), "now": now},
                     )
+            params = _row_params(row, now, include_motion=write_motion)
             if existing is None or moved:
                 conn.execute(
-                    text("""
+                    text(f"""
                         INSERT INTO public.ais_vesselloiteractivity (
                             mmsi, place_key, started_at, ended_at,
                             centre_latitude, centre_longitude, radius_m, path_m, net_m,
                             sample_count, outside_anchorage, near_restricted, before_sts,
                             anchorage_name, restricted_distance_m, tsout,
                             detection_version, created_at, updated_at
+                            {motion_insert_cols}
                         ) VALUES (
                             :mmsi, :place_key, :started_at, :ended_at,
                             :centre_latitude, :centre_longitude, :radius_m, :path_m, :net_m,
                             :sample_count, :outside_anchorage, :near_restricted, FALSE,
                             :anchorage_name, :restricted_distance_m, NULL,
                             :detection_version, :now, :now
+                            {motion_insert_vals}
                         )
                     """),
-                    _row_params(row, now),
+                    params,
                 )
                 inserted += 1
             else:
                 conn.execute(
-                    text("""
+                    text(f"""
                         UPDATE public.ais_vesselloiteractivity
                         SET ended_at = :ended_at,
                             centre_latitude = :centre_latitude,
@@ -679,9 +862,10 @@ def upsert_loiters(engine: Engine, loiters: pd.DataFrame, now: datetime) -> tupl
                             restricted_distance_m = :restricted_distance_m,
                             detection_version = :detection_version,
                             updated_at = :now
+                            {motion_update_set}
                         WHERE id = :id
                     """),
-                    {**_row_params(row, now), "id": int(existing.id)},
+                    {**params, "id": int(existing.id)},
                 )
                 updated += 1
 
@@ -699,13 +883,37 @@ def upsert_loiters(engine: Engine, loiters: pd.DataFrame, now: datetime) -> tupl
     return inserted, updated
 
 
-def _row_params(row, now: datetime) -> dict:
+def _optional_float(row, name: str):
+    if not hasattr(row, name):
+        return None
+    value = getattr(row, name)
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(row, name: str):
+    value = _optional_float(row, name)
+    if value is None:
+        return None
+    return int(value)
+
+
+def _row_params(row, now: datetime, *, include_motion: bool = False) -> dict:
     anchorage = row.anchorage_name
     if anchorage is not None and (isinstance(anchorage, float) and math.isnan(anchorage)):
         anchorage = None
     if pd.isna(anchorage):
         anchorage = None
-    return {
+    params = {
         "mmsi": int(row.mmsi),
         "place_key": row.place_key,
         "started_at": row.started_at,
@@ -723,6 +931,14 @@ def _row_params(row, now: datetime) -> dict:
         "detection_version": DETECTION_VERSION,
         "now": now,
     }
+    if include_motion:
+        params["avg_sog_kn"] = _optional_float(row, "avg_sog_kn")
+        params["max_sog_kn"] = _optional_float(row, "max_sog_kn")
+        params["sog_std_kn"] = _optional_float(row, "sog_std_kn")
+        params["sog_change_count"] = _optional_int(row, "sog_change_count")
+        params["heading_change_count"] = _optional_int(row, "heading_change_count")
+        params["loiter_ratio"] = _optional_float(row, "loiter_ratio")
+    return params
 
 
 def run_once(engine: Engine, client) -> None:
@@ -733,12 +949,27 @@ def run_once(engine: Engine, client) -> None:
     samples = fetch_track_samples(client, mmsis, start, now) if mmsis else pd.DataFrame()
     logging.info("[loiter] track samples=%s", len(samples))
     loiters = detect_loiters(samples)
+    # Motion metrics are informational; merge after geometry detection.
+    metrics = compute_motion_metrics(samples)
+    if not loiters.empty and not metrics.empty:
+        loiters = loiters.merge(metrics, on="mmsi", how="left")
+    elif not loiters.empty:
+        for col in MOTION_METRIC_COLUMNS:
+            if col not in loiters.columns:
+                loiters[col] = None
+    loiters = attach_loiter_ratio(loiters)
     loiters = label_geography(loiters)
+    write_motion = motion_columns_present(engine)
+    if not write_motion:
+        logging.info(
+            "[loiter] motion metric columns absent — skipping persist "
+            "(apply sql/loiter_motion_metrics.sql when ready)"
+        )
     inserted, updated = upsert_loiters(engine, loiters, now)
     linked = refresh_before_sts(engine)
     logging.info(
-        "[loiter] detected=%s inserted=%s updated=%s before_sts_links=%s",
-        len(loiters), inserted, updated, linked,
+        "[loiter] detected=%s inserted=%s updated=%s before_sts_links=%s motion_persist=%s",
+        len(loiters), inserted, updated, linked, write_motion,
     )
 
 

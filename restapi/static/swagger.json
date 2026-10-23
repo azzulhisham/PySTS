@@ -2151,6 +2151,23 @@
               }
             ],
             "description": "Metres, or the text `max(lengthM, 300)` when the hull-relative radius is used."
+          },
+          "minHeadingChanges": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Optional filter; null when not applied."
+          },
+          "maxAvgSogKn": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Optional filter; null when not applied."
+          },
+          "minDurationH": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Optional filter; null when not applied."
           }
         }
       },
@@ -2202,6 +2219,12 @@
             "format": "date-time",
             "nullable": true,
             "description": "Same as `endedAt`. Use as the anchor for GET /mantis/vessel-track."
+          },
+          "durationH": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Hours from startedAt to endedAt (last update)."
           },
           "radiusM": {
             "type": "number",
@@ -2265,6 +2288,40 @@
             "type": "integer",
             "nullable": true,
             "format": "int64"
+          },
+          "avgSogKn": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Mean usable SOG (kn) over the detection window. Null until motion columns are populated."
+          },
+          "maxSogKn": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Max usable SOG (kn) over the detection window."
+          },
+          "sogStdKn": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "Sample stddev of usable SOG (kn)."
+          },
+          "sogChangeCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Consecutive 5-min SOG steps with |delta| >= 0.5 kn."
+          },
+          "headingChangeCount": {
+            "type": "integer",
+            "nullable": true,
+            "description": "Consecutive heading steps with wrap-aware |delta| >= 45 deg."
+          },
+          "loiterRatio": {
+            "type": "number",
+            "nullable": true,
+            "format": "double",
+            "description": "pathM / netM; null when netM is near zero."
           },
           "toBow": {
             "type": "number",
@@ -3447,7 +3504,7 @@
       "get": {
         "tags": ["mantis"],
         "summary": "Get open loitering events.",
-        "description": "Reads Postgres `ais_vesselloiteractivity`. The job stores circles from 100 m to 6 NM with net/path under 0.20. No pattern: open rows outside an anchorage, near the restricted limit, or just before an STS. pattern=loitering: long path, net/path <= 0.10, radius at least max(length, 300 m). pattern=anchorSwing: short path inside a hull-sized circle. Numeric path, net, and radius parameters override the preset.",
+        "description": "Reads Postgres `ais_vesselloiteractivity`. The job stores circles from 100 m to 6 NM with net/path under 0.20. No pattern: open rows outside an anchorage, near the restricted limit, or just before an STS. pattern=loitering: long path, net/path <= 0.10, radius at least max(length, 300 m). pattern=anchorSwing: short path inside a hull-sized circle. Numeric path, net, and radius parameters override the preset. Events also expose informational motion fields (avgSogKn, headingChangeCount, loiterRatio, durationH, …); optional minHeadingChanges / maxAvgSogKn / minDurationH filters default off.",
         "operationId": "getLoitering",
         "security": [{ "BearerAuth": [] }],
         "parameters": [
@@ -3520,6 +3577,27 @@
             "required": false,
             "schema": { "type": "boolean" },
             "description": "If true, keep only events linked to a following STS observation."
+          },
+          {
+            "name": "minHeadingChanges",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" },
+            "description": "Optional. Keep events with headingChangeCount >= this value. Default off (no filter)."
+          },
+          {
+            "name": "maxAvgSogKn",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Optional. Keep events with avgSogKn <= this value (knots). Default off (no filter)."
+          },
+          {
+            "name": "minDurationH",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" },
+            "description": "Optional. Keep events with durationH >= this value (hours from startedAt to endedAt). Default off (no filter)."
           }
         ],
         "responses": {

@@ -436,6 +436,7 @@ def get_loitering():
     pattern=loitering or pattern=anchorSwing applies the geometry preset.
     minPathM, maxPathM, maxNetM, maxNetOverPath, minRadiusM, and maxRadiusM
     override that preset. A number for radius replaces the hull-relative cut.
+    Optional (default off): minHeadingChanges, maxAvgSogKn, minDurationH.
     """
     if authorize_user(request.headers.get("Authorization")) < 0:
         return jsonify({"message": "Unauthorized"}), 401
@@ -448,6 +449,9 @@ def get_loitering():
 
     def _num(name: str):
         return request.args.get(name, type=float)
+
+    def _int(name: str):
+        return request.args.get(name, type=int)
 
     pattern = request.args.get("pattern")
     if pattern == "":
@@ -465,6 +469,9 @@ def get_loitering():
             max_net_over_path=_num("maxNetOverPath"),
             min_radius_m=_num("minRadiusM"),
             max_radius_m=_num("maxRadiusM"),
+            min_heading_changes=_int("minHeadingChanges"),
+            max_avg_sog_kn=_num("maxAvgSogKn"),
+            min_duration_h=_num("minDurationH"),
         )
         payload = {
             "ruleVersion": result["rule_version"],

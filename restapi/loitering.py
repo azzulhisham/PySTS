@@ -12,6 +12,7 @@ import logging
 from typing import Any
 
 import pandas as pd
+from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from api_timestamps import format_last_seen_at
@@ -35,6 +36,30 @@ HULL_RADIUS_M = (
     "GREATEST(COALESCE(COALESCE(s.to_bow, sb.to_bow), 0)"
     " + COALESCE(COALESCE(s.to_stern, sb.to_stern), 0), 300)"
 )
+
+# Nullable columns from sql/loiter_motion_metrics.sql (informational; may be absent).
+MOTION_DB_COLUMNS = (
+    "avg_sog_kn",
+    "max_sog_kn",
+    "sog_std_kn",
+    "sog_change_count",
+    "heading_change_count",
+    "loiter_ratio",
+)
+MOTION_NULL_SELECT = """    NULL::double precision AS avg_sog_kn,
+    NULL::double precision AS max_sog_kn,
+    NULL::double precision AS sog_std_kn,
+    NULL::integer AS sog_change_count,
+    NULL::integer AS heading_change_count,
+    NULL::double precision AS loiter_ratio,
+"""
+MOTION_COL_SELECT = """    l.avg_sog_kn,
+    l.max_sog_kn,
+    l.sog_std_kn,
+    l.sog_change_count,
+    l.heading_change_count,
+    l.loiter_ratio,
+"""
 
 # Storage keeps net/path <= 0.20 and radius <= 6 NM. These presets narrow that set.
 PRESETS = {
@@ -85,6 +110,7 @@ SELECT
     s."shipType" AS shiptype,
     s."shipTypeDesc" AS shiptypedesc,
     s."imo" AS imo,
+{{motion_select}}
 {DIM_SELECT}
 FROM public.ais_vesselloiteractivity l
 {class_a_join("l.mmsi")}
@@ -93,6 +119,23 @@ WHERE l.tsout IS NULL
   AND ({{flag_filter}})
   AND ({{geo_filter}})
 """
+
+
+def motion_columns_present(engine: Engine) -> bool:
+    """True when sql/loiter_motion_metrics.sql has been applied."""
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'ais_vesselloiteractivity'
+                """
+            )
+        ).fetchall()
+    cols = {str(r[0]) for r in rows}
+    return all(c in cols for c in MOTION_DB_COLUMNS)
 
 
 def _fmt_ts(value: Any) -> str | None:
@@ -117,6 +160,52 @@ def _flags(row) -> list[str]:
     if bool(row.get("in_port_area")):
         flags.append("in_port_area")
     return flags
+
+
+def _opt_float(row, key: str, *, digits: int | None = None) -> float | None:
+    value = row.get(key) if hasattr(row, "get") else None
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    if digits is not None:
+        return round(out, digits)
+    return out
+
+
+def _opt_int(row, key: str) -> int | None:
+    value = _opt_float(row, key)
+    if value is None:
+        return None
+    return int(value)
+
+
+def _duration_h(started_at: Any, ended_at: Any) -> float | None:
+    """Hours from startedAt to last update (ended_at)."""
+    if started_at is None or ended_at is None:
+        return None
+    try:
+        if pd.isna(started_at) or pd.isna(ended_at):
+            return None
+    except (TypeError, ValueError):
+        return None
+    start = pd.Timestamp(started_at)
+    end = pd.Timestamp(ended_at)
+    if start.tzinfo is None:
+        start = start.tz_localize("UTC")
+    if end.tzinfo is None:
+        end = end.tz_localize("UTC")
+    seconds = (end - start).total_seconds()
+    if seconds < 0:
+        return None
+    return round(seconds / 3600.0, 4)
 
 
 def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
@@ -146,6 +235,7 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
             "startedAt": _fmt_ts(row.get("started_at")),
             "endedAt": _fmt_ts(row.get("ended_at")),
             "lastSeenAt": _fmt_ts(row.get("ended_at")),
+            "durationH": _duration_h(row.get("started_at"), row.get("ended_at")),
             "radiusM": round(float(row["radius_m"]), 1) if pd.notna(row.get("radius_m")) else None,
             "pathM": round(float(row["path_m"]), 1) if pd.notna(row.get("path_m")) else None,
             "netM": round(float(row["net_m"]), 1) if pd.notna(row.get("net_m")) else None,
@@ -167,6 +257,12 @@ def events_to_payload(events: pd.DataFrame) -> list[dict[str, Any]]:
                 int(row["sts_observation_id"])
                 if pd.notna(row.get("sts_observation_id")) else None
             ),
+            "avgSogKn": _opt_float(row, "avg_sog_kn", digits=3),
+            "maxSogKn": _opt_float(row, "max_sog_kn", digits=3),
+            "sogStdKn": _opt_float(row, "sog_std_kn", digits=3),
+            "sogChangeCount": _opt_int(row, "sog_change_count"),
+            "headingChangeCount": _opt_int(row, "heading_change_count"),
+            "loiterRatio": _opt_float(row, "loiter_ratio", digits=4),
             **dimension_fields(row),
             **payload_fields(row),
             **risk_payload_fields(row),
@@ -293,7 +389,45 @@ def _filters_payload(chosen: dict[str, Any]) -> dict[str, Any]:
         "maxNetOverPath": chosen.get("max_net_over_path"),
         "minRadiusM": "max(lengthM, 300)" if chosen.get("min_radius_hull") else chosen.get("min_radius_m"),
         "maxRadiusM": "max(lengthM, 300)" if chosen.get("max_radius_hull") else chosen.get("max_radius_m"),
+        "minHeadingChanges": chosen.get("min_heading_changes"),
+        "maxAvgSogKn": chosen.get("max_avg_sog_kn"),
+        "minDurationH": chosen.get("min_duration_h"),
     }
+
+
+def _apply_motion_filters(
+    events: pd.DataFrame,
+    *,
+    min_heading_changes: int | None,
+    max_avg_sog_kn: float | None,
+    min_duration_h: float | None,
+) -> pd.DataFrame:
+    """Optional opt-in filters (default off). Null metric values do not pass a set filter."""
+    if events.empty:
+        return events
+    if min_heading_changes is None and max_avg_sog_kn is None and min_duration_h is None:
+        return events
+    keep = pd.Series(True, index=events.index)
+    if min_heading_changes is not None:
+        col = events["heading_change_count"] if "heading_change_count" in events.columns else None
+        if col is None:
+            keep &= False
+        else:
+            keep &= col.notna() & (col.astype(float) >= float(min_heading_changes))
+    if max_avg_sog_kn is not None:
+        col = events["avg_sog_kn"] if "avg_sog_kn" in events.columns else None
+        if col is None:
+            keep &= False
+        else:
+            keep &= col.notna() & (col.astype(float) <= float(max_avg_sog_kn))
+    if min_duration_h is not None:
+        durations = [
+            _duration_h(row.started_at, row.ended_at)
+            for row in events.itertuples(index=False)
+        ]
+        dur = pd.Series(durations, index=events.index)
+        keep &= dur.notna() & (dur.astype(float) >= float(min_duration_h))
+    return events.loc[keep].reset_index(drop=True)
 
 
 def detect_loitering(
@@ -309,6 +443,9 @@ def detect_loitering(
     max_net_over_path: float | None = None,
     min_radius_m: float | None = None,
     max_radius_m: float | None = None,
+    min_heading_changes: int | None = None,
+    max_avg_sog_kn: float | None = None,
+    min_duration_h: float | None = None,
 ) -> dict[str, Any]:
     if pattern is not None and pattern not in PRESETS:
         raise ValueError("pattern must be loitering or anchorSwing")
@@ -335,10 +472,20 @@ def detect_loitering(
         min_radius_m=min_radius_m,
         max_radius_m=max_radius_m,
     )
+    chosen["min_heading_changes"] = min_heading_changes
+    chosen["max_avg_sog_kn"] = max_avg_sog_kn
+    chosen["min_duration_h"] = min_duration_h
     geo_filter, params = _geo_filter(chosen)
     get_port_area_index()
+    motion_select = (
+        MOTION_COL_SELECT if motion_columns_present(engine) else MOTION_NULL_SELECT
+    )
     events = pd.read_sql(
-        LOITER_SQL.format(flag_filter=flag_filter, geo_filter=geo_filter),
+        LOITER_SQL.format(
+            flag_filter=flag_filter,
+            geo_filter=geo_filter,
+            motion_select=motion_select,
+        ),
         con=engine,
         params=params or None,
     )
@@ -378,6 +525,13 @@ def detect_loitering(
         )
         events = events.loc[keep].reset_index(drop=True)
         port_area_excluded_count = before_n - len(events)
+
+    events = _apply_motion_filters(
+        events,
+        min_heading_changes=min_heading_changes,
+        max_avg_sog_kn=max_avg_sog_kn,
+        min_duration_h=min_duration_h,
+    )
 
     events = attach_sanctions(events, engine)
     events = attach_risk_ratings(events, engine)
