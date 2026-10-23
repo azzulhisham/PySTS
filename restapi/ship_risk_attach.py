@@ -13,6 +13,7 @@ import os
 import threading
 import time
 from typing import Any
+from urllib.parse import quote
 
 import pandas as pd
 from sqlalchemy import text
@@ -267,6 +268,111 @@ def rated_ship_count(engine: Engine | None = None) -> int:
     except Exception:
         logger.warning("rated_ship_count failed — returning 0", exc_info=True)
         return 0
+
+
+# One indexed ais_static read per MMSI (latest row). Failure → None (MMSI-only risk).
+_IMO_FOR_MMSI_SQL = text(
+    """
+    SELECT imo
+    FROM public.ais_static
+    WHERE mmsi = :mmsi
+    ORDER BY ts DESC NULLS LAST, id DESC
+    LIMIT 1
+    """
+)
+
+RISK_REASON_HEADER_MAX_LEN = 200
+
+
+def lookup_imo_for_mmsi(mmsi: Any, engine: Engine | None = None) -> str | None:
+    """Cheap single-row IMO lookup for one MMSI. Never raises."""
+    try:
+        mmsi_i = int(mmsi)
+    except (TypeError, ValueError):
+        return None
+    try:
+        engine = engine or get_pg_engine()
+        df = pd.read_sql(_IMO_FOR_MMSI_SQL, con=engine, params={"mmsi": mmsi_i})
+        if df is None or df.empty:
+            return None
+        return normalize_imo(df.iloc[0].get("imo"))
+    except Exception:
+        logger.warning("lookup_imo_for_mmsi failed for mmsi=%s", mmsi, exc_info=True)
+        return None
+
+
+def risk_for_mmsi(
+    mmsi: Any,
+    engine: Engine | None = None,
+    *,
+    resolve_imo: bool = True,
+) -> dict[str, Any]:
+    """
+    Identity risk for one ship (timeline / track). Uses cache; optional IMO lookup.
+
+    Never raises — GREEN / 0 / "none" on any failure.
+    """
+    try:
+        by_imo, by_mmsi = load_risk_indexes(engine)
+        imo = lookup_imo_for_mmsi(mmsi, engine) if resolve_imo else None
+        hit = match_risk(imo, mmsi, by_imo, by_mmsi)
+        return {
+            "rating": str(hit.get("rating") or DEFAULT_RISK["rating"]),
+            "score": int(hit.get("score") or 0),
+            "reason": str(hit.get("reason") or DEFAULT_RISK["reason"]),
+            "imo": imo,
+        }
+    except Exception:
+        logger.warning("risk_for_mmsi failed — GREEN defaults", exc_info=True)
+        return {
+            "rating": DEFAULT_RISK["rating"],
+            "score": int(DEFAULT_RISK["score"]),
+            "reason": DEFAULT_RISK["reason"],
+            "imo": None,
+        }
+
+
+def risk_payload_for_mmsi(
+    mmsi: Any,
+    engine: Engine | None = None,
+    *,
+    resolve_imo: bool = True,
+) -> dict[str, Any]:
+    """CamelCase riskRating / riskScore / riskReason for JSON payloads."""
+    hit = risk_for_mmsi(mmsi, engine, resolve_imo=resolve_imo)
+    return {
+        "riskRating": hit["rating"],
+        "riskScore": hit["score"],
+        "riskReason": hit["reason"],
+    }
+
+
+def encode_risk_reason_header(reason: Any) -> str:
+    """Percent-encode reason for HTTP headers; truncate before encoding."""
+    text = str(reason if reason is not None else DEFAULT_RISK["reason"])
+    if len(text) > RISK_REASON_HEADER_MAX_LEN:
+        text = text[: RISK_REASON_HEADER_MAX_LEN - 3] + "..."
+    return quote(text, safe="")
+
+
+def risk_http_headers(
+    mmsi: Any,
+    engine: Engine | None = None,
+    *,
+    resolve_imo: bool = True,
+) -> dict[str, str]:
+    """
+    X-Risk-* headers for vessel-track (body stream unchanged).
+
+    Includes Access-Control-Expose-Headers so browsers can read the values.
+    """
+    hit = risk_for_mmsi(mmsi, engine, resolve_imo=resolve_imo)
+    return {
+        "X-Risk-Rating": str(hit["rating"]),
+        "X-Risk-Score": str(int(hit["score"])),
+        "X-Risk-Reason": encode_risk_reason_header(hit["reason"]),
+        "Access-Control-Expose-Headers": "X-Risk-Rating, X-Risk-Score, X-Risk-Reason",
+    }
 
 
 # Identity-risk JSON keys only — do not strip spoofing `riskLevel` on vessel-analysis events.

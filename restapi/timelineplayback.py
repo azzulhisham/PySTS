@@ -545,12 +545,18 @@ def get_vessel_activity_timeline(
         key = str(event.get("eventType") or "UNKNOWN")
         by_type[key] = by_type.get(key, 0) + 1
 
+    # Identity risk once at top level (not on events). Cache + optional IMO lookup.
+    from ship_risk_attach import risk_payload_for_mmsi
+
+    risk = risk_payload_for_mmsi(mmsi, engine)
+
     return {
         "mmsi": int(mmsi),
         "dateFrom": dt_from.isoformat(),
         "dateTo": dt_to.isoformat(),
         "eventCount": len(events),
         "byEventType": by_type,
+        **risk,
         "events": events,
     }
 

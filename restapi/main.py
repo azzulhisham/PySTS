@@ -36,6 +36,7 @@ from timelineplayback import (
     resolve_track_range,
 )
 from sanctions import query_ofac_vessels
+from ship_risk_attach import risk_http_headers
 from swagger_sample import apply_swagger_sample, is_swagger_referer
 
 
@@ -864,6 +865,10 @@ def get_vessel_track():
         return jsonify({"message": str(e)}), 400
 
     try:
+        # Resolve before streaming so headers go out with the response start.
+        # Body lines are unchanged (clients may treat every line as a point).
+        risk_headers = risk_http_headers(mmsi)
+
         if is_swagger_request():
             payload = get_vessel_track_replay(
                 mmsi,
@@ -872,7 +877,10 @@ def get_vessel_track():
                 include_class_b=include_class_b,
                 max_points=20,
             )
-            return jsonify(json_for_client(payload, ["track"])), 200
+            resp = jsonify(json_for_client(payload, ["track"]))
+            for key, value in risk_headers.items():
+                resp.headers[key] = value
+            return resp, 200
 
         def generate():
             yield from iter_vessel_track_ndjson(
@@ -888,6 +896,7 @@ def get_vessel_track():
             headers={
                 "Cache-Control": "no-cache",
                 "X-Accel-Buffering": "no",
+                **risk_headers,
             },
         )
     except ValueError as e:

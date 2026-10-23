@@ -2606,6 +2606,19 @@
               "type": "integer"
             }
           },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"],
+            "description": "Current identity risk for the queried MMSI (ais_ship_risk_rating lookback 24). Attached once at top level, not on events. GREEN when no row."
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
+          },
           "events": {
             "type": "array",
             "items": {
@@ -3896,7 +3909,29 @@
         ],
         "responses": {
           "200": {
-            "description": "NDJSON stream for real clients (meta, then 20-minute chunks, then done). Swagger Try it out returns a JSON sample of the first 20 points.",
+            "description": "NDJSON stream for real clients (meta, then 20-minute chunks, then done). Swagger Try it out returns a JSON sample of the first 20 points. Identity risk is **not** in the body (stream lines unchanged); see response headers X-Risk-Rating, X-Risk-Score, X-Risk-Reason.",
+            "headers": {
+              "X-Risk-Rating": {
+                "description": "Identity risk rating for the queried MMSI (RED / AMBER / GREEN). GREEN when no rating row.",
+                "schema": {
+                  "type": "string",
+                  "enum": ["RED", "AMBER", "GREEN"]
+                }
+              },
+              "X-Risk-Score": {
+                "description": "Identity risk score 0–100 as a decimal string.",
+                "schema": {
+                  "type": "string",
+                  "example": "100"
+                }
+              },
+              "X-Risk-Reason": {
+                "description": "Percent-encoded risk reason (ASCII-safe); truncated before encoding (max 200 chars of raw text).",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
             "content": {
               "application/x-ndjson": {
                 "schema": {
