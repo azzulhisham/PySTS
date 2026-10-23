@@ -28,6 +28,7 @@ from sanctions import (
     payload_fields,
     sort_listed_first,
 )
+from ship_risk_attach import attach_risk_ratings, risk_payload_fields
 from vessel_size import (
     CURRENT_STATIC_ROW_ORDER,
     DIM_SELECT,
@@ -376,6 +377,7 @@ def identity_to_payload(row) -> dict[str, Any]:
         ),
         **dimension_fields(row),
         **payload_fields(row),
+        **risk_payload_fields(row),
     }
 
 
@@ -396,6 +398,7 @@ def groups_to_payload(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "sanctionsMatch": bool(group["sanctions_match"]),
             "matchConfidence": group["match_confidence"],
             "sanctionsList": group["sanctions_list"] if group["sanctions_match"] else None,
+            "riskRedCount": int(group.get("risk_red_count") or 0),
             "identities": group["identities_payload"],
         })
     return records
@@ -418,6 +421,7 @@ def detect_identity_conflicts(
     candidates = load_identity_candidates(engine)
     candidates, invalid_mmsi_excluded_count = filter_valid_ship_mmsi_frame(candidates, "mmsi")
     candidates = attach_sanctions(candidates, engine)
+    candidates = attach_risk_ratings(candidates, engine)
 
     identities = {int(row["mmsi"]): vessel_identity(row) for _, row in candidates.iterrows()}
     by_mmsi = candidates.set_index("mmsi", drop=False)
@@ -455,6 +459,7 @@ def detect_identity_conflicts(
         extra_sort = []
         members_sorted = sort_listed_first(members, extra_sort=extra_sort)
         identities_payload = [identity_to_payload(row) for _, row in members_sorted.iterrows()]
+        risk_red_count = sum(1 for ident in identities_payload if ident.get("riskRating") == "RED")
 
         groups.append({
             "cluster_signature": signature,
@@ -467,6 +472,7 @@ def detect_identity_conflicts(
             "sanctions_match": sanctions_match,
             "match_confidence": match_confidence,
             "sanctions_list": sanctions_list,
+            "risk_red_count": risk_red_count,
             "identities_payload": identities_payload,
             "_srank": CONFIDENCE_RANK.get(match_confidence, 2),
         })
@@ -478,6 +484,9 @@ def detect_identity_conflicts(
     identities_payload = [ident for group in groups for ident in group["identities_payload"]]
     sanctions_match_group_count = sum(1 for group in groups if group["sanctions_match"])
     sanctions_match_identity_count = sum(1 for ident in identities_payload if ident.get("sanctionsMatch"))
+    # Top-level counts from the flat identity list (same objects nested under groups).
+    risk_red_count = sum(1 for ident in identities_payload if ident.get("riskRating") == "RED")
+    risk_amber_count = sum(1 for ident in identities_payload if ident.get("riskRating") == "AMBER")
 
     return {
         "rule_version": RULE_VERSION,
@@ -489,6 +498,8 @@ def detect_identity_conflicts(
         "identity_count": len(identities_payload),
         "sanctions_match_group_count": sanctions_match_group_count,
         "sanctions_match_identity_count": sanctions_match_identity_count,
+        "risk_red_count": risk_red_count,
+        "risk_amber_count": risk_amber_count,
         "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "groups_payload": groups_to_payload(groups),
         "identities_payload": identities_payload,

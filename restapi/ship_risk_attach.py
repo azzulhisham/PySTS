@@ -255,13 +255,19 @@ def risk_counts(df: pd.DataFrame, *, rating_col: str = "risk_rating") -> dict[st
     }
 
 
+# Identity-risk JSON keys only — do not strip spoofing `riskLevel` on vessel-analysis events.
+_IDENTITY_RISK_JSON_KEYS = frozenset(
+    {"riskRating", "riskScore", "riskReason", "riskRedCount", "riskAmberCount", "riskRatingMax"}
+)
+
+
 def strip_risk_keys(obj: Any) -> Any:
-    """Deep-copy structure without risk* keys (for golden tests)."""
+    """Deep-copy structure without identity-risk JSON keys (for golden tests)."""
     if isinstance(obj, dict):
         return {
             k: strip_risk_keys(v)
             for k, v in obj.items()
-            if not (isinstance(k, str) and (k == "riskRedCount" or k == "riskAmberCount" or k.startswith("risk")))
+            if not (isinstance(k, str) and k in _IDENTITY_RISK_JSON_KEYS)
         }
     if isinstance(obj, list):
         return [strip_risk_keys(v) for v in obj]

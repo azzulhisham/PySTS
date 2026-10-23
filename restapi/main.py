@@ -584,6 +584,8 @@ def get_identity_conflict():
             "identityCount": result["identity_count"],
             "sanctionsMatchGroupCount": result["sanctions_match_group_count"],
             "sanctionsMatchIdentityCount": result["sanctions_match_identity_count"],
+            "riskRedCount": result["risk_red_count"],
+            "riskAmberCount": result["risk_amber_count"],
             "invalidMmsiExcludedCount": result.get("invalid_mmsi_excluded_count", 0),
             "groups": result["groups_payload"],
             "identities": result["identities_payload"],

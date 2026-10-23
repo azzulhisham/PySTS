@@ -18,6 +18,7 @@ from sqlalchemy.engine import Engine
 from ais_identity import VALID_SHIP_MMSI_SQL_CH, clean_ship_name, mid_from_mmsi
 from api_timestamps import format_last_seen_at
 from sanctions import attach_sanctions, payload_fields
+from ship_risk_attach import attach_risk_ratings, risk_payload_fields
 from spoofing import (
     BAD_DATA_KNOTS,
     DATA_QUALITY_REASONS,
@@ -402,6 +403,7 @@ def _vessel_header(
     mid: int | None,
     flag_name: str | None,
     sanctions_row: pd.Series | None,
+    risk_row: pd.Series | None = None,
 ) -> dict[str, Any]:
     header: dict[str, Any] = {
         "mmsi": mmsi,
@@ -427,6 +429,8 @@ def _vessel_header(
         header.update(dimension_fields(static_row))
     if sanctions_row is not None:
         header.update(payload_fields(sanctions_row))
+    # Identity risk after sanctions; GREEN/0/none when no static or attach failed.
+    header.update(risk_payload_fields(risk_row if risk_row is not None else {}))
     return header
 
 
@@ -449,9 +453,15 @@ def detect_vessel_spoofing_analysis(
     static_row = static_df.iloc[0] if not static_df.empty else None
 
     sanctions_row = None
+    risk_row = None
     if static_row is not None:
         labelled = attach_sanctions(static_df.copy(), engine)
+        labelled = attach_risk_ratings(labelled, engine)
         sanctions_row = labelled.iloc[0]
+        risk_row = labelled.iloc[0]
+    else:
+        # Still emit GREEN defaults on the vessel header when static is missing.
+        risk_row = None
 
     hits = load_vessel_teleport_hits(mmsi, dt_from, dt_to, engine=engine)
     position_count = count_ais_positions(mmsi, dt_from, dt_to, client=client)
@@ -507,7 +517,7 @@ def detect_vessel_spoofing_analysis(
             "badDataKnots": BAD_DATA_KNOTS,
             "snapBackMaxM": SNAP_BACK_MAX_M,
         },
-        "vessel": _vessel_header(mmsi, static_row, mid, flag_name, sanctions_row),
+        "vessel": _vessel_header(mmsi, static_row, mid, flag_name, sanctions_row, risk_row),
         "summary": {
             "totalAisPositions": position_count,
             "eventCount": len(events_payload),

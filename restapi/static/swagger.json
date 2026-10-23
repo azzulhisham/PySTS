@@ -991,6 +991,19 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRating": {
+            "type": "string",
+            "enum": ["RED", "AMBER", "GREEN"],
+            "description": "Identity risk from ais_ship_risk_rating (lookback 24). GREEN when no row."
+          },
+          "riskScore": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+          },
+          "riskReason": {
+            "type": "string"
           }
         }
       },
@@ -1042,6 +1055,11 @@
             "type": "string",
             "nullable": true,
             "enum": ["SDN", "CONS"]
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "How many identities in the group have riskRating RED."
           },
           "identities": {
             "type": "array",
@@ -1116,6 +1134,14 @@
           },
           "sanctionsMatchIdentityCount": {
             "type": "integer"
+          },
+          "riskRedCount": {
+            "type": "integer",
+            "description": "Identities with identity riskRating RED."
+          },
+          "riskAmberCount": {
+            "type": "integer",
+            "description": "Identities with identity riskRating AMBER."
           },
           "groups": {
             "type": "array",
@@ -1466,7 +1492,20 @@
               "flagName": { "type": "string", "nullable": true, "description": "From public.ais_flagname." },
               "shipName": { "type": "string", "nullable": true },
               "shipType": { "type": "integer", "nullable": true },
-              "cargoTankerEligible": { "type": "boolean", "description": "True when latest static shipType is 70–89 (fleet spoofing scope)." }
+              "cargoTankerEligible": { "type": "boolean", "description": "True when latest static shipType is 70–89 (fleet spoofing scope)." },
+              "riskRating": {
+                "type": "string",
+                "enum": ["RED", "AMBER", "GREEN"],
+                "description": "Identity risk from ais_ship_risk_rating (lookback 24). GREEN when no row."
+              },
+              "riskScore": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 100
+              },
+              "riskReason": {
+                "type": "string"
+              }
             }
           },
           "summary": {
