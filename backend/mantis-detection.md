@@ -27,6 +27,29 @@ AIS silence is **disappearance from the feed**, not proof of intent. Labels must
 
 ---
 
+## ON HOLD: `ais_sts_vesselzone_b` (Class B restricted-zone detection)
+
+**Date:** 25 Oct 2026 (UTC)  
+**Host:** srv-01 `10.10.20.201`  
+**Unit:** `ais_sts_vesselzone_b.service` → `backend/vesselzone_b.py`  
+**Action:** `systemctl stop` + `systemctl disable` (unit file and code left in place).
+
+Stopped and disabled because of **repeated Postgres deadlocks** with `ais_sts_vesselzone` (Class A, `backend/vesselzone.py`). Both services write the same table, `public.ais_vesselinrestrictzone`. The probable cause is each service’s cleanup closing **every** open row for an MMSI, including rows opened by the other service.
+
+**Impact**
+
+- Class B vessels get **no new** restricted-zone events in MANTIS `GET /mantis/vessel-timeline`.
+- Class A detection (`ais_sts_vesselzone`) is **unaffected** and remains active.
+- Open Class B rows in `public.ais_vesselinrestrictzone` (`"tsOut" IS NULL` and MMSI present in `public.ais_positionb`) stay open: **46** as of the hold (read-only count; not closed).
+
+**To revisit**
+
+1. Limit each service’s cleanup to its own vessel class (Class A vs Class B).
+2. Confirm the deadlock partner from the RDS log.
+3. Then `systemctl enable --now ais_sts_vesselzone_b`.
+
+---
+
 ## How to maintain this file
 
 When you tune accuracy **or** add identity data:
@@ -749,6 +772,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
+| 2026-10-25 | **ON HOLD** `ais_sts_vesselzone_b` on srv-01 (stop + disable) after deadlocks with `ais_sts_vesselzone` on shared `ais_vesselinrestrictzone`. Class A continues; 46 open Class B rows left open. See [ON HOLD section](#on-hold-ais_sts_vesselzone_b-class-b-restricted-zone-detection). |
 | 2026-10-20 | Merged STS notifications/pagination (`sts-notifications`) with plausibility filters v1.3. Queue pagination + `GET /mantis/sts-review/notifications` + `notified_at` stamping restored alongside `includeDataQuality` / `dataQualityCount` / `darkMaxDays` / MMSI filters. |
 | 2026-10-20 | Plausibility filters: `bad_position_data` = short-gap or snap-back only; `duplicate_mmsi`; dark `DARK_MAX_DAYS` + default `includeCoverageExit=false` (`darkMaxDays` in response); spoofing `includeDataQuality` / `dataQualityCount`. Store upsert prefers alerts over data-quality for `(mmsi, event_day)`. |
 | 2026-10-12 | Notifications for frontend polling. New column `ais_stsreviewcase.notified_at`, set once by the STS review pipeline when a case first passes the queue rule (score ≥ 4.5, no dredge or bunker match, and sanctions, outside anchorage, dark, or illegal anchoring). Backfilled 15,811 cases already in the queue with `COALESCE(refreshed_at, created_at)` so they are not sent as new. New route `GET /mantis/sts-review/notifications?since=&area=`: cases with `notified_at` after `since`, oldest first, at most 200 per call, window ends at server time minus 60 s; `nextSince` is the next cursor and a timestamp group is never split across calls. `area=anchorage` (default) keeps centroids inside a parent polygon buffered 1 km, outside Excl holes (same as `/mantis/sts-activities`); `area=all` keeps every case. Review pipeline restarted on 10.10.20.200 (backups `*.bak-20261012-071110`); API on 10.10.20.201 (backups `*.bak-20261012-071256`). Cursor paging verified on live data. |
