@@ -2556,6 +2556,85 @@
           }
         }
       },
+      "SuspectedBunkeringVessel": {
+        "type": "object",
+        "properties": {
+          "mmsi": { "type": "integer" },
+          "shipName": { "type": "string", "nullable": true },
+          "shipType": { "type": "integer", "nullable": true },
+          "lengthM": { "type": "number", "nullable": true },
+          "flag": { "type": "string", "nullable": true },
+          "imo": { "type": "string", "nullable": true },
+          "sanctionsMatch": { "type": "boolean" },
+          "riskRating": { "type": "string" },
+          "riskScore": { "type": "integer" },
+          "riskReason": { "type": "string" }
+        }
+      },
+      "SuspectedBunkeringEpisode": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "integer" },
+          "vesselA": { "$ref": "#/components/schemas/SuspectedBunkeringVessel" },
+          "vesselB": { "$ref": "#/components/schemas/SuspectedBunkeringVessel" },
+          "centroidLatitude": { "type": "number", "nullable": true },
+          "centroidLongitude": { "type": "number", "nullable": true },
+          "zoneName": { "type": "string", "nullable": true },
+          "tsStart": { "type": "string", "nullable": true },
+          "tsLast": { "type": "string", "nullable": true },
+          "durationH": { "type": "number" },
+          "minDistanceM": { "type": "number", "nullable": true },
+          "medianDistanceM": { "type": "number", "nullable": true },
+          "medianSogKn": { "type": "number", "nullable": true },
+          "ruleBand": { "type": "string", "enum": ["100m", "tanker200m"] },
+          "isOpen": { "type": "boolean" },
+          "score": { "type": "number", "description": "0–10 interim score" },
+          "band": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] },
+          "reasons": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Signals that contributed to the score"
+          },
+          "licensed": {
+            "type": "string",
+            "enum": ["unknown", "yes", "no"],
+            "description": "JKPTG licensed-bunker placeholder; always unknown until register is wired"
+          },
+          "sanctionsMatch": { "type": "boolean" }
+        }
+      },
+      "SuspectedBunkeringResponse": {
+        "type": "object",
+        "properties": {
+          "ruleVersion": { "type": "string", "example": "suspected-bunker-1.0" },
+          "hours": { "type": "integer" },
+          "episodeCount": { "type": "integer" },
+          "byBand": {
+            "type": "object",
+            "properties": {
+              "HIGH": { "type": "integer" },
+              "MEDIUM": { "type": "integer" },
+              "LOW": { "type": "integer" }
+            }
+          },
+          "totalCount": { "type": "integer" },
+          "page": { "type": "integer" },
+          "pageSize": { "type": "integer" },
+          "totalPages": { "type": "integer" },
+          "returnedCount": { "type": "integer" },
+          "queryMs": { "type": "number" },
+          "pnavQueryMs": { "type": "object", "additionalProperties": { "type": "number" } },
+          "skippedSignals": { "type": "array", "items": { "type": "string" } },
+          "cacheHit": { "type": "boolean" },
+          "episodes": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/SuspectedBunkeringEpisode" }
+          },
+          "sample": { "type": "boolean", "nullable": true },
+          "fromSwagger": { "type": "boolean", "nullable": true },
+          "message": { "type": "string", "nullable": true }
+        }
+      },
       "ErrorMessage": {
         "type": "object",
         "properties": {
@@ -3605,6 +3684,76 @@
           "400": { "description": "Unknown pattern.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
           "401": { "description": "Unauthorized.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } },
           "500": { "description": "Internal server error. The loiter table is created when the backend job runs.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } } }
+        }
+      }
+    },
+    "/mantis/suspected-bunkering": {
+      "get": {
+        "tags": ["mantis"],
+        "summary": "Ranked suspected bunkering episodes (STS shadow).",
+        "description": "MANTIS-147. Reads open / recent `ais_sts_shadow_episode` rows with `possible_bunker` or bunker-hub flags. Batched read-only enrichment (AIS anomaly, loitering, identity, sanctions/risk, static). `licensed` is always `unknown` until the JKPTG register is wired. Response cached 5 minutes per query string.",
+        "operationId": "getSuspectedBunkering",
+        "security": [{ "BearerAuth": [] }],
+        "parameters": [
+          {
+            "name": "hours",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 24, "minimum": 1, "maximum": 168 },
+            "description": "Include closed episodes with ts_last within this many hours (open always included)."
+          },
+          {
+            "name": "band",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "string", "enum": ["HIGH", "MEDIUM", "LOW"] }
+          },
+          {
+            "name": "minScore",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "number" }
+          },
+          {
+            "name": "mmsi",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer" }
+          },
+          {
+            "name": "page",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 1 }
+          },
+          {
+            "name": "pageSize",
+            "in": "query",
+            "required": false,
+            "schema": { "type": "integer", "default": 100, "maximum": 1000 }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked suspected bunkering episodes.",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SuspectedBunkeringResponse" }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad query parameter.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
+          "401": {
+            "description": "Unauthorized.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          },
+          "500": {
+            "description": "Internal server error.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorMessage" } } }
+          }
         }
       }
     },

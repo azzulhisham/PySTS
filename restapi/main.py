@@ -22,6 +22,7 @@ from sts_review import (
 )
 from illegal_anchoring import detect_illegal_anchoring
 from loitering import detect_loitering
+from suspected_bunkering import detect_suspected_bunkering
 from dark_vessels import detect_dark_vessels
 from identity_conflict import detect_identity_conflicts
 from identity_risk import query_identity_events, query_ship_risk
@@ -492,6 +493,51 @@ def get_loitering():
         return jsonify({"message": str(e)}), 400
     except Exception as e:
         logging.error(f"[get_loitering] error: {e}")
+        return jsonify({"message": "Internal server error"}), 500
+
+
+@app.route("/mantis/suspected-bunkering", methods=["GET"])
+@cross_origin()
+def get_suspected_bunkering():
+    """
+    Ranked STS shadow episodes flagged possible_bunker / bunker_hub (MANTIS-147).
+
+    Read-only on ais_sts_shadow_episode + batched enrichment. licensed is always
+    "unknown" until the JKPTG bunker register is wired.
+    """
+    if authorize_user(request.headers.get("Authorization")) < 0:
+        return jsonify({"message": "Unauthorized"}), 401
+
+    try:
+        page, page_size = _page_args()
+        hours = request.args.get("hours", default=24, type=int)
+        min_score = request.args.get("minScore", type=float)
+        mmsi = request.args.get("mmsi", type=int)
+        result = detect_suspected_bunkering(
+            hours=hours if hours is not None else 24,
+            band=request.args.get("band"),
+            min_score=min_score,
+            mmsi=mmsi,
+            page=page,
+            page_size=page_size,
+        )
+        payload = {
+            "ruleVersion": result["ruleVersion"],
+            "hours": result["hours"],
+            "episodeCount": result["episodeCount"],
+            "byBand": result["byBand"],
+            "queryMs": result["queryMs"],
+            "pnavQueryMs": result["pnavQueryMs"],
+            "skippedSignals": result["skippedSignals"],
+            "cacheHit": result["cacheHit"],
+            "episodes": result["episodes"],
+            **_page_payload(result),
+        }
+        return jsonify(json_for_client(payload, ["episodes"])), 200
+    except ValueError as e:
+        return jsonify({"message": str(e)}), 400
+    except Exception as e:
+        logging.error(f"[get_suspected_bunkering] error: {e}")
         return jsonify({"message": "Internal server error"}), 500
 
 
