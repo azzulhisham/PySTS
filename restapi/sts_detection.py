@@ -72,6 +72,9 @@ WHERE o.is_open = TRUE
 ORDER BY o.suspicion_score DESC
 """
 
+# One Class-A static row per MMSI via LATERAL + ix_ais_static_mmsi_ts.
+# A plain JOIN on ais_static.mmsi multiplies members when an MMSI has 2+ rows
+# (e.g. 565209000), which then duplicates STS pairs.
 MEMBERS_SQL = f"""
 SELECT
     m.observation_id,
@@ -93,7 +96,13 @@ SELECT
 FROM public.ais_vesselproximitymember m
 LEFT JOIN public.ais_vesselmovementactivities a ON a.id = m.activity_id
 LEFT JOIN public.ais_position p ON p.mmsi = m.mmsi
-LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
+LEFT JOIN LATERAL (
+    SELECT "imo", to_bow, to_stern, to_port, to_starboard
+    FROM public.ais_static
+    WHERE mmsi = m.mmsi
+    ORDER BY ts DESC NULLS LAST, id DESC
+    LIMIT 1
+) s ON TRUE
 {class_b_join("m.mmsi")}
 WHERE m.observation_id = ANY(%(obs_ids)s)
 """
@@ -149,11 +158,15 @@ def load_members(
     if not observation_ids:
         return pd.DataFrame()
 
-    return pd.read_sql(
+    df = pd.read_sql(
         MEMBERS_SQL,
         con=engine,
         params={"obs_ids": observation_ids},
     )
+    if df.empty:
+        return df
+    # Safety net: never feed duplicate (observation, mmsi) rows into pairing.
+    return df.drop_duplicates(subset=["observation_id", "mmsi"], keep="first")
 
 
 def _metres_to_geojson(geom: dict, lon0: float, lat0: float, scale_x: float, scale_y: float) -> str:
@@ -312,7 +325,9 @@ def find_pairs_within_observations(
             "tanker_count",
         ]
     ]
-    mem = members.rename(columns={
+    mem = members.drop_duplicates(
+        subset=["observation_id", "mmsi"], keep="first"
+    ).rename(columns={
         "curlongitude": "lon",
         "curlatitude": "lat",
     })
@@ -371,6 +386,9 @@ def find_pairs_within_observations(
         return pd.DataFrame(columns=empty_cols)
 
     pairs = raw_pairs.merge(obs_cols, on="observation_id", how="inner")
+    pairs = pairs.drop_duplicates(
+        subset=["observation_id", "mmsi_a", "mmsi_b"], keep="first"
+    )
     return pairs.sort_values(
         ["suspicion_score", "distance_m"],
         ascending=[False, True],
