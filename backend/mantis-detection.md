@@ -27,6 +27,28 @@ AIS silence is **disappearance from the feed**, not proof of intent. Labels must
 
 ---
 
+## STS shadow test (rule C)
+
+**Purpose:** Compare a stricter proximity rule against live MANTIS STS without writing proximity tables or changing the API.  
+**Script:** `backend/sts_shadow_detection.py`  
+**Table:** `public.ais_sts_shadow_episode` (shadow only; not consumed by MANTIS)  
+**Unit:** `ais_sts_shadow.service` on **srv-01** (`/home/srvadmin/py/mantis`)  
+**Version:** `detection_version = shadow-C-1.0`
+
+**Rule C (summary)**
+
+- Rolling ClickHouse 5-min buckets, lookback **6 h**, loop **15 min**
+- SOG &lt; 5 kn; distance ≤ **100 m**, or ≤ **200 m** only if both tankers (80–89) and at least one known length &gt; 150 m
+- Same-hull suppression (`is_same_vessel`); `possible_bunker` when a tanker has **known** length &lt; 100 m
+- Episodes need ≥ **2 h** continuous buckets (one missed 5-min gap allowed) to **insert**; open rows are **extended** across cycles so a 10 h encounter is one row
+- Geography labels only (`zone_name` / `in_excl` / `harbour_excl`); rows are not filtered out
+- `in_mantis` via indexed read of `ais_vesselproximitymember` (disabled → always false if no mmsi index)
+- Load guards: `ais_static` cache ≤ 1 h; CH `max_memory_usage=4GB` / `max_execution_time=60s` (skip cycle on limit); one PG transaction per cycle; `statement_timeout=30s` / `lock_timeout=5s`
+
+**Not in API.** Revisit after ~1 week of shadow metrics. Plan: `reports/sts-shadow-plan.md`.
+
+---
+
 ## ON HOLD: `ais_sts_vesselzone_b` (Class B restricted-zone detection)
 
 **Date:** 25 Oct 2026 (UTC)  
@@ -772,6 +794,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
+| 2026-10-27 | STS shadow test (rule C): `sts_shadow_detection.py` + `ais_sts_shadow_episode` + `ais_sts_shadow.service` on srv-01. Does not write live proximity tables or change the API. See [STS shadow test](#sts-shadow-test-rule-c). |
 | 2026-10-25 | **ON HOLD** `ais_sts_vesselzone_b` on srv-01 (stop + disable) after deadlocks with `ais_sts_vesselzone` on shared `ais_vesselinrestrictzone`. Class A continues; 46 open Class B rows left open. See [ON HOLD section](#on-hold-ais_sts_vesselzone_b-class-b-restricted-zone-detection). |
 | 2026-10-20 | Merged STS notifications/pagination (`sts-notifications`) with plausibility filters v1.3. Queue pagination + `GET /mantis/sts-review/notifications` + `notified_at` stamping restored alongside `includeDataQuality` / `dataQualityCount` / `darkMaxDays` / MMSI filters. |
 | 2026-10-20 | Plausibility filters: `bad_position_data` = short-gap or snap-back only; `duplicate_mmsi`; dark `DARK_MAX_DAYS` + default `includeCoverageExit=false` (`darkMaxDays` in response); spoofing `includeDataQuality` / `dataQualityCount`. Store upsert prefers alerts over data-quality for `(mmsi, event_day)`. |

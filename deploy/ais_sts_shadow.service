@@ -1,0 +1,16 @@
+[Unit]
+Description=MANTIS STS shadow detector (rule C) — test only
+After=network-online.target
+
+[Service]
+Type=simple
+User=srvadmin
+WorkingDirectory=/home/srvadmin/py/mantis
+ExecStart=/usr/bin/python3 /home/srvadmin/py/mantis/sts_shadow_detection.py
+EnvironmentFile=/home/srvadmin/py/mantis/mantis.env
+SyslogIdentifier=ais_sts_shadow
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target
