@@ -1,156 +1,181 @@
-# Fix: duplicate STS pairs from multi-row `ais_static` join
+# Port 7 Oct pnav-tuning → `ais_sts_vesselzone` (Class A)
 
 **Date (UTC):** 2026-10-27  
-**Host:** srv-01 `10.10.20.201` — `/home/srvadmin/py/mantis`  
-**Service restarted:** **only** `ais_mantis_api`  
-**Prior report archived as:** [`reports/sts-shadow-deploy.md`](sts-shadow-deploy.md)
+**Host:** srv-01 `10.10.20.201`  
+**Unit touched:** `ais_sts_vesselzone.service` **only**  
+**Not touched:** `ais_sts_vesselzone_b` (still ON HOLD), `srv-dp` (not present)  
+**References:** PySTS `1bd2a2b` (`backend/vesselzone_b.py`), PyTSS `261e785` (`analyzer/vesselzone.py`)  
+**Purpose:** stop stressing pnav; **detection results must not change**
+
+Prior `reports/cursor-report.md` content for the STS shadow plan was already archived as [`sts-shadow-plan.md`](sts-shadow-plan.md) (staged rename before this work).
 
 ---
 
-## 1. Cause
+## 0. Deployed vs repo (start from deployed)
 
-`MEMBERS_SQL` in `restapi/sts_detection.py` used:
+| File | md5 |
+|------|-----|
+| Deployed `/home/srvadmin/py/sts/backend/vesselzone.py` | `e99964303ef0c211e78e6fbd989769cd` |
+| Repo `backend/vesselzone.py` (pre-change) | `3cb9b036bc5cb7026799e4d78fcdf16a` |
+
+**Diff summary (repo vs deployed, before tuning):** whitespace-only on model fields + **`time.sleep(10)` in repo vs `time.sleep(30)` on deployed**.
+
+Work started from the **deployed** copy and kept the **30 s** sleep. Repo is now aligned with the tuned deployed file.
+
+Backup: `/home/srvadmin/py/backup-20261027-031948` via `srv_backup.sh --src /home/srvadmin/py/sts --prev e9996430 --new pnav-tuning-a`.
+
+---
+
+## 1. What changed (detection-stable)
+
+| Item | Before (deployed) | After |
+|------|-------------------|-------|
+| Engine | New `create_engine` every `get_pgEngine()` call (`pool_size=10`, `max_overflow=20`) | One cached engine: `pool_size=2`, `max_overflow=2`, `pool_pre_ping`, `pool_recycle=1800`, `application_name=sts_vesselzone`, `statement_timeout=60s`, `lock_timeout=5s`, `connect_timeout=10`, TCP keepalives |
+| Connect failure | Bare `except` / silent fail | **One** retry per cycle (`run_cycle_with_retry`), then skip + log type/message |
+| Open-zone load | All open rows, no `mmsi` predicate | `mmsi IN :mmsis` for batch only; `ORDER BY "tsDetected" DESC` kept |
+| Writes | One Session held across spatial loop; commit every 300 mid-loop | Decide with **no** txn open; `_write_batches` of 300 |
+| `chk_invalid_data` | Every cycle; **one connection per vessel** UPDATE | Hourly (`CLEANUP_INTERVAL_MINUTES=60`); **one** `BEGIN` + `mmsi IN :mmsis` UPDATE; same predicate/`now()` behaviour |
+| `ais_position` read | `latitude` ±90 + 96h | Bounding-box from `outter_restricted_region` (same idea as TSS ~236–290). **No watermark** |
+| Exceptions | `except:` / `Error reading database` / `pass` | Log `Type: message` (no credentials) |
+| Sleep | 30 s (deployed) | 30 s (kept) |
+
+Zone enter/stay/exit logic is the same DuckDB `ST_Within` loop (factored as `decide_zone_changes` for tests).
+
+---
+
+## 2. EXPLAIN — open-row query uses existing partial index
+
+**No new index created.** Existing:
+
+```text
+idx_vesselinrestrictzone_open
+  btree (mmsi, "tsDetected" DESC) WHERE ("tsOut" IS NULL)
+```
+
+Query:
 
 ```sql
-LEFT JOIN public.ais_static s ON s.mmsi = m.mmsi
+EXPLAIN (FORMAT TEXT)
+SELECT *
+FROM public.ais_vesselinrestrictzone
+WHERE "tsOut" IS NULL
+  AND mmsi IN (...)
+ORDER BY "tsDetected" DESC;
 ```
 
-Some MMSIs have **2+** rows in `ais_static` (e.g. `565209000`). That fan-out duplicated member rows, so `find_pairs_within_observations` emitted duplicate pairs for the same `(observation_id, mmsi_a, mmsi_b)`.
+**Plan (srv-01 → pnav, 2026-10-27):**
 
-### Example — observation **340095** (ALPHA / PARMELIA I)
-
-| Join | member rows | notes |
-|------|-------------|-------|
-| Old plain JOIN | **3** | `564462000`×1 + `565209000`×2 |
-| New LATERAL | **2** | one static row per MMSI |
-
-`565209000` static rows:
-
-| id | shipName | ts |
-|----|----------|-----|
-| 50121 | PARMELIA I | 2026-10-27 03:11:54 |
-| 37968 | PARMELIA 1 | 2026-09-04 15:37:48 |
-
----
-
-## 2. Fix (STS only)
-
-### 2.1 One-row-per-MMSI join
-
-Replaced plain JOIN with **LATERAL** + `ORDER BY ts DESC NULLS LAST, id DESC LIMIT 1` (uses `ix_ais_static_mmsi_ts`). Class-B path unchanged (`class_b_join`). Payload columns unchanged (`imo` + `DIM_SELECT`).
-
-### 2.2 Safety nets
-
-| Layer | Dedupe key |
-|-------|------------|
-| `load_members` | `(observation_id, mmsi)` |
-| `find_pairs_within_observations` (before pairing) | `(observation_id, mmsi)` |
-| `find_pairs_within_observations` (after pairing) | `(observation_id, mmsi_a, mmsi_b)` |
-
-### 2.3 Not done
-
-- No new index, no DDL, no data deletes  
-- Non-STS modules listed below — **not** changed  
-
----
-
-## 3. EXPLAIN (LATERAL on obs 340095)
-
-Index used: **`ix_ais_static_mmsi_ts`** `(mmsi, ts DESC)`.
-
-```
-Nested Loop Left Join  (actual rows=2)
-  ->  Index Scan using ix_ais_vesselproximitymember_observation_id
-        Index Cond: (observation_id = 340095)
-  ->  Limit
-        ->  Sort  (Sort Key: ais_static.ts DESC NULLS LAST, ais_static.id DESC)
-              ->  Index Scan using ix_ais_static_mmsi_ts on ais_static
-                    Index Cond: (mmsi = m.mmsi)
-Execution Time: 0.061 ms
+```text
+Sort  (cost=25.42..25.43 rows=1 width=101)
+  Sort Key: "tsDetected" DESC
+  ->  Index Scan using idx_vesselinrestrictzone_open on ais_vesselinrestrictzone  (cost=0.27..25.41 rows=1 width=101)
+        Index Cond: (mmsi = ANY ('{...}'::integer[]))
 ```
 
----
-
-## 4. Verification
-
-| Check | Before (inflated) | After |
-|-------|-------------------|-------|
-| Members for 340095 | 3 | **2** |
-| Pairs for 340095 | **2** | **1** (ALPHA–PARMELIA I, 27.37 m) |
-| Active high-score members | 90 rows (88 unique) | **88** |
-| Active pairs (35 m, no anchorage cut) | **66** | **63** |
-| Unique `(obs, mmsi_a, mmsi_b)` | 63 | **63** |
-
-**Pair-count delta = 3** — exactly the duplicate pair rows removed; unique pair set unchanged.
-
-Unit tests: `restapi/tests/test_sts_members_dedupe.py` — **3 passed**.
+Artifact: `reports/_vz_tune_artifacts/explain_open.txt`.
 
 ---
 
-## 5. Other API modules — `ais_static` joins (grep)
+## 3. Tests
 
-| Module | Pattern | Action |
-|--------|---------|--------|
-| **`sts_detection.py`** | was plain `LEFT JOIN ais_static s ON s.mmsi` | **Fixed** (LATERAL) |
-| `loitering.py` | `class_a_join` (DISTINCT ON one-row) | OK — leave |
-| `dark_vessels.py` | `class_a_join` | OK — leave |
-| `illegal_anchoring.py` | `class_a_join` | OK — leave |
-| `timelineplayback.py` | `LEFT JOIN public.ais_static s ON s.mmsi = p.mmsi` | **Listed only** (not STS) |
-| `spoofing.py` | window / `ORDER BY … CURRENT_STATIC_ROW_ORDER` | OK — leave |
-| `spoofing_vessel_analysis.py` | window + `rowcount_static = 1` | OK — leave |
-| `ship_risk_attach.py` | `WHERE mmsi = :mmsi … LIMIT 1` | OK — leave |
-| `vessel_size.py` | defines `class_a_join` / `class_b_join` | helper |
+```text
+venv/bin/python -m pytest backend/tests/test_vesselzone_pnav_tuning.py -q
+........  8 passed
+```
 
----
-
-## 6. Deploy (srv-01)
-
-| Step | Result |
+| Test | Proves |
 |------|--------|
-| `srv_backup.sh` | `/home/srvadmin/py/backup-20261027-035119` — `BACKUP_OK` |
-| Copied | `sts_detection.py` → `/home/srvadmin/py/mantis/sts_detection.py` |
-| Restart | **only** `ais_mantis_api` |
-| DDL / srv-dp | none |
-
-### PIDs before → after
-
-| Unit | Before | After |
-|------|--------|-------|
-| ais_mantis_api | 1490384 | **1837406** (restarted) |
-| ais_aton_datapreproc | 772689 | 772689 |
-| ais_extract_lloyds | 442266 | 442266 |
-| ais_jkptg_ddms_uat | 1004174 | 1004174 |
-| ais_ptp_vesselactivities | 861260 | 861260 |
-| ais_sts_shadow | 1824023 | 1824023 |
-| ais_sts_vesselzone | 1829224 | 1829224 |
-| ais_tss_aisposition | 1296170 | 1296170 |
-| ais_tss_aisposition_b | 1523778 | 1523778 |
-| ais_tss_aisstatic | 839051 | 839051 |
-| ais_tss_aisstatic_b | 841710 | 841710 |
-| ais_tss_analyzer | 840639 | 840639 |
-| ais_tss_reporting | 1819043 | 1819043 |
-| srvhealth-reporter | 1661570 | 1661570 |
-
-Only `ais_mantis_api` changed.
+| `test_decide_zone_changes_matches_legacy_replay` | Same sample inputs → identical inserts / stays / exits vs pre-tuning loop |
+| `test_retry_once_then_succeeds` / `_skips` | One retry max; never a loop |
+| `test_cleanup_hourly_constant` | `CLEANUP_INTERVAL_MINUTES == 60` |
+| `test_cleanup_uses_one_transaction` | Single `begin()` batch UPDATE |
+| `test_engine_pool_settings` | Cached pool + timeouts + `sts_vesselzone` name |
+| `test_write_batches_chunk_size` | Chunks of 300 |
+| `test_bbox_from_outer_region` | Finite bbox from outer region |
 
 ---
 
-## 7. Rollback
+## 4. Deploy PIDs
+
+### Before restart (UTC 03:19:47)
+
+| Unit | MainPID | State |
+|------|---------|-------|
+| `ais_sts_vesselzone` | **756631** | active |
+| `ais_sts_vesselzone_b` | 0 | inactive |
+| `ais_tss_analyzer` | 840639 | active |
+| `ais_tss_reporting` | 1819043 | active |
+| `ais_mantis_api` | 1490384 | active |
+| `srvhealth-reporter` | 1661570 | active |
+| `pyvam-api` | 1508924 | active |
+| `pyvam-processor` | 1555053 | active |
+| `ais_sts_shadow` | 1824023 | active |
+
+### After restart (UTC 03:20:56) — only vesselzone restarted
+
+| Unit | MainPID | State |
+|------|---------|-------|
+| `ais_sts_vesselzone` | **1829224** | active |
+| `ais_sts_vesselzone_b` | 0 | inactive (unchanged) |
+| All other listed units above | **unchanged** | — |
+
+### After 1h verify (UTC 04:24:49)
+
+| Unit | MainPID | Note |
+|------|---------|------|
+| `ais_sts_vesselzone` | **1829224** | Stable since restart |
+| `ais_sts_vesselzone_b` | 0 | Still inactive |
+| `ais_tss_analyzer` | 840639 | Unchanged |
+| `ais_mantis_api` | **1837406** | Changed **without** our restart (external); not caused by this deploy |
+
+---
+
+## 5. One-hour verification (03:21 → 04:20 UTC)
+
+Monitor: `/tmp/sts_vz_tune/monitor_1h.py` → `monitor_1h.jsonl` (60 samples @ 60 s).
+
+| Metric | Before (≈20 min journal) | After (1 h monitor / journal) |
+|--------|--------------------------|-------------------------------|
+| `sts_vesselzone` pnav connections | (blank / no named app; many engines) | **max 1**, avg 1.0 (**≤ 4**) |
+| `idle in transaction` (`sts_vesselzone`) | n/a (unnamed) | **max 0** |
+| Cycle DB time (Fetching → Upserting done) | min/avg/max **1.62 / 2.46 / 4.41 s** (n=36) | min/avg/max/p50 **1.01 / 1.22 / 1.57 / 1.19 s** (n=60) |
+| `Clearing invalid data` | **every cycle** (36 clears / 36 fetches) | **2** in ~1 h (startup + hourly) |
+| `Fetching data` / done | 36 / 36 | **123 / 123** (~30 s sleep) |
+| Errors (`Exception` / read / skip / retry fail) | — | **0** |
+| Open rows (`tsOut` IS NULL) | 493 | 493 → **491** |
+| New `tsDetected` last 1h | 12 | 12 → **8** (similar order) |
+| `tsCurrent` last 1h | 74 | 75 → **80** (similar order) |
+
+### pnav `application_name` after (subset)
+
+| application_name | count (sample) |
+|------------------|----------------|
+| `sts_vesselzone` | 1 |
+| `vesselzone` (TSS analyzer) | 1 |
+| other `sts_*` | 1 each |
+
+---
+
+## 6. Rollback
 
 ```bash
-BK=/home/srvadmin/py/backup-20261027-035119
-# restore sts_detection.py from backup tree, then:
-sudo systemctl restart ais_mantis_api
+# restore from backup tree
+sudo systemctl stop ais_sts_vesselzone
+cp /home/srvadmin/py/backup-20261027-031948/backend/vesselzone.py \
+   /home/srvadmin/py/sts/backend/vesselzone.py
+sudo systemctl start ais_sts_vesselzone
+# confirm only this unit's MainPID changes
 ```
 
 ---
 
-## 8. Decision
+## 7. Repo files
 
-| Item | Status |
-|------|--------|
-| Root cause | Confirmed (`ais_static` ×2 on 565209000) |
-| Fix live | Yes |
-| Obs 340095 | **1 pair** |
-| Total pairs | Differs only by removed duplicates (66→63) |
-| GO | **GO** |
+| Path | Role |
+|------|------|
+| `backend/vesselzone.py` | Tuned Class A analyzer |
+| `backend/tests/test_vesselzone_pnav_tuning.py` | Replay / retry / cleanup / pool tests |
+| `reports/cursor-report.md` | This report |
+| `reports/_vz_tune_artifacts/` | EXPLAIN, PIDs, backup log, monitor jsonl |
+
+**Commit scope:** vesselzone port + tests + this report only (no shadow / unrelated WIP).

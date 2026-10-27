@@ -1,0 +1,30 @@
+stamp_utc=2026-10-27T03:19:47Z
+=== systemctl MainPIDs BEFORE ===
+ais_sts_vesselzone 756631 active 
+ais_sts_vesselzone_b 0 inactive 
+ais_tss_analyzer 840639 active 
+ais_tss_reporting 1819043 active 
+ais_mantis_api 1490384 active 
+srvhealth-reporter 1661570 active 
+pyvam-api 1508924 active 
+pyvam-processor 1555053 active 
+ais_sts_shadow 1824023 active 
+=== all ais_/pyvam/srvhealth MainPID ===
+  ais_aton_datapreproc.service     loaded active running ATON DATA PREPROCESS
+  ais_extract_lloyds.service       loaded active running EXTRACT LLOYDS DATA FOR AIS STATIC
+  ais_jkptg_ddms_uat.service       loaded active running [PRODUCTION] JKPTG DDMS RELOAD DATA PROCESSOR
+  ais_mantis_api.service           loaded active running MANTIS API
+  ais_ptp_vesselactivities.service loaded active running TRACKING VESSEL ACTIVITIES IN PORT LIMIT
+  ais_sts_shadow.service           loaded active running MANTIS STS shadow detector (rule C) — test only
+  ais_sts_vesselzone.service       loaded active running PNAV STS ANALYZER
+  ais_tss_aisposition.service      loaded active running TSS BACKEND PROCESSOR FOR AIS POSITION DATA
+  ais_tss_aisposition_b.service    loaded active running TSS BACKEND PROCESSOR FOR AIS POSITION DATA - CLASS B
+  ais_tss_aisstatic.service        loaded active running TSS BACKEND PROCESSOR FOR AIS STATIC DATA
+  ais_tss_aisstatic_b.service      loaded active running TSS BACKEND PROCESSOR FOR AIS STATIC DATA - CLASS B
+  ais_tss_analyzer.service         loaded active running TSS ZONE DATA ANALYZER
+  ais_tss_reporting.service        loaded active running TSS SHIP REPORTING API
+  pyvam-api.service                loaded active running PyVAM REST API
+  pyvam-dash.service               loaded active running PyVAM Dash console
+  pyvam-processor.service          loaded active running PyVAM inbound visit processor
+  pyvam-soms-dash.service          loaded active running PyVAM SOMS destination statistics
+  srvhealth-reporter.service       loaded active running srv-01 health reporter (UPSERT snapshot into pnav)

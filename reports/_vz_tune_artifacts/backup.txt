@@ -1,0 +1,11 @@
+src=/home/srvadmin/py/sts
+dest=/home/srvadmin/py/backup-20261027-031948
+prev=e9996430
+new=pnav-tuning-a
+exclude=venv __pycache__ *.pyc backend/processor/cache *.log logs
+dry_run=0
+BACKUP=/home/srvadmin/py/backup-20261027-031948
+files=4
+68K	/home/srvadmin/py/backup-20261027-031948
+old_full_tree=496M
+BACKUP_OK

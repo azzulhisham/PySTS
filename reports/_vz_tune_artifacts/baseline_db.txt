@@ -1,0 +1,4 @@
+open_rows=493
+tsDetected_last_1h=12
+tsCurrent_last_1h=74
+apps=[('srvhealth_api', 15), ('', 11), ('pyvam_api', 4), ('jkptg_ais_tracking_pnav', 2), ('pyvam_processor', 1), ('sts_loiter', 1), ('sts_proximity', 1), ('sts_review', 1), ('sts_shadow', 1), ('sts_slowspeed', 1), ('sts_spoof_store', 1), ('sts_trajectory', 1), ('vesselzone', 1), ('vscode-pgsql - untitled:Untitled-1', 1), ('aisposition', 1), ('aisposition_b', 1), ('aisstatic_b', 1)]

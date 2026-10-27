@@ -1,0 +1,11 @@
+stamp_utc=2026-10-27T03:20:56Z
+=== systemctl MainPIDs AFTER restart ===
+ais_sts_vesselzone 1829224 active 
+ais_sts_vesselzone_b 0 inactive 
+ais_tss_analyzer 840639 active 
+ais_tss_reporting 1819043 active 
+ais_mantis_api 1490384 active 
+srvhealth-reporter 1661570 active 
+pyvam-api 1508924 active 
+pyvam-processor 1555053 active 
+ais_sts_shadow 1824023 active 

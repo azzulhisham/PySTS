@@ -1,0 +1,4 @@
+Sort  (cost=25.42..25.43 rows=1 width=101)
+  Sort Key: "tsDetected" DESC
+  ->  Index Scan using idx_vesselinrestrictzone_open on ais_vesselinrestrictzone  (cost=0.27..25.41 rows=1 width=101)
+        Index Cond: (mmsi = ANY ('{533000001,533130611,565336000,412439588,413591570}'::integer[]))
