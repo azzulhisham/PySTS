@@ -1,8 +1,11 @@
-# Live STS pair distance: 30 m → 100 m (local prepare)
+# Deploy: live STS pair distance 30 m → 100 m
 
-**Date (local work):** 2026-11-06  
-**Scope:** Implement and test locally only. **No** push, deploy, restart, live DB queries, production load tests, schema/index changes, or production data changes.  
-**Prior `reports/cursor-report.md` archived as:** [`mantis-147-suspected-bunkering-deploy-2026-10-27.md`](mantis-147-suspected-bunkering-deploy-2026-10-27.md)
+**Date (UTC):** 2026-11-06  
+**Approver:** Zulhisham  
+**Feature commit:** `3cf553397dec4a41df302a1bb2fc62b4363a196c`  
+**Push:** not performed  
+**Rollback:** not required  
+**Prior prepare report archived as:** [`sts-pair-distance-100m-prepare-2026-11-06.md`](sts-pair-distance-100m-prepare-2026-11-06.md)
 
 ---
 
@@ -10,165 +13,190 @@
 
 | Item | Result |
 |------|--------|
-| Live candidate gate | `MAX_DISTANCE_M = 100.0`, strict `<` preserved |
-| API presentation recompute | Same `100.0` / strict `<` — 30–100 m pairs no longer hidden |
-| Shadow Rule C | Untouched |
-| Movement stop/exit radii | Untouched |
-| API fields | No remove/rename/change of existing payload fields |
-| Local tests | **169 passed** (distance suite + restapi + shadow Rule C) |
-| Deploy | **Not executed** — plan below for later approval |
-
-Call-path check: API `find_pairs_within_observations` recomputes unordered pairs among observation members with the same DuckDB sphere/`ST_Point(lon, lat)` convention as the pipeline gate. It is not a separate product rule; aligning it to 100 m does **not** require clustering/scoring redesign. Work proceeded.
+| Commit | `3cf5533` — feature + tests + docs + prepare report |
+| srv-dp detector | **Deployed & restarted** — `MAX_DISTANCE_M=100.0`, `DETECTION_VERSION=2.4-pair-100m` |
+| srv-01 API | **Deployed & restarted** — presentation `MAX_DISTANCE_M=100.0` + swagger |
+| Strict `< 100` | Preserved in both layers |
+| Shadow / sanctions / other services | Untouched |
+| Observation | ≥4 completed detector cycles after restart; no Traceback/timeout/lock errors |
+| Rollback | Not executed |
 
 ---
 
-## 2. Verified deployment context (pre-change)
+## 2. Pre-deploy checks
 
-| Host / unit | Role |
-|-------------|------|
-| **srv-dp** `ais_vesselproximitydetection.service` | Live detector: `/home/srvadmin/sts/vesselproximitydetection.py` |
-| **srv-01** MANTIS API (`ais_mantis_api` / container as deployed) | Reads open observations; `restapi/sts_detection.py` presentation filter |
+| Check | Result |
+|-------|--------|
+| `git fetch` / `main` vs `origin/main` | In sync before feature commit; no remote scope change |
+| Local tests re-run | **169 passed** (`test_sts_pair_distance_100m` + shadow Rule C + `restapi/tests/`) |
+| Live presentation consumers | Only `/home/srvadmin/py/mantis` (`ais_mantis_api`). Other `sts_detection.py` copies are **backup trees only**. No second live API host for this path. |
+| Shadow Rule C | Separate unit `ais_sts_shadow` — left alone |
 
-| Layer | Was | Now (local tree) |
-|-------|-----|------------------|
-| Pipeline `MAX_DISTANCE_M` | `30.0` | `100.0` |
-| Pipeline comparison | strict `<` | strict `<` (unchanged) |
-| Pipeline bbox prefilter | fixed `0.001` deg (~110 m) | `(max_distance_m / 111320) * 2` |
-| API `MAX_DISTANCE_M` | `35.0` | `100.0` |
-| `DETECTION_VERSION` | `2.3-tanker-pair-score` | `2.4-pair-100m` |
-| Shadow `sts_shadow_detection.py` | separate Rule C | unchanged |
+### Baseline (before restart)
 
----
-
-## 3. File-by-file summary
-
-| Path | Change |
-|------|--------|
-| `backend/vesselproximitydetection.py` | `MAX_DISTANCE_M` 30→100; `DETECTION_VERSION` → `2.4-pair-100m`; bbox scales with `max_distance_m` so 100 m pairs are not dropped by the old ~110 m box |
-| `restapi/sts_detection.py` | `MAX_DISTANCE_M` 35→100; docs/comments align with live gate |
-| `restapi/static/swagger.json` | STS description `< 100 m`; `maxDistanceM` example `100.0` |
-| `backend/mantis-detection.md` | Factor table + layer-mismatch + changelog for 100 m alignment |
-| `backend/todo.md` | Marked 100 m align done |
-| `backend/tests/test_sts_pair_distance_100m.py` | **New** local fixtures: boundaries at 29/30/35/99/100/100.1/150; old 30 m still excludes 50 m; identity + candidate SQL still require stop/stale |
-| `backend/sts_shadow_detection.py` | **Not modified** |
-| Unrelated projects / sanctions / pending work | **Not modified** |
+| Host / signal | Value |
+|---------------|-------|
+| srv-dp unit | `ais_vesselproximitydetection` active, PID **1944630** |
+| Live detector file | `/home/srvadmin/sts/vesselproximitydetection.py` — `MAX_DISTANCE_M=30.0`, `DETECTION_VERSION=2.3-tanker-pair-score` |
+| Detector SHA (before) | `3b7a0f450fe04597f07308a3cb60dbd4c6c87051c5377b10937e0fa2c3f0a8b4` |
+| Cycle cadence | ~33–34 s between “System sleep” lines |
+| Last pre-change summary | `Clusters: 73 open/updated, 1 new, 0 closed (87 pair edges, 1799 vessels checked)` |
+| srv-01 unit | `ais_mantis_api` active, PID **1879238** |
+| Live API files | `/home/srvadmin/py/mantis/sts_detection.py` (`MAX_DISTANCE_M=35.0`), `static/swagger.json` (≤35 m text) |
+| API SHA (before) | sts `651ca087…bcb4a`; swagger `1e923899…8348c` |
+| Unauth smoke | `GET /mantis/sts-activities` → **401** |
 
 ---
 
-## 4. Behaviour preserved (non-distance)
+## 3. Feature commit contents
 
-| Condition | Status |
-|-----------|--------|
-| Stopped ≥ 1 h **or** stale ≥ 30 min (`load_candidate_vessels`) | Unchanged |
-| `tsout IS NULL`, latest activity, ship type 70–89 | Unchanged |
-| Same-hull `is_same_vessel` before clustering | Unchanged |
-| Cluster connected components, close grace, suspicion score | Unchanged |
-| Review / notification thresholds (e.g. score ≥ 4.5) | Unchanged |
-| Movement high-speed exit / stop radii | Unchanged (separate code paths) |
-| Shadow Rule C bands (`100m` / `tanker200m`) | Unchanged |
+| Path | Role |
+|------|------|
+| `backend/vesselproximitydetection.py` | Gate 100 m + scaled bbox + version `2.4-pair-100m` |
+| `restapi/sts_detection.py` | Presentation recompute 100 m |
+| `restapi/static/swagger.json` | Docs / `maxDistanceM` example 100 |
+| `backend/tests/test_sts_pair_distance_100m.py` | Boundary + non-distance regressions |
+| `backend/mantis-detection.md`, `backend/todo.md` | Docs |
+| `reports/cursor-report.md` (then prepare archive) | Prepare report |
+| `reports/mantis-147-suspected-bunkering-deploy-2026-10-27.md` | Prior report archive |
 
----
-
-## 5. Boundary convention (strict `<`)
-
-| Intended sphere distance (m) | Pipeline gate @ 100 | API recompute @ 100 |
-|------------------------------|---------------------|---------------------|
-| 29 | pass | pass |
-| 30 | pass | pass |
-| 35 | pass | pass |
-| 99 / 99.9 | pass | pass |
-| **100.0** | **fail** | **fail** |
-| 100.1 / 101 / 150 | fail | fail |
-
-With explicit `max_distance_m=30.0`, a 50 m pair still fails (convention preserved).
-
-Fixtures place pairs so DuckDB’s `ST_Distance_Sphere` under the live `ST_Point(longitude, latitude)` call order yields the intended metre value (same convention as production). Absolute geodesy of that Point order is a **pre-existing** DuckDB/spatial detail; this change does **not** reorder `ST_Point` arguments.
+Message: *Widen live STS pair distance gate from 30 m to 100 m.*
 
 ---
 
-## 6. Test results (actual)
+## 4. Deployed files and backups
 
-Environment: `/Users/zultan/sources/python/PySTS/venv/bin/python` (DuckDB available).
+### srv-dp `10.10.20.200`
 
-```text
-pytest backend/tests/test_sts_pair_distance_100m.py \
-       backend/tests/test_sts_shadow_rule_c.py \
-       restapi/tests/
-→ 169 passed, 2 warnings (JWT test key length in suspected-bunkering only)
+| Item | Value |
+|------|-------|
+| Unit | `ais_vesselproximitydetection.service` |
+| Exec path | `/usr/bin/python3 /home/srvadmin/sts/vesselproximitydetection.py` |
+| Deployed file | `/home/srvadmin/sts/vesselproximitydetection.py` |
+| Backup | `/home/srvadmin/sts/backup-20261106-040346/` |
+| Backup SHA (before) | `3b7a0f450fe04597f07308a3cb60dbd4c6c87051c5377b10937e0fa2c3f0a8b4` |
+| Live SHA (after) | `51c9924216b00a1faaadf1e1362bf3a7ad517bd3b0f1fc8d4906899f5965c8e7` (= local commit) |
+| Syntax check | `python3 -m py_compile` on staged file — OK before activation |
+| Restart | **only** `ais_vesselproximitydetection` |
+| PID before → after | **1944630 → 4187395** |
+| Startup log | `Proximity detection started (interval=30s, grace=60s, threshold=100.0m).` |
+
+### srv-01 `10.10.20.201`
+
+| Item | Value |
+|------|-------|
+| Unit | `ais_mantis_api.service` |
+| WorkingDirectory | `/home/srvadmin/py/mantis` |
+| Deployed files | `sts_detection.py`, `static/swagger.json` |
+| Backup | `/home/srvadmin/py/backup-20261106-040346/` |
+| Backup SHA (before) | sts `651ca087…`; swagger `1e923899…` |
+| Live SHA (after) | sts `05e8aeb62f203b00120b0035e6ed7ab6d422f5aef38be825e83791137977cb99`; swagger `b837e9ba23fc47d220715dd0baf96cf8ac7a41d79c3f3c927889eb36e1d269e3` |
+| `DEPLOYED_COMMIT.txt` | `3cf553397dec4a41df302a1bb2fc62b4363a196c` |
+| Syntax check | `py_compile` + `json.load(swagger)` — OK before activation |
+| Restart | **only** `ais_mantis_api` |
+| PID before → after | **1879238 → 3009449** |
+
+No whole-repo copy onto live folders.
+
+---
+
+## 5. Unrelated services (must stay up / untouched)
+
+| Unit | Host | Status after deploy |
+|------|------|---------------------|
+| `ais_sts_shadow` | srv-01 | active, PID **1824023** (unchanged) |
+| `ais_sts_vesselzone` | srv-01 | active, PID **1829224** (unchanged) |
+| `ais_tss_reporting` | srv-01 | active |
+| `pyvam-api` | srv-01 | active |
+| `ais_aton_datapreproc` | srv-01 | active, PID **772689** |
+| `ais_vesselstsreview` | srv-dp | active (not restarted for this change) |
+
+---
+
+## 6. Post-deploy observation
+
+### Detector cycles (after 04:04:57 UTC restart)
+
+| Time (UTC) | Log summary |
+|------------|-------------|
+| 04:05:08 | `52 open/updated, 94 new, 0 closed (256 pair edges, 1803 vessels checked)` |
+| 04:05:45 | `146 open/updated, 0 new, 21 closed (256 pair edges, 1802 vessels)` |
+| 04:06:21 | `146 open/updated, 0 new, 0 closed (256 pair edges, 1803 vessels)` |
+| 04:06:58 | `145 open/updated, 0 new, 0 closed (255 pair edges, 1803 vessels)` |
+
+| Metric | Baseline (30 m) | After (100 m) |
+|--------|-----------------|---------------|
+| Pair edges / cycle | **87** | **~255–256** |
+| Vessels checked | ~1799 | ~1802–1803 |
+| Open clusters (steady) | ~74 | ~145–146 |
+| Cycle spacing | ~33–34 s | ~36–37 s |
+| Traceback / timeout / lock | none observed in window | **none** |
+
+First cycle after restart opened many new clusters (expected when the gate widens); subsequent cycles stabilised with similar edge counts and no error spam.
+
+### API smoke
+
+| Check | Result |
+|-------|--------|
+| `GET /mantis/sts-activities` no token | **401** `{"message":"Unauthorized"}` (unchanged) |
+| Swagger STS description | contains **100 m**; old **35 m** text gone |
+| `maxDistanceM` example | **100.0** |
+| API journal Traceback (excl. unauth noise) | none in post-restart window |
+
+---
+
+## 7. Proven vs unverified
+
+| Check | Status |
+|-------|--------|
+| Deployed files match commit checksums | **Proven** |
+| Services active; startup `threshold=100.0m` | **Proven** |
+| ≥2 (actually 4) completed detector cycles | **Proven** |
+| Pair-edge volume rise vs baseline | **Proven** (87 → ~256) |
+| No new Traceback/timeout in observed window | **Proven** |
+| Unauth API contract (401) | **Proven** |
+| Swagger distance text | **Proven** |
+| Authenticated STS payload / `maxDistanceM` field live | **Unverified** (no JWT minted per safety rules) |
+| Specific 30–100 m pair end-to-end in UI/API | **Unverified** (would need auth + known pair; startup alone is not proof) |
+| Sustained review false-positive rate / pnav load over hours | **Unverified** — monitor separately |
+
+---
+
+## 8. Rollback (available; not executed)
+
+```bash
+# srv-dp
+BK=/home/srvadmin/sts/backup-20261106-040346
+cp -a $BK/code/vesselproximitydetection.py /home/srvadmin/sts/vesselproximitydetection.py
+sudo systemctl restart ais_vesselproximitydetection
+
+# srv-01
+BK=/home/srvadmin/py/backup-20261106-040346
+cp -a $BK/code/sts_detection.py /home/srvadmin/py/mantis/sts_detection.py
+cp -a $BK/static/swagger.json /home/srvadmin/py/mantis/static/swagger.json
+sudo systemctl restart ais_mantis_api
 ```
 
-| Suite | Outcome |
-|-------|---------|
-| `test_sts_pair_distance_100m.py` | All pass (incl. 30/35/100 boundaries) |
-| `test_sts_shadow_rule_c.py` | All pass (shadow unchanged) |
-| `restapi/tests/` (full) | All pass |
-
-No live DB, no production scans.
+Do **not** delete observations created under `2.4-pair-100m`.
 
 ---
 
-## 7. Risk note (not measured in production)
+## 9. Remaining risks
 
-Widening 30→100 m (and aligning API 35→100) **will** admit more candidate pairs into clustering, open observations, review cases, and API pair lists whenever vessels sit in the new band.
-
-| Area | Qualitative risk | Not claimed |
-|------|------------------|-------------|
-| Stored pairs / open clusters | Higher count possible | No measured Δ |
-| Cycle CPU (bbox + sphere join) | Slightly larger join window (`bbox` ~0.0018° vs 0.001°) | No timing sample |
-| Postgres writes (observations/members/review) | More upserts if more clusters persist | No prod query |
-| Reviewed false positives | More borderline pairs for human review | No rate estimate |
-| API latency | More pairs after recompute for same polygons | No load test |
-
-Candidate SQL (stop/stale/type) and score ≥ 4.5 still bound volume; this is not a full-fleet N² scan of every AIS fix.
+| Risk | Note |
+|------|------|
+| Higher pair / open-cluster counts | Observed ~3× pair edges; review queue may grow |
+| Slightly longer cycles | ~36–37 s vs ~33–34 s baseline; still near 30 s loop |
+| Wider false positives | Possible; assess via review reject rate over coming shifts |
+| Authenticated API field check | Still outstanding without token |
 
 ---
 
-## 8. Deployment / rollback plan (**do not execute**)
+## 10. Decision
 
-### Affected services
-
-| Service | Host | Artifact |
-|---------|------|----------|
-| `ais_vesselproximitydetection.service` | **srv-dp** | `/home/srvadmin/sts/vesselproximitydetection.py` |
-| MANTIS REST API (`ais_mantis_api` / deployed container) | **srv-01** | `restapi/sts_detection.py` (+ swagger static if shipped) |
-
-Shadow Rule C unit (if present) must **not** be restarted for this change.
-
-### Deploy steps (later approval)
-
-1. Backup live files with timestamped `.bak-*` names on each host.
-2. Copy updated `vesselproximitydetection.py` to srv-dp path; restart **only** `ais_vesselproximitydetection`.
-3. Deploy API package/image with `sts_detection.py` + swagger; restart **only** the MANTIS API unit/container.
-4. Confirm logs: `DETECTION_VERSION` / threshold logging shows 100 m; no crash loop.
-5. Spot-check API `maxDistanceM` in STS responses = 100; sample a known pair in the 30–100 m band if one is available from normal traffic (no forced full scan).
-
-### Rollback
-
-1. Restore `.bak-*` of `vesselproximitydetection.py` on srv-dp; restart proximity service.
-2. Restore previous API artifact; restart API only.
-3. Open observations created under `2.4-pair-100m` remain in DB; they age out via existing close grace / lifecycle — no schema rollback. Optional: leave them; do not bulk-delete without a separate approved data plan.
-
-### Post-deploy assessment (observe only after approval)
-
-| Signal | How to assess |
-|--------|----------------|
-| Candidate / pair counts | Compare cycle logs (`pairs`, vessel counts) before vs after over several hours |
-| Processing time | Same log timings / systemd journal cycle duration — flag if loop approaches `LOOP_INTERVAL_SECONDS` |
-| DB load | Existing monitoring on `pnav` (connections, write rate on proximity tables) — no new heavy queries |
-| False positives | Review queue volume and verifier reject rate for new `detection_version` |
-
----
-
-## 9. Explicit non-actions this session
-
-- No `git push`, no remote deploy, no service restart  
-- No production DB reads/writes, no load tests  
-- No DDL / index / historical backfill  
-- No shadow detector, sanctions, or unrelated project edits  
-- No local git commit unless separately requested  
-
----
-
-## 10. Approval gate
-
-Ready for a **separate** deploy approval covering srv-dp proximity + srv-01 API only. Until then, production remains on 30 m / 35 m.
+| Item | Status |
+|------|--------|
+| Deploy | **Complete** on srv-dp + srv-01 |
+| Rollback | Not needed |
+| Push | Not done (await separate request) |
+| GO for continued observation | **GO** — monitor pair edges, cycle time, review volume |
