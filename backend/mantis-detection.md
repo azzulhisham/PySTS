@@ -136,10 +136,10 @@ The **slow-speed and trajectory pipelines do not filter shipType**. They write a
 
 | Factor | Current value | Role |
 | --- | --- | --- |
-| Pair / cluster distance | `MAX_DISTANCE_M = 30.0` | DuckDB `ST_Distance_Sphere` |
+| Pair / cluster distance | `MAX_DISTANCE_M = 100.0` (strict `<`) | DuckDB `ST_Distance_Sphere` |
 | Loop interval | `LOOP_INTERVAL_SECONDS = 30` | main loop |
 | Close grace | `CLOSE_GRACE_SECONDS = 60` (~2 missed cycles) | close open cluster |
-| Detection version | `DETECTION_VERSION = "2.0"` | stored on observation |
+| Detection version | `DETECTION_VERSION = "2.4-pair-100m"` | stored on observation |
 | Candidate: stopped | `tsstop IS NOT NULL AND tsstop <= now() - interval '1 HOURS'` | from **movement** table |
 | Candidate: stale | `tscurrent <= now() - interval '30 MINUTES'` | OR with stopped |
 | Latest activity only | `rowcount_mmsi = 1` | latest open row per MMSI |
@@ -159,7 +159,7 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 | Factor | Current value | File |
 | --- | --- | --- |
 | STS min score | `MIN_SUSPICION_SCORE = 4.5` | `sts_detection.py` |
-| STS pair recompute | `MAX_DISTANCE_M = 35.0` (**not** 30) | `sts_detection.py` |
+| STS pair recompute | `MAX_DISTANCE_M = 100.0` (aligned with pipeline) | `sts_detection.py` |
 | STS clusters | `is_open = TRUE` | `sts_detection.py` |
 | STS geometry | centroid in **parent** polygon; drop if in **Excl** hole | `sts_detection.py` |
 | Illegal: stopped/stale | stop ≥ **1 h** OR `tscurrent` ≥ **30 min** stale | `illegal_anchoring.py` |
@@ -204,7 +204,7 @@ These knobs sit in `restapi/` and can hide pipeline results even when the backen
 
 | Topic | Pipeline | API | Effect |
 | --- | --- | --- | --- |
-| STS pair distance | **30 m** | **35 m** recompute | **Intentional for now** — API may pair slightly farther than the cluster builder |
+| STS pair distance | **100 m** (strict `<`) | **100 m** recompute | **Aligned 2026-11-06** — was 30 / 35; both now match so 30–100 m pairs are not dropped at the API |
 | STS score | all open clusters scored | only **`suspicion_score >= 4.5`** | many clusters never reach the frontend |
 | Slow-speed vs trajectory SOG | dark uses **3.0 kn**; movement uses **0.5 kn** | — | “slow” and “stopped” are different populations |
 | Confirmed-stop rowcount | dark **30**; movement **20** | dark API excludes `rowcount >= 30` | do not mix the two tables’ `rowcount` meaning |
@@ -794,6 +794,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
+| 2026-11-06 | Live STS candidate gate and API pair recompute aligned at **100 m** (strict `<`). Was pipeline 30 m / API 35 m. `DETECTION_VERSION` → `2.4-pair-100m`. Movement stop/exit radii and shadow Rule C unchanged. Local only until deploy approved. |
 | 2026-10-27 | STS shadow test (rule C): `sts_shadow_detection.py` + `ais_sts_shadow_episode` + `ais_sts_shadow.service` on srv-01. Does not write live proximity tables or change the API. See [STS shadow test](#sts-shadow-test-rule-c). |
 | 2026-10-25 | **ON HOLD** `ais_sts_vesselzone_b` on srv-01 (stop + disable) after deadlocks with `ais_sts_vesselzone` on shared `ais_vesselinrestrictzone`. Class A continues; 46 open Class B rows left open. See [ON HOLD section](#on-hold-ais_sts_vesselzone_b-class-b-restricted-zone-detection). |
 | 2026-10-20 | Merged STS notifications/pagination (`sts-notifications`) with plausibility filters v1.3. Queue pagination + `GET /mantis/sts-review/notifications` + `notified_at` stamping restored alongside `includeDataQuality` / `dataQualityCount` / `darkMaxDays` / MMSI filters. |

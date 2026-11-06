@@ -5,8 +5,8 @@ Uses active proximity clusters from ais_vesselproximityobservation
 (is_open = TRUE) with high suspicion_score, keeps those whose centroid
 falls inside a parent / watch polygon from polygons.py, drops those whose
 centroid is inside an Excl carve-out (hole), recomputes pairs at
-MAX_DISTANCE_M, and returns only paired vessels with sog/cog enriched
-from movement activities.
+MAX_DISTANCE_M (aligned with the live proximity candidate gate), and
+returns only paired vessels with sog/cog enriched from movement activities.
 """
 
 from __future__ import annotations
@@ -40,7 +40,7 @@ from api_timestamps import format_last_seen_at
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-MAX_DISTANCE_M = 35.0
+MAX_DISTANCE_M = 100.0
 MIN_SUSPICION_SCORE = 4.5
 ANCHORAGE_BUFFER_M = 1000.0
 
@@ -297,7 +297,7 @@ def find_pairs_within_observations(
 ) -> pd.DataFrame:
     """
     Recompute unordered pairs among members of the same observation
-    with distance < max_distance_m (default 35 m).
+    with distance < max_distance_m (default 100 m; matches live proximity gate).
     """
     empty_cols = [
         "observation_id", "anchorage_name", "suspicion_score", "duration_seconds",

@@ -49,7 +49,7 @@ Behaviour first. Do these without waiting for perfect lists.
 
 ### STS (`vesselproximitydetection.py` + `restapi/sts_detection.py`)
 
-- [ ] Keep pipeline cluster distance **30 m**; API pair recompute stays **35 m** until you decide to align.
+- [x] Align pipeline cluster distance and API pair recompute at **100 m** (strict `<`). Was 30 / 35.
 - [ ] **Skipped for now.** Use bunker register to confirm lawful bunkering when a cargo ship sits beside a tanker. Resume when a register exists.
 - [ ] Suspicion score remains a **hint**; ground truth stays human `is_anomaly`.
 

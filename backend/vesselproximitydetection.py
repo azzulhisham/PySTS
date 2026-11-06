@@ -35,8 +35,8 @@ closed with reason 'same_vessel'.
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-DETECTION_VERSION = "2.3-tanker-pair-score"
-MAX_DISTANCE_M = 30.0
+DETECTION_VERSION = "2.4-pair-100m"
+MAX_DISTANCE_M = 100.0
 LOOP_INTERVAL_SECONDS = 30
 CLOSE_GRACE_SECONDS = 60
 GEOCODE_URL = "https://api.bigdatacloud.net/data/reverse-geocode-client"
@@ -275,9 +275,10 @@ def find_close_pairs(df: pd.DataFrame, max_distance_m: float = MAX_DISTANCE_M) -
     slim = df[["mmsi", "curlongitude", "curlatitude"]].copy()
     duckdb.register("vessels", slim)
 
-    # Bounding-box prefilter (~110 m) then the same sphere test. Pairs beyond
-    # ~110 m cannot be under MAX_DISTANCE_M (30 m), so the result set is unchanged
-    # and DuckDB does not compute a full N² sphere join of every cargo/tanker.
+    # Bounding-box prefilter then the same sphere test. ~1° latitude ≈ 111.32 km;
+    # pad 2× so E–W pairs near max_distance_m still pass at mid-latitudes. DuckDB
+    # does not compute a full N² sphere join of every cargo/tanker.
+    bbox_deg = (float(max_distance_m) / 111_320.0) * 2.0
     return duckdb.sql(f"""
         SELECT
             a.mmsi AS mmsi_a,
@@ -288,8 +289,8 @@ def find_close_pairs(df: pd.DataFrame, max_distance_m: float = MAX_DISTANCE_M) -
             ) AS distance_m
         FROM vessels a
         INNER JOIN vessels b ON a.mmsi < b.mmsi
-        WHERE abs(a.curlatitude - b.curlatitude) < 0.001
-          AND abs(a.curlongitude - b.curlongitude) < 0.001
+        WHERE abs(a.curlatitude - b.curlatitude) < {bbox_deg}
+          AND abs(a.curlongitude - b.curlongitude) < {bbox_deg}
           AND ST_Distance_Sphere(
                 ST_Point(a.curlongitude, a.curlatitude),
                 ST_Point(b.curlongitude, b.curlatitude)

@@ -309,7 +309,7 @@
           "maxDistanceM": {
             "type": "number",
             "format": "double",
-            "example": 35.0
+            "example": 100.0
           },
           "openHighScoreCount": {
             "type": "integer",
@@ -3330,7 +3330,7 @@
           "mantis"
         ],
         "summary": "Get active high-suspicion STS pairs inside anchorage polygons expanded by 1 km.",
-        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent polygon **expanded by 1 km**. **Excl** carve-outs stay on their original ring and still drop a cluster. Pairs are recomputed at \u2264 **35 m**. Each vessel includes **`lastSeenAt`** (AIS time of the fix used for that member). **`pairedAt`** is pipeline wall clock only — use `lastSeenAt` with GET /mantis/vessel-track. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first. `anchorageBufferM` is 1000.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
+        "description": "Returns vessel pairs from **active** (`is_open = true`) proximity clusters with **high suspicion_score** (default \u2265 4.5) whose centroid falls inside a parent polygon **expanded by 1 km**. **Excl** carve-outs stay on their original ring and still drop a cluster. Pairs are recomputed with distance **< 100 m** (aligned with the live proximity candidate gate). Each vessel includes **`lastSeenAt`** (AIS time of the fix used for that member). **`pairedAt`** is pipeline wall clock only — use `lastSeenAt` with GET /mantis/vessel-track. OFAC labels (`sanctionsMatch`) are attached per vessel; `suspicionScore` is unchanged. Listed pairs are sorted first. `anchorageBufferM` is 1000.\n\n**This Swagger page:** `pairs` and `pairedVessels` are each capped at 20 samples.",
         "operationId": "getAnchorageStsActivities",
         "security": [
           {
