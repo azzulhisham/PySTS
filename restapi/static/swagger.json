@@ -422,6 +422,40 @@
             "type": "string",
             "example": "3h 12m"
           },
+          "stopStartedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "UTC AIS time when the trajectory job first confirmed this stop (`ais_vesselmovementactivities.tsstop`: rowcount >= 20 and distance < 30 m). Null when a confirmed stop start is unavailable. Not the activity open time, not a lookback window, and not exact first-stationary time."
+          },
+          "lastObservedAt": {
+            "type": "string",
+            "format": "date-time",
+            "nullable": true,
+            "description": "UTC AIS time of the last fix on the open movement activity (`tscurrent`). Same instant as lastSeenAt / tsCurrent. Elapsed-since-confirmation never extends past this when AIS is stale."
+          },
+          "stoppedElapsedSeconds": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Seconds elapsed since stop confirmation (stopStartedAt→lastObservedAt) when stopElapsedStatus is known. Not exact total time stationary. Null when unknown. From timestamps only — never rowcount."
+          },
+          "stoppedElapsedHours": {
+            "type": "number",
+            "format": "double",
+            "nullable": true,
+            "description": "Hours elapsed since stop confirmation when known. Not exact total time stationary. Position and duration do not prove illegality."
+          },
+          "stopElapsedStatus": {
+            "type": "string",
+            "enum": ["known", "unknown"],
+            "description": "known when tsstop and tscurrent support an elapsed calculation; unknown otherwise."
+          },
+          "stopElapsedReason": {
+            "type": "string",
+            "nullable": true,
+            "description": "Explanation when stopElapsedStatus is unknown (e.g. tsstop null, missing tscurrent, inconsistent order)."
+          },
           "inRestrictedZone": {
             "type": "boolean"
           },
@@ -440,6 +474,29 @@
             "type": "string",
             "nullable": true,
             "description": "Name of the Excl hole if the position was inside one. Returned candidates are already filtered so this is typically null."
+          },
+          "inPortArea": {
+            "type": "boolean",
+            "description": "True when the last position is inside an operational port/terminal reference polygon (label only). Keep/drop still uses anchorage-wins exclusion earlier in the pipeline. These polygons are not verified legal port limits."
+          },
+          "portAreaName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Operational reference port name when inPortArea is true."
+          },
+          "portAreaTerminalName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Operational reference terminal name when the port footprint was built from terminals."
+          },
+          "atBerth": {
+            "type": "boolean",
+            "description": "True when the last position is inside an operational berth reference polygon. Not a legal finding."
+          },
+          "berthName": {
+            "type": "string",
+            "nullable": true,
+            "description": "Operational reference berth name when atBerth is true. Berth footprints are not designated anchorage boundaries."
           },
           "reason": {
             "type": "string",
@@ -547,7 +604,7 @@
           },
           "ruleVersion": {
             "type": "string",
-            "example": "v3.1-in-restricted-or-watch-exclude-excl-holes-ofac-label"
+            "example": "v3.3-suspected-anchoring-harbour-context-confirmed-stop-elapsed"
           },
           "shipTypeFilter": {
             "type": "string",
@@ -572,6 +629,19 @@
             "type": "integer",
             "description": "Count of Excl carve-out polygons (API key kept for compatibility)."
           },
+          "portAreaExcludedCount": {
+            "type": "integer"
+          },
+          "portAreaCount": {
+            "type": "integer"
+          },
+          "berthCount": {
+            "type": "integer",
+            "description": "Operational berth reference polygons loaded from data/polygons/src/berths.geojson."
+          },
+          "invalidMmsiExcludedCount": {
+            "type": "integer"
+          },
           "sanctionsMatchCount": {
             "type": "integer",
             "description": "Candidates that match OFAC. Unmatched vessels are still returned."
@@ -583,6 +653,17 @@
           "riskAmberCount": {
             "type": "integer",
             "description": "Candidates with identity riskRating AMBER."
+          },
+          "polygonProvenance": {
+            "type": "object",
+            "description": "Provenance for port/terminal/berth reference geometry (labels only; not legal port limits).",
+            "properties": {
+              "source": { "type": "string" },
+              "role": { "type": "string", "example": "operational_reference" },
+              "validatedLegalPortLimits": { "type": "boolean", "example": false },
+              "designatedAnchorageBoundaries": { "type": "boolean", "example": false },
+              "note": { "type": "string" }
+            }
           },
           "vessels": {
             "type": "array",
@@ -3762,8 +3843,8 @@
         "tags": [
           "mantis"
         ],
-        "summary": "Get heuristic illegal-anchoring candidates.",
-        "description": "v3 heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **parent / watch polygons** from `polygons.py`. EXCLUDE vessels inside any **Excl** carve-out (a hole inside a parent polygon, e.g. Singapore South Anchorage Excl1). Parent polygons such as Singapore East / Western OPL / South are used as watch zones. OFAC labels (`sanctionsMatch`) are attached; keep/drop rules are unchanged. Not a legal determination.\n\n**This Swagger page:** `vessels` is capped at 20 samples.",
+        "summary": "Get suspected illegal-anchoring candidates (heuristic).",
+        "description": "Suspected-anchoring heuristic using stopped/stale **Class-A large vessels** only (AIS `shipType` 70\u201389). KEEP vessels inside the **restricted-limit** polygon and/or **parent / watch polygons** from `polygons.py`. EXCLUDE vessels inside any **Excl** carve-out (a hole inside a parent polygon). Operational port-area footprints may also exclude candidates (anchorage wins). Additive fields name overlapping port/terminal/berth **reference** polygons and report confirmed-stop elapsed time from `tsstop`→`tscurrent` when available. These polygons are **not** verified legal port limits or designated anchorage boundaries. Position and stop duration do **not** prove illegality. OFAC labels (`sanctionsMatch`) are attached; keep/drop rules for Restricted Limit / watch / Excl are unchanged.\n\n**This Swagger page:** `vessels` is capped at 20 samples.",
         "operationId": "getIllegalAnchoring",
         "security": [
           {

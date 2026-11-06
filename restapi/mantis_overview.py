@@ -100,6 +100,7 @@ def _illegal_anchoring_summary(result: dict[str, Any]) -> dict[str, Any]:
         "portAreaExcludedCount": result.get("port_area_excluded_count", 0),
         "invalidMmsiExcludedCount": result.get("invalid_mmsi_excluded_count", 0),
         "portAreaCount": result.get("port_area_count"),
+        "berthCount": result.get("berth_count"),
         "byReason": by_reason,
         "inRestrictedZoneCount": _reason_contains(by_reason, "in_restricted_zone"),
         "inWatchPolygonCount": _reason_contains(by_reason, "in_watch_polygon"),
@@ -109,6 +110,7 @@ def _illegal_anchoring_summary(result: dict[str, Any]) -> dict[str, Any]:
         # Same scope as sanctionsMatchCount: illegal-anchoring candidates in this overview run.
         "riskRedCount": int(result.get("risk_red_count") or 0),
         "riskAmberCount": int(result.get("risk_amber_count") or 0),
+        "polygonProvenance": result.get("polygon_provenance"),
     }
 
 

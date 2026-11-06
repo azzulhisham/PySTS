@@ -1,11 +1,8 @@
-# Deploy: live STS pair distance 30 m → 100 m
+# Suspected-anchoring: harbour context + confirmed-stop elapsed (local prepare)
 
-**Date (UTC):** 2026-11-06  
-**Approver:** Zulhisham  
-**Feature commit:** `3cf553397dec4a41df302a1bb2fc62b4363a196c`  
-**Push:** not performed  
-**Rollback:** not required  
-**Prior prepare report archived as:** [`sts-pair-distance-100m-prepare-2026-11-06.md`](sts-pair-distance-100m-prepare-2026-11-06.md)
+**Date (local):** 2026-11-06  
+**Scope:** Additive API enrichments for `GET /mantis/illegal-anchoring` only. **No** commit, push, deploy, restart, or production DB changes.  
+**Prior `reports/cursor-report.md` archived as:** [`sts-pair-distance-100m-deploy-2026-11-06.md`](sts-pair-distance-100m-deploy-2026-11-06.md)
 
 ---
 
@@ -13,190 +10,170 @@
 
 | Item | Result |
 |------|--------|
-| Commit | `3cf5533` — feature + tests + docs + prepare report |
-| srv-dp detector | **Deployed & restarted** — `MAX_DISTANCE_M=100.0`, `DETECTION_VERSION=2.4-pair-100m` |
-| srv-01 API | **Deployed & restarted** — presentation `MAX_DISTANCE_M=100.0` + swagger |
-| Strict `< 100` | Preserved in both layers |
-| Shadow / sanctions / other services | Untouched |
-| Observation | ≥4 completed detector cycles after restart; no Traceback/timeout/lock errors |
-| Rollback | Not executed |
+| A. Port/terminal/berth context | **Implemented** — additive labels via existing `port_areas` STRtree cache |
+| B. Actual time stopped | **Implemented where evidence exists** — from `tsstop` → `tscurrent` only |
+| Candidate keep/drop | **Unchanged** (Restricted / watch / Excl / port-area exclusion) |
+| Existing payload fields | **Preserved** (including legacy `duration*`, `tsStop`, `rowcount` still selected in SQL) |
+| True first-stationary moment | **Not available** on current row — see pending |
+| PyVAM | Read-only; polygons already identical under PySTS — **no copy needed** |
+| Deploy / commit | **Not done** |
+
+Terminology: this endpoint remains a **suspected / review** heuristic. Position and stop duration do **not** prove illegality.
 
 ---
 
-## 2. Pre-deploy checks
+## 2. Investigation summary
 
-| Check | Result |
-|-------|--------|
-| `git fetch` / `main` vs `origin/main` | In sync before feature commit; no remote scope change |
-| Local tests re-run | **169 passed** (`test_sts_pair_distance_100m` + shadow Rule C + `restapi/tests/`) |
-| Live presentation consumers | Only `/home/srvadmin/py/mantis` (`ais_mantis_api`). Other `sts_detection.py` copies are **backup trees only**. No second live API host for this path. |
-| Shadow Rule C | Separate unit `ais_sts_shadow` — left alone |
+### Geographic context
 
-### Baseline (before restart)
+| Finding | Detail |
+|---------|--------|
+| PySTS polygons | `data/polygons/src/{ports,terminals,berths}.geojson` already present |
+| PyVAM polygons | Same three files under `PyVAM/data/polygons/src/` — **identical SHA-1** |
+| Existing facility | `restapi/port_areas.py` loads/caches once; STRtree point tests; used for port-area **exclusion** and STS harbour labels |
+| Runtime paths | Relative to PySTS (`restapi/` → `../data/polygons/src` or flat deploy beside module). **No** PyVAM imports, symlinks, or absolute runtime paths |
 
-| Host / signal | Value |
-|---------------|-------|
-| srv-dp unit | `ais_vesselproximitydetection` active, PID **1944630** |
-| Live detector file | `/home/srvadmin/sts/vesselproximitydetection.py` — `MAX_DISTANCE_M=30.0`, `DETECTION_VERSION=2.3-tanker-pair-score` |
-| Detector SHA (before) | `3b7a0f450fe04597f07308a3cb60dbd4c6c87051c5377b10937e0fa2c3f0a8b4` |
-| Cycle cadence | ~33–34 s between “System sleep” lines |
-| Last pre-change summary | `Clusters: 73 open/updated, 1 new, 0 closed (87 pair edges, 1799 vessels checked)` |
-| srv-01 unit | `ais_mantis_api` active, PID **1879238** |
-| Live API files | `/home/srvadmin/py/mantis/sts_detection.py` (`MAX_DISTANCE_M=35.0`), `static/swagger.json` (≤35 m text) |
-| API SHA (before) | sts `651ca087…bcb4a`; swagger `1e923899…8348c` |
-| Unauth smoke | `GET /mantis/sts-activities` → **401** |
+Provenance (accurate): these GeoJSON files are **operational reference geometry**. They are **not** verified legal port limits and **must not** be treated as designated anchorage boundaries. Official anchorage-boundary validation and exclusion-policy decisions remain **pending**.
+
+### Stop timing evidence (`ais_vesselmovementactivities`)
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | First low-speed AIS fix that opened the open activity (episode start) |
+| `tsstop` | AIS time when stop was **confirmed** (`rowcount >= 20` and distance `< 30` m) |
+| `tscurrent` | Last AIS fix on the open activity |
+| `rowcount` | Near-stationary update count — **not** minutes |
+
+Reliable beginning of the **confirmed** continuous stop on the current open row: **`tsstop`**.  
+True first moment the hull became stationary (before confirmation) is **not stored**. Inventing it from lookback or from activity `ts` was rejected for the new elapsed fields.
 
 ---
 
-## 3. Feature commit contents
+## 3. What was implemented
+
+### A. Harbour / berth context (additive)
+
+| Change | File |
+|--------|------|
+| `anchorage_wins=` flag on `annotate_harbour_location` | `restapi/port_areas.py` |
+| Label-only annotate after keep/drop (`anchorage_wins=False`) | `restapi/illegal_anchoring.py` |
+| Vessel fields: `inPortArea`, `portAreaName`, `portAreaTerminalName`, `atBerth`, `berthName` | payload |
+| Response: `berthCount`, `polygonProvenance` | `main.py`, overview summary |
+
+Selection still uses `annotate_in_port_area` / `drop_port_area_candidates` with **anchorage wins** for exclusion. Labels may still name overlapping operational port/terminal footprints on kept watch-polygon candidates. Berth is independent. No new DB spatial scans; no per-vessel file reload.
+
+### B. Confirmed-stop elapsed (additive)
+
+| Field | Semantics |
+|-------|-----------|
+| `stopStartedAt` | UTC ISO from `tsstop`, or null |
+| `lastObservedAt` | UTC ISO from `tscurrent` (same instant as `lastSeenAt`) |
+| `stoppedElapsedSeconds` / `stoppedElapsedHours` | `lastObservedAt − stopStartedAt` when known |
+| `stopElapsedStatus` | `known` \| `unknown` |
+| `stopElapsedReason` | Explanation when unknown |
+
+Rules:
+
+- Elapsed from **timestamps only** — never `rowcount` or assumed AIS intervals.
+- End at **`tscurrent`**, not wall clock (stale AIS does not inflate duration).
+- Missing `tsstop`, missing `tscurrent`, or `tscurrent < tsstop` → null elapsed + reason.
+- Does **not** substitute activity `ts` or a lookback window for the new fields.
+- Legacy `durationSeconds` / `durationHours` / `durationLabel` **unchanged** (still may fall back to `ts`).
+
+`ruleVersion` → `v3.3-suspected-anchoring-harbour-context-confirmed-stop-elapsed`.
+
+### Docs / tests
 
 | Path | Role |
 |------|------|
-| `backend/vesselproximitydetection.py` | Gate 100 m + scaled bbox + version `2.4-pair-100m` |
-| `restapi/sts_detection.py` | Presentation recompute 100 m |
-| `restapi/static/swagger.json` | Docs / `maxDistanceM` example 100 |
-| `backend/tests/test_sts_pair_distance_100m.py` | Boundary + non-distance regressions |
-| `backend/mantis-detection.md`, `backend/todo.md` | Docs |
-| `reports/cursor-report.md` (then prepare archive) | Prepare report |
-| `reports/mantis-147-suspected-bunkering-deploy-2026-10-27.md` | Prior report archive |
+| `restapi/static/swagger.json` | Additive vessel + response schema; suspected terminology |
+| `backend/mantis-detection.md` | Factor notes + changelog |
+| `restapi/tests/test_illegal_anchoring_enrichment.py` | New local fixtures |
 
-Message: *Widen live STS pair distance gate from 30 m to 100 m.*
+Untouched: STS 100 m rules, shadow detector, scoring, notifications, sanctions logic, trajectory job.
 
 ---
 
-## 4. Deployed files and backups
+## 4. Test results (actual)
 
-### srv-dp `10.10.20.200`
+```text
+pytest restapi/tests/test_illegal_anchoring_enrichment.py \
+       restapi/tests/test_port_areas.py
+→ 23 passed
 
-| Item | Value |
-|------|-------|
-| Unit | `ais_vesselproximitydetection.service` |
-| Exec path | `/usr/bin/python3 /home/srvadmin/sts/vesselproximitydetection.py` |
-| Deployed file | `/home/srvadmin/sts/vesselproximitydetection.py` |
-| Backup | `/home/srvadmin/sts/backup-20261106-040346/` |
-| Backup SHA (before) | `3b7a0f450fe04597f07308a3cb60dbd4c6c87051c5377b10937e0fa2c3f0a8b4` |
-| Live SHA (after) | `51c9924216b00a1faaadf1e1362bf3a7ad517bd3b0f1fc8d4906899f5965c8e7` (= local commit) |
-| Syntax check | `python3 -m py_compile` on staged file — OK before activation |
-| Restart | **only** `ais_vesselproximitydetection` |
-| PID before → after | **1944630 → 4187395** |
-| Startup log | `Proximity detection started (interval=30s, grace=60s, threshold=100.0m).` |
+pytest …enrichment + test_port_areas + ship_risk phase2–5
+→ 51 passed
 
-### srv-01 `10.10.20.201`
-
-| Item | Value |
-|------|-------|
-| Unit | `ais_mantis_api.service` |
-| WorkingDirectory | `/home/srvadmin/py/mantis` |
-| Deployed files | `sts_detection.py`, `static/swagger.json` |
-| Backup | `/home/srvadmin/py/backup-20261106-040346/` |
-| Backup SHA (before) | sts `651ca087…`; swagger `1e923899…` |
-| Live SHA (after) | sts `05e8aeb62f203b00120b0035e6ed7ab6d422f5aef38be825e83791137977cb99`; swagger `b837e9ba23fc47d220715dd0baf96cf8ac7a41d79c3f3c927889eb36e1d269e3` |
-| `DEPLOYED_COMMIT.txt` | `3cf553397dec4a41df302a1bb2fc62b4363a196c` |
-| Syntax check | `py_compile` + `json.load(swagger)` — OK before activation |
-| Restart | **only** `ais_mantis_api` |
-| PID before → after | **1879238 → 3009449** |
-
-No whole-repo copy onto live folders.
-
----
-
-## 5. Unrelated services (must stay up / untouched)
-
-| Unit | Host | Status after deploy |
-|------|------|---------------------|
-| `ais_sts_shadow` | srv-01 | active, PID **1824023** (unchanged) |
-| `ais_sts_vesselzone` | srv-01 | active, PID **1829224** (unchanged) |
-| `ais_tss_reporting` | srv-01 | active |
-| `pyvam-api` | srv-01 | active |
-| `ais_aton_datapreproc` | srv-01 | active, PID **772689** |
-| `ais_vesselstsreview` | srv-dp | active (not restarted for this change) |
-
----
-
-## 6. Post-deploy observation
-
-### Detector cycles (after 04:04:57 UTC restart)
-
-| Time (UTC) | Log summary |
-|------------|-------------|
-| 04:05:08 | `52 open/updated, 94 new, 0 closed (256 pair edges, 1803 vessels checked)` |
-| 04:05:45 | `146 open/updated, 0 new, 21 closed (256 pair edges, 1802 vessels)` |
-| 04:06:21 | `146 open/updated, 0 new, 0 closed (256 pair edges, 1803 vessels)` |
-| 04:06:58 | `145 open/updated, 0 new, 0 closed (255 pair edges, 1803 vessels)` |
-
-| Metric | Baseline (30 m) | After (100 m) |
-|--------|-----------------|---------------|
-| Pair edges / cycle | **87** | **~255–256** |
-| Vessels checked | ~1799 | ~1802–1803 |
-| Open clusters (steady) | ~74 | ~145–146 |
-| Cycle spacing | ~33–34 s | ~36–37 s |
-| Traceback / timeout / lock | none observed in window | **none** |
-
-First cycle after restart opened many new clusters (expected when the gate widens); subsequent cycles stabilised with similar edge counts and no error spam.
-
-### API smoke
-
-| Check | Result |
-|-------|--------|
-| `GET /mantis/sts-activities` no token | **401** `{"message":"Unauthorized"}` (unchanged) |
-| Swagger STS description | contains **100 m**; old **35 m** text gone |
-| `maxDistanceM` example | **100.0** |
-| API journal Traceback (excl. unauth noise) | none in post-restart window |
-
----
-
-## 7. Proven vs unverified
-
-| Check | Status |
-|-------|--------|
-| Deployed files match commit checksums | **Proven** |
-| Services active; startup `threshold=100.0m` | **Proven** |
-| ≥2 (actually 4) completed detector cycles | **Proven** |
-| Pair-edge volume rise vs baseline | **Proven** (87 → ~256) |
-| No new Traceback/timeout in observed window | **Proven** |
-| Unauth API contract (401) | **Proven** |
-| Swagger distance text | **Proven** |
-| Authenticated STS payload / `maxDistanceM` field live | **Unverified** (no JWT minted per safety rules) |
-| Specific 30–100 m pair end-to-end in UI/API | **Unverified** (would need auth + known pair; startup alone is not proof) |
-| Sustained review false-positive rate / pnav load over hours | **Unverified** — monitor separately |
-
----
-
-## 8. Rollback (available; not executed)
-
-```bash
-# srv-dp
-BK=/home/srvadmin/sts/backup-20261106-040346
-cp -a $BK/code/vesselproximitydetection.py /home/srvadmin/sts/vesselproximitydetection.py
-sudo systemctl restart ais_vesselproximitydetection
-
-# srv-01
-BK=/home/srvadmin/py/backup-20261106-040346
-cp -a $BK/code/sts_detection.py /home/srvadmin/py/mantis/sts_detection.py
-cp -a $BK/static/swagger.json /home/srvadmin/py/mantis/static/swagger.json
-sudo systemctl restart ais_mantis_api
+swagger.json → parses
 ```
 
-Do **not** delete observations created under `2.4-pair-100m`.
-
----
-
-## 9. Remaining risks
-
-| Risk | Note |
-|------|------|
-| Higher pair / open-cluster counts | Observed ~3× pair edges; review queue may grow |
-| Slightly longer cycles | ~36–37 s vs ~33–34 s baseline; still near 30 s loop |
-| Wider false positives | Possible; assess via review reject rate over coming shifts |
-| Authenticated API field check | Still outstanding without token |
-
----
-
-## 10. Decision
-
-| Item | Status |
+| Case | Result |
 |------|--------|
-| Deploy | **Complete** on srv-dp + srv-01 |
-| Rollback | Not needed |
-| Push | Not done (await separate request) |
-| GO for continued observation | **GO** — monitor pair edges, cycle time, review volume |
+| Known elapsed (2.5 h / 3 h) | pass |
+| Unknown without `tsstop` | pass |
+| Stale AIS capped at `tscurrent` | pass |
+| Inconsistent timestamp order | pass |
+| Naive timestamps → UTC | pass |
+| Legacy duration preserved alongside new fields | pass |
+| Outside point → no harbour hit | pass |
+| Westport → port match | pass |
+| Anchorage-wins exclusion vs label-only port name | pass |
+| Excl / port-drop selection unchanged | pass |
+| Empty / invalid geometry safe | pass |
+| Provenance flags false for legal/designated | pass |
+
+---
+
+## 5. Pending (not implemented)
+
+| Item | Why |
+|------|-----|
+| True first-stationary timestamp | Not on the open movement row; needs new persistence or history scan — **out of scope** without approval |
+| Design that would be proposed if required | Smallest option: store `ts_stop_begin` when `rowcount` first increments from a moving state (trajectory write path only); API reads that column. No new tables if column added to existing activity row. **Not built.** |
+| Official anchorage-boundary validation | Explicitly pending product/legal |
+| Changing Excl / Restricted / watch rules | Forbidden this pass |
+| Deriving “designated anchorage” from berth footprints | Forbidden |
+| Frontend display of new fields | **API only** — UI unchanged until a separate frontend task |
+| Commit / deploy | Not requested |
+
+---
+
+## 6. Frontend work required (not done)
+
+API-only. To surface these improvements in the UI, a separate frontend change must:
+
+1. Render `portAreaName` / `portAreaTerminalName` / `berthName` (and flags) on suspected-anchoring cards/map.
+2. Prefer `stoppedElapsedHours` + `stopElapsedStatus` for “time stopped”; show `stopElapsedReason` when unknown; keep legacy `duration*` only if still needed for old clients.
+3. Show `polygonProvenance.note` (or equivalent) so operators do not treat reference polygons as legal limits.
+4. Keep copy as **suspected / review**, not confirmed illegality.
+
+No UI change is claimed from this work.
+
+---
+
+## 7. File-by-file summary
+
+| Path | Change |
+|------|--------|
+| `restapi/port_areas.py` | `anchorage_wins` on harbour annotate |
+| `restapi/illegal_anchoring.py` | Elapsed helper, harbour labels, provenance, rule v3.3 |
+| `restapi/main.py` | Expose `berthCount`, `polygonProvenance` |
+| `restapi/mantis_overview.py` | Same additive summary fields |
+| `restapi/static/swagger.json` | Additive docs only |
+| `backend/mantis-detection.md` | Semantics + changelog |
+| `restapi/tests/test_illegal_anchoring_enrichment.py` | New tests |
+| `data/polygons/src/*` | Already present & matching PyVAM — unchanged |
+
+---
+
+## 8. Safety checklist
+
+| Constraint | Honoured |
+|------------|----------|
+| Local only; no commit/push/deploy/restart | Yes |
+| No pnav stress / no new history scans | Yes |
+| No tables/indexes | Yes |
+| No PyVAM runtime dependency | Yes |
+| STS 100 m / shadow / scoring / notifications untouched | Yes |
+| Existing candidate inclusion/exclusion unchanged | Yes |
+| Existing response fields preserved | Yes |

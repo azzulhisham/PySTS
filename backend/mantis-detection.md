@@ -250,7 +250,22 @@ Same detection rules; cycle cost reduced only:
 ### API keep/drop (product)
 
 Keep Class-A 70–89 whose last position is in Restricted Limit **or** a parent polygon.  
-**Drop** if inside any Excl hole. Singapore East / Western OPL / South are parents, not a blanket exclusion.
+**Drop** if inside any Excl hole. Singapore East / Western OPL / South are parents, not a blanket exclusion.  
+**Also drop** candidates inside operational port-area footprints (`port_areas.py`; anchorage wins). Selection is unchanged by harbour **labels**.
+
+### API additive fields (2026-11-06, local prepare)
+
+| Field | Meaning |
+| --- | --- |
+| `inPortArea` / `portAreaName` / `portAreaTerminalName` | Operational port/terminal **reference** overlap (label only; `data/polygons/src`) |
+| `atBerth` / `berthName` | Operational berth **reference** overlap (not a designated anchorage) |
+| `stopStartedAt` | `tsstop` — when the trajectory job **confirmed** the stop (`rowcount >= 20`, distance `< 30` m) |
+| `lastObservedAt` | `tscurrent` (same instant as `lastSeenAt`) — elapsed never extends past this |
+| `stoppedElapsedHours` / `stoppedElapsedSeconds` | Elapsed **since stop confirmation** (`tsstop`→`tscurrent`) when `stopElapsedStatus=known` — **not** exact total time stationary |
+| `stopElapsedStatus` / `stopElapsedReason` | `unknown` when `tsstop` missing, `tscurrent` missing, or order inconsistent |
+
+**Not available without new persistence:** true first moment the hull became stationary (before confirmation). Activity open `ts` is the low-speed episode start, not a confirmed stop start — do not silently substitute it for `stoppedElapsed*`. Legacy `duration*` fields keep their prior fallback behaviour.  
+Polygon files are operational reference geometry — **not** verified legal port limits; official anchorage-boundary validation remains pending.
 
 ---
 
@@ -794,6 +809,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
+| 2026-11-06 | Suspected-anchoring API (local prepare): additive harbour labels from `data/polygons/src` + confirmed-stop elapsed (`tsstop`→`tscurrent`). Candidate keep/drop unchanged. Not committed/deployed in this step. |
 | 2026-11-06 | Live STS candidate gate and API pair recompute aligned at **100 m** (strict `<`). Was pipeline 30 m / API 35 m. `DETECTION_VERSION` → `2.4-pair-100m`. Deployed to srv-dp (`ais_vesselproximitydetection`) and srv-01 (`ais_mantis_api`); commit `3cf5533`. Movement stop/exit radii and shadow Rule C unchanged. |
 | 2026-10-27 | STS shadow test (rule C): `sts_shadow_detection.py` + `ais_sts_shadow_episode` + `ais_sts_shadow.service` on srv-01. Does not write live proximity tables or change the API. See [STS shadow test](#sts-shadow-test-rule-c). |
 | 2026-10-25 | **ON HOLD** `ais_sts_vesselzone_b` on srv-01 (stop + disable) after deadlocks with `ais_sts_vesselzone` on shared `ais_vesselinrestrictzone`. Class A continues; 46 open Class B rows left open. See [ON HOLD section](#on-hold-ais_sts_vesselzone_b-class-b-restricted-zone-detection). |

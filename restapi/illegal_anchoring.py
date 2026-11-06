@@ -1,5 +1,6 @@
 """
-Illegal anchoring detection (v2) using stop activities + watch polygons.
+Suspected illegal-anchoring candidates (heuristic) using stop activities +
+watch polygons.
 
 Rule:
 - Load stopped / stale Class-A large vessels (shipType 70–89).
@@ -8,8 +9,13 @@ Rule:
     2) a parent / watch polygon from restapi/polygons.py
 - EXCLUDE vessels inside any polygon whose name contains "Excl"
   (carve-outs / holes inside a parent polygon).
+- After keep/drop, drop candidates inside operational port-area footprints
+  (anchorage still wins for that exclusion). Additive harbour labels may still
+  name overlapping port/terminal/berth reference polygons on kept rows.
 
-This is an operational heuristic for map/API study, not a legal determination.
+Position and stop duration do not prove illegality. Port/terminal/berth files
+under data/polygons/src are operational reference geometry, not verified legal
+port limits or designated anchorage boundaries.
 """
 
 from __future__ import annotations
@@ -25,7 +31,11 @@ from duckdb_spatial import spatial_df
 from pg_engine import get_pg_engine
 from ais_identity import clean_ship_name, filter_valid_ship_mmsi_frame
 from polygons import anchorage_areas, is_excl_name, restricted_limit
-from port_areas import annotate_in_port_area, get_port_area_index
+from port_areas import (
+    annotate_harbour_location,
+    annotate_in_port_area,
+    get_port_area_index,
+)
 from sanctions import attach_sanctions, payload_fields, sort_listed_first
 from ship_risk_attach import attach_risk_ratings, risk_counts, risk_payload_fields
 from vessel_size import DIM_SELECT, class_a_join, class_b_join, dimension_fields
@@ -130,19 +140,34 @@ def _fmt_ts(value: Any) -> str | None:
     return str(value)
 
 
+def _as_utc_timestamp(value: Any) -> pd.Timestamp | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        return None
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
 def _duration_from_stop(tsstop: Any, tscurrent: Any, ts: Any) -> dict[str, Any]:
-    """How long the vessel has been considered stopped / stale."""
+    """
+    Legacy duration fields (unchanged semantics).
+
+    Prefers tsstop, else falls back to activity `ts`. Kept for backward
+    compatibility; prefer stoppedElapsed* for confirmed-stop elapsed time.
+    """
     start = tsstop if pd.notna(tsstop) else ts
     end = tscurrent if pd.notna(tscurrent) else None
-    if start is None or end is None or pd.isna(start) or pd.isna(end):
+    start_ts = _as_utc_timestamp(start)
+    end_ts = _as_utc_timestamp(end)
+    if start_ts is None or end_ts is None:
         return {"durationSeconds": None, "durationHours": None, "durationLabel": None}
 
-    start_ts = pd.Timestamp(start)
-    end_ts = pd.Timestamp(end)
-    if start_ts.tzinfo is None:
-        start_ts = start_ts.tz_localize("UTC")
-    if end_ts.tzinfo is None:
-        end_ts = end_ts.tz_localize("UTC")
     sec = max((end_ts - start_ts).total_seconds(), 0.0)
     hours = sec / 3600.0
     h = int(hours)
@@ -152,6 +177,119 @@ def _duration_from_stop(tsstop: Any, tscurrent: Any, ts: Any) -> dict[str, Any]:
         "durationHours": round(hours, 4),
         "durationLabel": f"{h}h {m}m",
     }
+
+
+def confirmed_stop_elapsed(tsstop: Any, tscurrent: Any) -> dict[str, Any]:
+    """
+    Elapsed time since stop *confirmation* on the current open activity row.
+
+    This is NOT exact total time stationary. stopStartedAt is
+    ais_vesselmovementactivities.tsstop — AIS time when the trajectory job
+    first confirmed the stop (rowcount >= 20 and distance < 30 m). It is not
+    the first low-speed fix (`ts`) and must not be invented from a lookback
+    window or from rowcount.
+
+    lastObservedAt is tscurrent — last AIS fix on this open activity. Elapsed
+    time never extends past this instant (stale AIS does not grow with wall
+    clock). Each call uses only the timestamps passed in; a prior closed
+    stop's duration cannot leak into a later reopened stop.
+
+    When tsstop is missing (stale-only candidates), or timestamps are unusable,
+    elapsed fields are null with stopElapsedStatus=unknown.
+    """
+    last_observed = format_last_seen_at(tscurrent)
+    start_ts = _as_utc_timestamp(tsstop)
+    end_ts = _as_utc_timestamp(tscurrent)
+
+    if start_ts is None:
+        return {
+            "stopStartedAt": None,
+            "lastObservedAt": last_observed,
+            "stoppedElapsedSeconds": None,
+            "stoppedElapsedHours": None,
+            "stopElapsedStatus": "unknown",
+            "stopElapsedReason": (
+                "confirmed_stop_start_unavailable: tsstop is null "
+                "(stale AIS candidate or stop not yet confirmed)"
+            ),
+        }
+
+    stop_started = format_last_seen_at(tsstop)
+    if end_ts is None:
+        return {
+            "stopStartedAt": stop_started,
+            "lastObservedAt": None,
+            "stoppedElapsedSeconds": None,
+            "stoppedElapsedHours": None,
+            "stopElapsedStatus": "unknown",
+            "stopElapsedReason": "last_observation_unavailable: tscurrent is null",
+        }
+
+    if end_ts < start_ts:
+        return {
+            "stopStartedAt": stop_started,
+            "lastObservedAt": last_observed,
+            "stoppedElapsedSeconds": None,
+            "stoppedElapsedHours": None,
+            "stopElapsedStatus": "unknown",
+            "stopElapsedReason": "inconsistent_timestamps: tscurrent is before tsstop",
+        }
+
+    sec = (end_ts - start_ts).total_seconds()
+    return {
+        "stopStartedAt": stop_started,
+        "lastObservedAt": last_observed,
+        "stoppedElapsedSeconds": round(sec, 3),
+        "stoppedElapsedHours": round(sec / 3600.0, 4),
+        "stopElapsedStatus": "known",
+        "stopElapsedReason": None,
+    }
+
+
+def _harbour_payload_fields(row: Any) -> dict[str, Any]:
+    def _flag(value: Any) -> bool:
+        if value is None:
+            return False
+        try:
+            if pd.isna(value):
+                return False
+        except (TypeError, ValueError):
+            pass
+        return bool(value)
+
+    def _opt_str(value: Any) -> str | None:
+        if value is None:
+            return None
+        try:
+            if pd.isna(value):
+                return None
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        return text or None
+
+    return {
+        "inPortArea": _flag(row.get("in_port_area")),
+        "portAreaName": _opt_str(row.get("port_area_name")),
+        "portAreaTerminalName": _opt_str(row.get("port_area_terminal_name")),
+        "atBerth": _flag(row.get("at_berth")),
+        "berthName": _opt_str(row.get("berth_name")),
+    }
+
+
+POLYGON_PROVENANCE = {
+    "source": "data/polygons/src/{ports,terminals,berths}.geojson",
+    "role": "operational_reference",
+    "validatedLegalPortLimits": False,
+    "designatedAnchorageBoundaries": False,
+    "note": (
+        "Port, terminal and berth polygons are operational reference geometry "
+        "copied for local MANTIS use. They are not verified legal port limits "
+        "and must not be treated as designated anchorage boundaries. "
+        "Parent/watch, Restricted Limit and Excl-hole rules are unchanged; "
+        "official anchorage-boundary validation remains pending."
+    ),
+}
 
 
 def load_stopped_vessels(engine: Engine | None = None) -> pd.DataFrame:
@@ -300,6 +438,7 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
 
     for _, v in vessels.iterrows():
         duration = _duration_from_stop(v.get("tsstop"), v.get("tscurrent"), v.get("ts"))
+        elapsed = confirmed_stop_elapsed(v.get("tsstop"), v.get("tscurrent"))
         watch_name = v.get("watch_polygon_name")
         if watch_name is not None and pd.isna(watch_name):
             watch_name = None
@@ -324,11 +463,13 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             "durationSeconds": duration["durationSeconds"],
             "durationHours": duration["durationHours"],
             "durationLabel": duration["durationLabel"],
+            **elapsed,
             "inRestrictedZone": bool(v.get("in_restricted")),
             "inWatchPolygon": bool(v.get("in_watch_polygon")),
             "inPortLimit": bool(v.get("in_port_limit")),
             "watchPolygonName": watch_name,
             "portLimitName": port_name,
+            **_harbour_payload_fields(v),
             "reason": v.get("reason"),
             "detectedAt": v.get("detected_at"),
             **dimension_fields(v),
@@ -336,6 +477,31 @@ def vessels_to_payload(vessels: pd.DataFrame) -> list[dict[str, Any]]:
             **risk_payload_fields(v),
         })
     return records
+
+
+def annotate_suspected_anchoring_harbour(candidates: pd.DataFrame) -> pd.DataFrame:
+    """
+    Label-only harbour context on already-selected candidates.
+
+    Does not change keep/drop. Uses anchorage_wins=False so overlapping
+    operational port/terminal names remain visible when a watch polygon
+    also covers the point. Berth names are attached independently.
+    """
+    if candidates.empty:
+        return candidates.assign(
+            in_port_area=pd.Series(dtype=bool),
+            port_area_name=pd.Series(dtype="object"),
+            port_area_terminal_name=pd.Series(dtype="object"),
+            at_berth=pd.Series(dtype=bool),
+            berth_name=pd.Series(dtype="object"),
+        )
+    return annotate_harbour_location(
+        candidates,
+        lon_col="curlongitude",
+        lat_col="curlatitude",
+        include_berths=True,
+        anchorage_wins=False,
+    )
 
 
 def detect_illegal_anchoring(
@@ -352,6 +518,8 @@ def detect_illegal_anchoring(
     illegal, port_area_excluded_count, port_area_excluded_examples = drop_port_area_candidates(
         illegal
     )
+    # Additive labels only — selection already final.
+    illegal = annotate_suspected_anchoring_harbour(illegal)
     illegal = attach_sanctions(illegal, engine)
     illegal = attach_risk_ratings(illegal, engine)
     if not summary_only:
@@ -376,6 +544,7 @@ def detect_illegal_anchoring(
         "port_area_excluded_examples": port_area_excluded_examples,
         "invalid_mmsi_excluded_count": invalid_mmsi_excluded_count,
         "port_area_count": len(port_index.areas),
+        "berth_count": port_index.berths_loaded,
         "sanctions_match_count": sanctions_match_count,
         "risk_red_count": risk["risk_red_count"],
         "risk_amber_count": risk["risk_amber_count"],
@@ -383,7 +552,10 @@ def detect_illegal_anchoring(
         "watch_polygon_count": len(watch),
         "port_limit_polygon_count": len(port),
         "ship_type_filter": "70-89 (cargo/tanker/container Class-A large vessels)",
+        "polygon_provenance": POLYGON_PROVENANCE,
         "vessels": illegal if not summary_only else illegal.iloc[0:0],
         "vessels_payload": [] if summary_only else vessels_to_payload(illegal),
-        "rule_version": "v3.2-in-restricted-or-watch-exclude-excl-holes-port-areas-ofac-label",
+        "rule_version": (
+            "v3.3-suspected-anchoring-harbour-context-confirmed-stop-elapsed"
+        ),
     }

@@ -456,12 +456,19 @@ def annotate_harbour_location(
     lat_col: str,
     index: PortAreaIndex | None = None,
     include_berths: bool = True,
+    anchorage_wins: bool = True,
 ) -> pd.DataFrame:
     """
     Vectorised port (+ optional berth) annotation via STRtree.
 
-    Anchorage wins over port area. Berth is independent (at_berth if inside a
-    berth polygon regardless of anchorage).
+    When anchorage_wins is True (default, exclusion semantics), a point inside
+    both a parent anchorage and a port area is treated as anchorage only
+    (in_port_area=False). Set anchorage_wins=False for label-only context so
+    overlapping operational port/terminal names are still attached.
+
+    Berth is independent (at_berth if inside a berth polygon regardless of
+    anchorage). Port/terminal/berth polygons are operational reference geometry,
+    not verified legal port limits or designated anchorage boundaries.
     """
     out = frame.copy()
     out["in_port_area"] = False
@@ -495,13 +502,15 @@ def annotate_harbour_location(
     port_terms_out: list[Any] = [None] * len(work)
     berth_names_out: list[Any] = [None] * len(work)
 
-    anch_hits = _bulk_within_hits(index.anch_tree, len(index.anch_geoms), pts)
-    in_anch = set(int(i) for i in anch_hits[0].tolist()) if anch_hits.size else set()
+    in_anch: set[int] = set()
+    if anchorage_wins:
+        anch_hits = _bulk_within_hits(index.anch_tree, len(index.anch_geoms), pts)
+        in_anch = set(int(i) for i in anch_hits[0].tolist()) if anch_hits.size else set()
 
     port_hits = _bulk_within_hits(index.port_tree, len(index.port_geoms), pts)
     port_best = _min_port_by_point(port_hits, index.port_names, index.port_terminals)
     for local_i, (pname, tname) in port_best.items():
-        if local_i in in_anch:
+        if anchorage_wins and local_i in in_anch:
             continue
         row_i = int(valid_idx[local_i])
         in_port[row_i] = True

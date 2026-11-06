@@ -562,12 +562,14 @@ def get_illegal_anchoring():
             "portAreaExcludedCount": result["port_area_excluded_count"],
             "invalidMmsiExcludedCount": result["invalid_mmsi_excluded_count"],
             "portAreaCount": result["port_area_count"],
+            "berthCount": result["berth_count"],
             "byReason": result["by_reason"],
             "watchPolygonCount": result["watch_polygon_count"],
             "portLimitPolygonCount": result["port_limit_polygon_count"],
             "sanctionsMatchCount": result["sanctions_match_count"],
             "riskRedCount": result["risk_red_count"],
             "riskAmberCount": result["risk_amber_count"],
+            "polygonProvenance": result["polygon_provenance"],
             "vessels": result["vessels_payload"],
         }
         return jsonify(json_for_client(payload, ["vessels"])), 200
