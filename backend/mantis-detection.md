@@ -809,7 +809,7 @@ Out of scope until a later ask: summing detector flags into a score, auto-settin
 
 | Date | Note |
 | --- | --- |
-| 2026-11-06 | Suspected-anchoring API (local prepare): additive harbour labels from `data/polygons/src` + confirmed-stop elapsed (`tsstop`→`tscurrent`). Candidate keep/drop unchanged. Not committed/deployed in this step. |
+| 2026-11-06 | Suspected-anchoring API: additive harbour labels from `data/polygons/src` + elapsed **since stop confirmation** (`tsstop`→`tscurrent`). Candidate keep/drop unchanged. Deployed to srv-01 `ais_mantis_api` only; commit `32ba658`. |
 | 2026-11-06 | Live STS candidate gate and API pair recompute aligned at **100 m** (strict `<`). Was pipeline 30 m / API 35 m. `DETECTION_VERSION` → `2.4-pair-100m`. Deployed to srv-dp (`ais_vesselproximitydetection`) and srv-01 (`ais_mantis_api`); commit `3cf5533`. Movement stop/exit radii and shadow Rule C unchanged. |
 | 2026-10-27 | STS shadow test (rule C): `sts_shadow_detection.py` + `ais_sts_shadow_episode` + `ais_sts_shadow.service` on srv-01. Does not write live proximity tables or change the API. See [STS shadow test](#sts-shadow-test-rule-c). |
 | 2026-10-25 | **ON HOLD** `ais_sts_vesselzone_b` on srv-01 (stop + disable) after deadlocks with `ais_sts_vesselzone` on shared `ais_vesselinrestrictzone`. Class A continues; 46 open Class B rows left open. See [ON HOLD section](#on-hold-ais_sts_vesselzone_b-class-b-restricted-zone-detection). |

@@ -1,8 +1,11 @@
-# Suspected-anchoring: harbour context + confirmed-stop elapsed (local prepare)
+# Deploy: suspected-anchoring harbour context + confirmed-stop elapsed
 
-**Date (local):** 2026-11-06  
-**Scope:** Additive API enrichments for `GET /mantis/illegal-anchoring` only. **No** commit, push, deploy, restart, or production DB changes.  
-**Prior `reports/cursor-report.md` archived as:** [`sts-pair-distance-100m-deploy-2026-11-06.md`](sts-pair-distance-100m-deploy-2026-11-06.md)
+**Date (UTC):** 2026-11-06  
+**Approver:** Zulhisham  
+**Branch:** `main`  
+**Feature commit:** `32ba658492764f85b748a3c7f8c4a63d639d623f`  
+**Push:** `4e0f6df..32ba658` → `origin/main` (no GitHub Actions / no auto-deploy)  
+**Prior prepare report archived as:** [`suspected-anchoring-enrichment-prepare-2026-11-06.md`](suspected-anchoring-enrichment-prepare-2026-11-06.md)
 
 ---
 
@@ -10,170 +13,164 @@
 
 | Item | Result |
 |------|--------|
-| A. Port/terminal/berth context | **Implemented** — additive labels via existing `port_areas` STRtree cache |
-| B. Actual time stopped | **Implemented where evidence exists** — from `tsstop` → `tscurrent` only |
-| Candidate keep/drop | **Unchanged** (Restricted / watch / Excl / port-area exclusion) |
-| Existing payload fields | **Preserved** (including legacy `duration*`, `tsStop`, `rowcount` still selected in SQL) |
-| True first-stationary moment | **Not available** on current row — see pending |
-| PyVAM | Read-only; polygons already identical under PySTS — **no copy needed** |
-| Deploy / commit | **Not done** |
+| Scope | Additive harbour labels + elapsed **since stop confirmation** only |
+| Host | **srv-01** `10.10.20.201` only |
+| Service restarted | **only** `ais_mantis_api` |
+| srv-dp / detectors | **Not touched** |
+| Rollback | **Not required** |
+| Frontend / legal boundary validation | **Still pending** |
 
-Terminology: this endpoint remains a **suspected / review** heuristic. Position and stop duration do **not** prove illegality.
-
----
-
-## 2. Investigation summary
-
-### Geographic context
-
-| Finding | Detail |
-|---------|--------|
-| PySTS polygons | `data/polygons/src/{ports,terminals,berths}.geojson` already present |
-| PyVAM polygons | Same three files under `PyVAM/data/polygons/src/` — **identical SHA-1** |
-| Existing facility | `restapi/port_areas.py` loads/caches once; STRtree point tests; used for port-area **exclusion** and STS harbour labels |
-| Runtime paths | Relative to PySTS (`restapi/` → `../data/polygons/src` or flat deploy beside module). **No** PyVAM imports, symlinks, or absolute runtime paths |
-
-Provenance (accurate): these GeoJSON files are **operational reference geometry**. They are **not** verified legal port limits and **must not** be treated as designated anchorage boundaries. Official anchorage-boundary validation and exclusion-policy decisions remain **pending**.
-
-### Stop timing evidence (`ais_vesselmovementactivities`)
-
-| Field | Meaning |
-|-------|---------|
-| `ts` | First low-speed AIS fix that opened the open activity (episode start) |
-| `tsstop` | AIS time when stop was **confirmed** (`rowcount >= 20` and distance `< 30` m) |
-| `tscurrent` | Last AIS fix on the open activity |
-| `rowcount` | Near-stationary update count — **not** minutes |
-
-Reliable beginning of the **confirmed** continuous stop on the current open row: **`tsstop`**.  
-True first moment the hull became stationary (before confirmation) is **not stored**. Inventing it from lookback or from activity `ts` was rejected for the new elapsed fields.
+Duration wording: fields are **elapsed since stop confirmation** (`tsstop`→`tscurrent`), capped at last AIS observation — **not** exact total time stationary.
 
 ---
 
-## 3. What was implemented
+## 2. Pre-deploy
 
-### A. Harbour / berth context (additive)
+| Check | Result |
+|-------|--------|
+| `git fetch` | `origin/main` unchanged relative to local tip before push (local was ahead by STS commits + this feature) |
+| Conflicts / unexpected scope | None — enrichment diffs limited to API enrichment files |
+| PySTS polygons | `data/polygons/src/{ports,terminals,berths}.geojson` present; resolve via `_default_poly_dir()` under PySTS — **no PyVAM** |
+| Server polygons | Already at `/home/srvadmin/py/mantis/data/polygons/src/` — SHA-256 **match** local; not recopied |
+| Auto-deploy on push | **None** (no `.github/workflows`) |
 
-| Change | File |
-|--------|------|
-| `anchorage_wins=` flag on `annotate_harbour_location` | `restapi/port_areas.py` |
-| Label-only annotate after keep/drop (`anchorage_wins=False`) | `restapi/illegal_anchoring.py` |
-| Vessel fields: `inPortArea`, `portAreaName`, `portAreaTerminalName`, `atBerth`, `berthName` | payload |
-| Response: `berthCount`, `polygonProvenance` | `main.py`, overview summary |
-
-Selection still uses `annotate_in_port_area` / `drop_port_area_candidates` with **anchorage wins** for exclusion. Labels may still name overlapping operational port/terminal footprints on kept watch-polygon candidates. Berth is independent. No new DB spatial scans; no per-vessel file reload.
-
-### B. Confirmed-stop elapsed (additive)
-
-| Field | Semantics |
-|-------|-----------|
-| `stopStartedAt` | UTC ISO from `tsstop`, or null |
-| `lastObservedAt` | UTC ISO from `tscurrent` (same instant as `lastSeenAt`) |
-| `stoppedElapsedSeconds` / `stoppedElapsedHours` | `lastObservedAt − stopStartedAt` when known |
-| `stopElapsedStatus` | `known` \| `unknown` |
-| `stopElapsedReason` | Explanation when unknown |
-
-Rules:
-
-- Elapsed from **timestamps only** — never `rowcount` or assumed AIS intervals.
-- End at **`tscurrent`**, not wall clock (stale AIS does not inflate duration).
-- Missing `tsstop`, missing `tscurrent`, or `tscurrent < tsstop` → null elapsed + reason.
-- Does **not** substitute activity `ts` or a lookback window for the new fields.
-- Legacy `durationSeconds` / `durationHours` / `durationLabel` **unchanged** (still may fall back to `ts`).
-
-`ruleVersion` → `v3.3-suspected-anchoring-harbour-context-confirmed-stop-elapsed`.
-
-### Docs / tests
-
-| Path | Role |
-|------|------|
-| `restapi/static/swagger.json` | Additive vessel + response schema; suspected terminology |
-| `backend/mantis-detection.md` | Factor notes + changelog |
-| `restapi/tests/test_illegal_anchoring_enrichment.py` | New local fixtures |
-
-Untouched: STS 100 m rules, shadow detector, scoring, notifications, sanctions logic, trajectory job.
-
----
-
-## 4. Test results (actual)
+### Tests (actual)
 
 ```text
 pytest restapi/tests/test_illegal_anchoring_enrichment.py \
-       restapi/tests/test_port_areas.py
-→ 23 passed
-
-pytest …enrichment + test_port_areas + ship_risk phase2–5
-→ 51 passed
-
-swagger.json → parses
+       restapi/tests/test_port_areas.py \
+       restapi/tests/test_ship_risk_phase{2,3,4,5}.py
+→ 54 passed
 ```
+
+Includes new regressions:
 
 | Case | Result |
 |------|--------|
-| Known elapsed (2.5 h / 3 h) | pass |
-| Unknown without `tsstop` | pass |
-| Stale AIS capped at `tscurrent` | pass |
-| Inconsistent timestamp order | pass |
-| Naive timestamps → UTC | pass |
-| Legacy duration preserved alongside new fields | pass |
-| Outside point → no harbour hit | pass |
-| Westport → port match | pass |
-| Anchorage-wins exclusion vs label-only port name | pass |
-| Excl / port-drop selection unchanged | pass |
-| Empty / invalid geometry safe | pass |
-| Provenance flags false for legal/designated | pass |
+| Reopened stop does not inherit prior elapsed | pass |
+| Payload rows isolate short vs long stop | pass |
+| After resumption, null `tsstop` → unknown (not prior hours) | pass |
+| Prior harbour / selection / provenance cases | pass |
 
 ---
 
-## 5. Pending (not implemented)
+## 3. Commit / push evidence
 
-| Item | Why |
-|------|-----|
-| True first-stationary timestamp | Not on the open movement row; needs new persistence or history scan — **out of scope** without approval |
-| Design that would be proposed if required | Smallest option: store `ts_stop_begin` when `rowcount` first increments from a moving state (trajectory write path only); API reads that column. No new tables if column added to existing activity row. **Not built.** |
-| Official anchorage-boundary validation | Explicitly pending product/legal |
-| Changing Excl / Restricted / watch rules | Forbidden this pass |
-| Deriving “designated anchorage” from berth footprints | Forbidden |
-| Frontend display of new fields | **API only** — UI unchanged until a separate frontend task |
-| Commit / deploy | Not requested |
+| Step | Evidence |
+|------|----------|
+| Commit | `32ba658` — *Add suspected-anchoring harbour context and confirmed-stop elapsed.* |
+| Files in commit | `illegal_anchoring.py`, `port_areas.py`, `main.py`, `mantis_overview.py`, `swagger.json`, `test_illegal_anchoring_enrichment.py`, `mantis-detection.md`, prepare report + prior STS deploy archive |
+| Push | `git push origin main` → `4e0f6df..32ba658` |
+| Also pushed (already deployed earlier) | STS 100 m commits `3cf5533`, `ca6c8df` (remote sync only) |
 
 ---
 
-## 6. Frontend work required (not done)
+## 4. Deployed manifest (srv-01)
 
-API-only. To surface these improvements in the UI, a separate frontend change must:
+| Artifact | Live path | Action |
+|----------|-----------|--------|
+| `illegal_anchoring.py` | `/home/srvadmin/py/mantis/illegal_anchoring.py` | replaced |
+| `port_areas.py` | `/home/srvadmin/py/mantis/port_areas.py` | replaced |
+| `main.py` | `/home/srvadmin/py/mantis/main.py` | replaced |
+| `mantis_overview.py` | `/home/srvadmin/py/mantis/mantis_overview.py` | replaced |
+| `static/swagger.json` | `/home/srvadmin/py/mantis/static/swagger.json` | replaced |
+| `ports.geojson` | `…/mantis/data/polygons/src/ports.geojson` | verified match — not recopied |
+| `terminals.geojson` | `…/mantis/data/polygons/src/terminals.geojson` | verified match — not recopied |
+| `berths.geojson` | `…/mantis/data/polygons/src/berths.geojson` | verified match — not recopied |
+| `DEPLOYED_COMMIT.txt` | `/home/srvadmin/py/mantis/DEPLOYED_COMMIT.txt` | `32ba658…` |
 
-1. Render `portAreaName` / `portAreaTerminalName` / `berthName` (and flags) on suspected-anchoring cards/map.
-2. Prefer `stoppedElapsedHours` + `stopElapsedStatus` for “time stopped”; show `stopElapsedReason` when unknown; keep legacy `duration*` only if still needed for old clients.
-3. Show `polygonProvenance.note` (or equivalent) so operators do not treat reference polygons as legal limits.
-4. Keep copy as **suspected / review**, not confirmed illegality.
+WorkingDirectory: `/home/srvadmin/py/mantis` → polygon loader finds `data/polygons/src` beside the API tree.
 
-No UI change is claimed from this work.
+### Checksums (after)
+
+| File | SHA-256 |
+|------|---------|
+| illegal_anchoring.py | `1991a1857c0118949aa39ec780d08088de6efb61d81b34cfef7e5a3129ff8c9f` |
+| port_areas.py | `263e61e80c28ffea663c81bd9324666a0359f252b37159d948b6e0a1fa7a64a5` |
+| main.py | `c184f77f9d41944214da200481f1ed15008a1895c0e296f22a0201d4d27b2169` |
+| mantis_overview.py | `4408b367173d360a6b25b7d2e6eccb09f5c21306f4fd3ff52d69098d7921366c` |
+| swagger.json | `0fead71636fa02be045a2e61c4e5b6286a4318fcce7872e4e48ffedd0347f501` |
+| berths.geojson | `c3c70780d2c70ef9e94ae413bd1aa1121f575cc80789895707e4c6ff2206bf6d` |
+| ports.geojson | `c87490210b472b6b64ecad2ea18c94d4ad290bba6aab30cc37d777ede48ffd48` |
+| terminals.geojson | `ddbbfda0a23b23a4e320c018c28f94e00616208dcdf8f1a623c510b31527e3ed` |
+
+### Backup
+
+| Item | Path |
+|------|------|
+| Backup root | `/home/srvadmin/py/backup-20261106-123811/` |
+| Code | `…/code/{illegal_anchoring,port_areas,main,mantis_overview}.py` |
+| Swagger | `…/static/swagger.json` |
+| Polygon SHA record | `…/polygons/SHA256_LIVE.txt` |
+| Pre-deploy stamp | `PRE_DEPLOY_UTC=2026-11-06T12:38:13Z` |
+
+Syntax: `py_compile` + swagger JSON parse + import check before activation — **OK**.
 
 ---
 
-## 7. File-by-file summary
+## 5. Restart
 
-| Path | Change |
+| Unit | Before PID | After PID |
+|------|------------|-----------|
+| **ais_mantis_api** | 3009449 | **3045481** |
+| ais_sts_shadow | 1824023 | 1824023 (unchanged) |
+| ais_tss_reporting | 2809648 | 2809648 (unchanged) |
+| pyvam-api | 2177790 | 2177790 (unchanged) |
+| ais_tss_analyzer | 840639 | 840639 (unchanged) |
+
+srv-dp: not contacted for this change.
+
+---
+
+## 6. Verification
+
+| Check | Result |
+|-------|--------|
+| Unit active | **active** |
+| Startup | gunicorn listen `:8085`; workers booted |
+| Polygon load | `polygons loaded ports=780 terminals=552 berths=1737; port areas built=923; ports skipped=90` (both workers) |
+| Traceback / CRITICAL in restart window | **none** observed |
+| `GET /mantis/illegal-anchoring` no token | **401** `{"message":"Unauthorized"}` |
+| `GET /mantis/sts-activities` no token | **401** |
+| Swagger additive fields | `stopStartedAt`, `lastObservedAt`, `stoppedElapsedHours`, `stopElapsedStatus`, `inPortArea`, `berthName`, `polygonProvenance`, `berthCount` present |
+| Swagger duration wording | documents **not** exact total time stationary |
+| STS 100 m description still present | **yes** |
+| Authenticated payload field values | **Unverified** (no JWT minted per safety rules) |
+| End-to-end map/UI display | **Unverified** — frontend pending |
+
+---
+
+## 7. Rollback (available; not executed)
+
+```bash
+BK=/home/srvadmin/py/backup-20261106-123811
+cp -a $BK/code/illegal_anchoring.py /home/srvadmin/py/mantis/illegal_anchoring.py
+cp -a $BK/code/port_areas.py /home/srvadmin/py/mantis/port_areas.py
+cp -a $BK/code/main.py /home/srvadmin/py/mantis/main.py
+cp -a $BK/code/mantis_overview.py /home/srvadmin/py/mantis/mantis_overview.py
+cp -a $BK/static/swagger.json /home/srvadmin/py/mantis/static/swagger.json
+sudo systemctl restart ais_mantis_api
+```
+
+---
+
+## 8. Remaining limitations (not completed)
+
+| Item | Status |
 |------|--------|
-| `restapi/port_areas.py` | `anchorage_wins` on harbour annotate |
-| `restapi/illegal_anchoring.py` | Elapsed helper, harbour labels, provenance, rule v3.3 |
-| `restapi/main.py` | Expose `berthCount`, `polygonProvenance` |
-| `restapi/mantis_overview.py` | Same additive summary fields |
-| `restapi/static/swagger.json` | Additive docs only |
-| `backend/mantis-detection.md` | Semantics + changelog |
-| `restapi/tests/test_illegal_anchoring_enrichment.py` | New tests |
-| `data/polygons/src/*` | Already present & matching PyVAM — unchanged |
+| Frontend display of new fields | **Pending** |
+| Official anchorage-boundary validation | **Pending** |
+| Exclusion-policy product decisions | **Pending** |
+| Exact total time stationary | **Not available** without new persistence |
+| Authenticated live payload inspection | **Not done** this session |
 
 ---
 
-## 8. Safety checklist
+## 9. Decision
 
-| Constraint | Honoured |
-|------------|----------|
-| Local only; no commit/push/deploy/restart | Yes |
-| No pnav stress / no new history scans | Yes |
-| No tables/indexes | Yes |
-| No PyVAM runtime dependency | Yes |
-| STS 100 m / shadow / scoring / notifications untouched | Yes |
-| Existing candidate inclusion/exclusion unchanged | Yes |
-| Existing response fields preserved | Yes |
+| Item | Status |
+|------|--------|
+| Deploy | **Complete** on srv-01 `ais_mantis_api` |
+| Push | **Complete** to `origin/main` |
+| Rollback | Not needed |
+| GO for continued API use | **GO** — treat duration as elapsed-since-confirmation; UI work separate |
